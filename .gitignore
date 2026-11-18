@@ -8,3 +8,6 @@
 
 # renderdoc capture file
 *.cap
+
+# Local outputs
+/outputs/
