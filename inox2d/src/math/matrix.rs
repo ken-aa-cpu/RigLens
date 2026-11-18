@@ -21,13 +21,48 @@ impl<T> Matrix2d<T> {
 		self.height
 	}
 
+	pub fn is_transposed(&self) -> bool {
+		self.transposed
+	}
+
 	pub fn get(&self, ix: usize, iy: usize) -> Option<&T> {
 		let (ix, iy) = if self.transposed { (iy, ix) } else { (ix, iy) };
+		if ix >= self.width || iy >= self.height {
+			return None;
+		}
 		self.data.get(iy * self.width + ix)
 	}
 
 	pub fn get_mut(&mut self, ix: usize, iy: usize) -> Option<&mut T> {
+		let (ix, iy) = if self.transposed { (iy, ix) } else { (ix, iy) };
+		if ix >= self.width || iy >= self.height {
+			return None;
+		}
 		self.data.get_mut(iy * self.width + ix)
+	}
+
+	pub fn to_vec_vecs(&self) -> Vec<Vec<T>>
+	where
+		T: Clone,
+	{
+		(0..self.height)
+			.map(|row| self.data[row * self.width..(row + 1) * self.width].to_vec())
+			.collect()
+	}
+
+	pub fn from_grid_transposed(x_len: usize, y_len: usize, mut f: impl FnMut(usize, usize) -> T) -> Self {
+		let mut data = Vec::with_capacity(x_len * y_len);
+		for x in 0..x_len {
+			for y in 0..y_len {
+				data.push(f(x, y));
+			}
+		}
+		Self {
+			width: y_len,
+			height: x_len,
+			transposed: true,
+			data,
+		}
 	}
 }
 

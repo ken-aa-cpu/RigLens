@@ -1,6 +1,7 @@
 pub mod inp;
 mod json;
 mod payload;
+pub mod serialize;
 
 use glam::Vec2;
 

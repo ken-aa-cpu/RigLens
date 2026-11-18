@@ -83,6 +83,21 @@ impl World {
 		column.push(v);
 	}
 
+	pub fn set<T: Component>(&mut self, node: InoxNodeUuid, v: T) {
+		let pair = self
+			.columns
+			.entry(TypeId::of::<T>())
+			.or_insert((AnyVec::new::<T>(), HashMap::new()));
+		// SAFETY: AnyVec in pair must be of type T, enforced by hashing
+		let column = unsafe { pair.0.downcast_mut_unchecked::<T>() };
+		if let Some(&idx) = pair.1.get(&node) {
+			column[idx] = v;
+		} else {
+			pair.1.insert(node, column.len());
+			column.push(v);
+		}
+	}
+
 	pub fn get<T: Component>(&self, node: InoxNodeUuid) -> Option<&T> {
 		let pair = match self.columns.get(&TypeId::of::<T>()) {
 			Some(c) => c,

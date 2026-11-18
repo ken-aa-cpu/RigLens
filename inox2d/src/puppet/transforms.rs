@@ -2,14 +2,14 @@ use crate::node::components::{TransformStore, ZSort};
 
 use super::{InoxNodeTree, Puppet, World};
 
-pub(crate) struct TransformCtx {}
+pub struct TransformCtx {}
 
 impl TransformCtx {
 	/// Give every node a `TransformStore` and a `ZSort` component, if the puppet is going to be rendered/animated
 	pub fn new(puppet: &mut Puppet) -> Self {
 		for node in puppet.nodes.iter() {
-			puppet.node_comps.add(node.uuid, TransformStore::default());
-			puppet.node_comps.add(node.uuid, ZSort::default());
+			puppet.node_comps.set(node.uuid, TransformStore::default());
+			puppet.node_comps.set(node.uuid, ZSort::default());
 		}
 		TransformCtx {}
 	}

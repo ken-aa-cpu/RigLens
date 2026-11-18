@@ -1,0 +1,13 @@
+[package]
+name = "inox2d-mcp"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+description = "Creator rigging engine, headless renderer, CLI, and MCP server for Inochi2D (inox2d)"
+
+[dependencies]
+inox2d = { path = "../inox2d" }
+glam = "0.29"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+json = "0.12.4"
+clap = { version = "4.1", features = ["derive"] }

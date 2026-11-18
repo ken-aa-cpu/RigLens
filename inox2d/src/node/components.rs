@@ -23,17 +23,29 @@ use crate::texture::TextureId;
 /// If has this as a component, the node should composite all children
 ///
 /// Empty as only a marker, zsorted children list constructed later on demand
+#[derive(Clone, Debug)]
 pub struct Composite {}
+
+/* --- MESH GROUP --- */
+
+/// If has this as a component, the node deforms its descendant drawables using its own Mesh.
+#[derive(Clone, Debug)]
+pub struct MeshGroup {
+	pub dynamic: bool,
+	pub translate_children: bool,
+}
 
 /* --- DRAWABLE --- */
 
 /// If has this as a component, the node should render something
+#[derive(Clone, Debug)]
 pub struct Drawable {
 	pub blending: Blending,
 	/// If Some, the node should consider masking when rendering
 	pub masks: Option<Masks>,
 }
 
+#[derive(Clone, Debug)]
 pub struct Blending {
 	pub mode: BlendMode,
 	pub tint: Vec3,
@@ -41,7 +53,7 @@ pub struct Blending {
 	pub opacity: f32,
 }
 
-#[derive(Default, PartialEq, Clone, Copy)]
+#[derive(Default, PartialEq, Clone, Copy, Debug)]
 pub enum BlendMode {
 	/// Normal blending mode.
 	#[default]
@@ -77,6 +89,7 @@ impl BlendMode {
 	];
 }
 
+#[derive(Clone, Debug)]
 pub struct Masks {
 	pub threshold: f32,
 	pub masks: Vec<Mask>,
@@ -94,12 +107,13 @@ impl Masks {
 	}
 }
 
+#[derive(Clone, Debug)]
 pub struct Mask {
 	pub source: InoxNodeUuid,
 	pub mode: MaskMode,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum MaskMode {
 	/// The part should be masked by the drawables specified.
 	Mask,
@@ -110,7 +124,7 @@ pub enum MaskMode {
 /* --- SIMPLE PHYSICS --- */
 
 /// If has this as a component, the node is capable of doing Inochi2D SimplePhysics simulations
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SimplePhysics {
 	pub param: ParamUuid,
 	pub model_type: PhysicsModel,
@@ -120,13 +134,13 @@ pub struct SimplePhysics {
 	pub local_only: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhysicsModel {
 	RigidPendulum,
 	SpringPendulum,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhysicsParamMapMode {
 	AngleLength,
 	LengthAngle,
@@ -134,7 +148,7 @@ pub enum PhysicsParamMapMode {
 	YX,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PhysicsProps {
 	/// Gravity scale (1.0 = puppet gravity)
 	pub gravity: f32,
@@ -178,6 +192,7 @@ pub(crate) struct SpringPendulumCtx {
 /* --- TEXTURED MESH --- */
 
 /// If has this as a component, the node should render a deformed texture
+#[derive(Clone, Debug)]
 pub struct TexturedMesh {
 	pub tex_albedo: TextureId,
 	pub tex_emissive: TextureId,
@@ -187,6 +202,7 @@ pub struct TexturedMesh {
 /* --- MESH --- */
 
 /// A deformable mesh, deforming either textures (TexturedMesh nodes), or children (MeshGroup nodes)
+#[derive(Clone, Debug)]
 pub struct Mesh {
 	/// Vertices in the mesh.
 	pub vertices: Vec<Vec2>,
@@ -237,7 +253,7 @@ pub struct TransformStore {
 /// Component holding zsort values that may be modified across frames.
 // only one value instead of absolute + relative as in TransformStore, cause inheritance of zsort (+) is commutative
 #[derive(Default)]
-pub(crate) struct ZSort(pub f32);
+pub struct ZSort(pub f32);
 
 // so ZSort automatically gets the `.total_cmp()` of `f32`
 impl std::ops::Deref for ZSort {

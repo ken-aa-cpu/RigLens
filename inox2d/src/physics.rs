@@ -10,6 +10,7 @@ use crate::params::ParamUuid;
 use crate::puppet::{InoxNodeTree, Puppet, World};
 
 /// Global physics parameters for the puppet.
+#[derive(Clone, Debug)]
 pub struct PuppetPhysics {
 	pub pixels_per_meter: f32,
 	pub gravity: f32,
@@ -71,8 +72,8 @@ impl PhysicsCtx {
 		for node in puppet.nodes.iter() {
 			if let Some(simple_physics) = puppet.node_comps.get::<SimplePhysics>(node.uuid) {
 				match simple_physics.model_type {
-					PhysicsModel::RigidPendulum => puppet.node_comps.add(node.uuid, RigidPendulumCtx::default()),
-					PhysicsModel::SpringPendulum => puppet.node_comps.add(node.uuid, SpringPendulumCtx::default()),
+					PhysicsModel::RigidPendulum => puppet.node_comps.set(node.uuid, RigidPendulumCtx::default()),
+					PhysicsModel::SpringPendulum => puppet.node_comps.set(node.uuid, SpringPendulumCtx::default()),
 				}
 			}
 		}

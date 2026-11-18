@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use glam::{vec2, vec3, Vec2};
 use json::JsonValue;
 
+use crate::animation::{AnimationLane, Keyframe, PuppetAnimation};
 use crate::math::interp::InterpolateMode;
 use crate::math::matrix::{Matrix2d, Matrix2dFromSliceVecsError};
 use crate::math::transform::TransformOffset;
@@ -306,6 +307,9 @@ impl Puppet {
 		let root_id = node.uuid;
 
 		let mut puppet = Self::new(meta, physics, node, parameters);
+		if let Ok(anims_obj) = obj.get_object("animations") {
+			puppet.animations = deserialize_animations(anims_obj)?;
+		}
 
 		puppet.load_node_data(root_id, ty, data, load_node_data_custom)?;
 		puppet.load_children_rec(root_id, children, load_node_data_custom)?;
@@ -334,6 +338,19 @@ impl Puppet {
 			}
 			"SimplePhysics" => {
 				self.node_comps.add(id, deserialize_simple_physics(data)?);
+			}
+			"MeshGroup" => {
+				let dynamic = data.get_bool("dynamic_deformation").unwrap_or(false);
+				let translate_children = data.get_bool("translate_children").unwrap_or(true);
+				self.node_comps.add(
+					id,
+					MeshGroup {
+						dynamic,
+						translate_children,
+					},
+				);
+				self.node_comps
+					.add(id, vals("mesh", deserialize_mesh(data.get_object("mesh")?))?);
 			}
 			custom => {
 				if let Some(func) = load_node_data_custom {
@@ -537,4 +554,69 @@ fn deserialize_puppet_usage_rights(obj: JsonObject) -> InoxParseResult<PuppetUsa
 		},
 		require_attribution: obj.get_bool("require_attribution")?,
 	})
+}
+
+fn deserialize_animations(obj: JsonObject) -> InoxParseResult<HashMap<String, PuppetAnimation>> {
+	let mut animations = HashMap::new();
+	for (name, val) in obj.0.iter() {
+		let anim_obj = as_object(name, val)?;
+		let timestep = anim_obj.get_f32("timestep").unwrap_or(1.0 / 30.0);
+		let additive = anim_obj.get_bool("additive").unwrap_or(false);
+		let length = anim_obj.get_i32("length").unwrap_or(60);
+		let lead_in = anim_obj.get_i32("leadIn").unwrap_or(0);
+		let lead_out = anim_obj.get_i32("leadOut").unwrap_or(0);
+
+		let mut lanes = Vec::new();
+		if let Ok(lane_vals) = anim_obj.get_list("lanes") {
+			for lane_val in lane_vals {
+				let Ok(lane_obj) = as_object("lane", lane_val) else {
+					continue;
+				};
+				let interpolation = match lane_obj.get_str("interpolation").unwrap_or("Linear") {
+					"Nearest" => InterpolateMode::Nearest,
+					_ => InterpolateMode::Linear,
+				};
+				let uuid = lane_obj
+					.get_u32("uuid")
+					.or_else(|_| lane_obj.get_u32("param_uuid"))
+					.unwrap_or(0);
+				let target = lane_obj.get_u8("target").unwrap_or(0);
+				let merge_mode = lane_obj.get_str("merge_mode").unwrap_or("Additive").to_owned();
+
+				let mut keyframes = Vec::new();
+				if let Ok(kf_vals) = lane_obj.get_list("keyframes") {
+					for kf_val in kf_vals {
+						if let Ok(kf_obj) = as_object("keyframe", kf_val) {
+							keyframes.push(Keyframe {
+								frame: kf_obj.get_i32("frame").unwrap_or(0),
+								value: kf_obj.get_f32("value").unwrap_or(0.0),
+								tension: kf_obj.get_f32("tension").unwrap_or(0.5),
+							});
+						}
+					}
+				}
+				keyframes.sort_by_key(|k| k.frame);
+				lanes.push(AnimationLane {
+					interpolation,
+					param_uuid: ParamUuid(uuid),
+					target,
+					keyframes,
+					merge_mode,
+				});
+			}
+		}
+
+		animations.insert(
+			name.to_owned(),
+			PuppetAnimation {
+				timestep,
+				additive,
+				length,
+				lead_in,
+				lead_out,
+				lanes,
+			},
+		);
+	}
+	Ok(animations)
 }

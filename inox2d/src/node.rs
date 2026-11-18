@@ -3,10 +3,11 @@ pub mod drawables;
 
 use crate::math::transform::TransformOffset;
 
-#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct InoxNodeUuid(pub(crate) u32);
+pub struct InoxNodeUuid(pub u32);
 
+#[derive(Clone, Debug)]
 pub struct InoxNode {
 	pub uuid: InoxNodeUuid,
 	pub name: String,

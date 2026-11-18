@@ -4,8 +4,11 @@ mod vertex_buffers;
 use std::collections::HashSet;
 use std::mem::swap;
 
+use glam::{vec2, vec3, Vec2};
+
+use crate::math::deform::Deform;
 use crate::node::{
-	components::{DeformStack, Mask, Masks, ZSort},
+	components::{DeformSource, DeformStack, Mask, Masks, Mesh, MeshGroup, TransformStore, ZSort},
 	drawables::{CompositeComponents, DrawableKind, TexturedMeshComponents},
 	InoxNodeUuid,
 };
@@ -38,7 +41,7 @@ pub struct RenderCtx {
 	/// All nodes that need respective draw method calls:
 	/// - including standalone parts and composite parents,
 	/// - excluding (TODO: plain mesh masks) and composite children.
-	root_drawables_zsorted: Vec<InoxNodeUuid>,
+	pub root_drawables_zsorted: Vec<InoxNodeUuid>,
 }
 
 impl RenderCtx {
@@ -55,7 +58,24 @@ impl RenderCtx {
 				}
 			});
 		}
-		// TODO: Further fill the set when Meshgroup is implemented.
+
+		let mut meshgroup_children = HashSet::new();
+		for node in nodes.iter() {
+			if comps.get::<MeshGroup>(node.uuid).is_some() {
+				if let Some(mesh) = comps.get::<Mesh>(node.uuid) {
+					if nodes_to_deform.contains(&node.uuid) {
+						comps.set(node.uuid, DeformStack::new(mesh.vertices.len()));
+					}
+				}
+				let mut stack: Vec<InoxNodeUuid> = nodes.get_children(node.uuid).map(|c| c.uuid).collect();
+				while let Some(cid) = stack.pop() {
+					meshgroup_children.insert(cid);
+					for gc in nodes.get_children(cid) {
+						stack.push(gc.uuid);
+					}
+				}
+			}
+		}
 
 		let mut vertex_buffers = VertexBuffers::default();
 
@@ -70,7 +90,7 @@ impl RenderCtx {
 						let (index_offset, vert_offset) = vertex_buffers.push(components.mesh);
 						let (index_len, vert_len) = (components.mesh.indices.len(), components.mesh.vertices.len());
 
-						comps.add(
+						comps.set(
 							node.uuid,
 							TexturedMeshRenderCtx {
 								index_offset,
@@ -80,9 +100,9 @@ impl RenderCtx {
 							},
 						);
 
-						// TexturedMesh not deformed by any source does not need a DeformStack
-						if nodes_to_deform.contains(&node.uuid) {
-							comps.add(node.uuid, DeformStack::new(vert_len));
+						// TexturedMesh deformed by params or an ancestor MeshGroup needs a DeformStack
+						if nodes_to_deform.contains(&node.uuid) || meshgroup_children.contains(&node.uuid) {
+							comps.set(node.uuid, DeformStack::new(vert_len));
 						}
 					}
 					DrawableKind::Composite { .. } => {
@@ -101,7 +121,7 @@ impl RenderCtx {
 						// composite children are excluded from root_drawables_zsorted
 						root_drawables_count -= children_list.len();
 
-						comps.add(
+						comps.set(
 							node.uuid,
 							CompositeRenderCtx {
 								// sort later, before render
@@ -134,6 +154,58 @@ impl RenderCtx {
 
 	/// Update zsort-ordered info and deform buffer content inside self, according to updated puppet.
 	pub(crate) fn update(&mut self, nodes: &InoxNodeTree, comps: &mut World) {
+		// Propagate MeshGroup deformations top-down before combining Part deforms.
+		for node in nodes.pre_order_iter().skip(1) {
+			if comps.get::<MeshGroup>(node.uuid).is_none() {
+				continue;
+			}
+			let Some(mg_mesh) = comps.get::<Mesh>(node.uuid).cloned() else {
+				continue;
+			};
+			let Some(mg_stack) = comps.get::<DeformStack>(node.uuid) else {
+				continue;
+			};
+			let mut mg_deforms = vec![Vec2::ZERO; mg_mesh.vertices.len()];
+			mg_stack.combine(nodes, comps, &mut mg_deforms);
+			if !mg_deforms.iter().any(|d| d.length_squared() > 1e-8) {
+				continue;
+			}
+			let mg_abs = comps.get::<TransformStore>(node.uuid).unwrap().absolute;
+			let mg_inv = mg_abs.inverse();
+
+			let mut stack: Vec<InoxNodeUuid> = nodes.get_children(node.uuid).map(|c| c.uuid).collect();
+			while let Some(cid) = stack.pop() {
+				for gc in nodes.get_children(cid) {
+					stack.push(gc.uuid);
+				}
+				if comps.get::<DeformStack>(cid).is_none() {
+					continue;
+				}
+				let Some(child_mesh) = comps.get::<Mesh>(cid).cloned() else {
+					continue;
+				};
+				let child_abs = comps.get::<TransformStore>(cid).unwrap().absolute;
+				let to_mg = mg_inv * child_abs;
+				let to_child = child_abs.inverse() * mg_abs;
+
+				let child_deforms: Vec<Vec2> = child_mesh
+					.vertices
+					.iter()
+					.map(|&v| {
+						let local = vec3(v.x - child_mesh.origin.x, v.y - child_mesh.origin.y, 0.0);
+						let p_mg = to_mg.transform_point3(local).truncate() + mg_mesh.origin;
+						let d_mg = sample_mesh_deform(&mg_mesh, &mg_deforms, p_mg);
+						to_child.transform_vector3(d_mg.extend(0.0)).truncate()
+					})
+					.collect();
+
+				comps
+					.get_mut::<DeformStack>(cid)
+					.unwrap()
+					.push(DeformSource::Node(node.uuid), Deform::Direct(child_deforms));
+			}
+		}
+
 		let mut root_drawable_uuid_zsort_vec = Vec::<(InoxNodeUuid, f32)>::new();
 
 		// root is definitely not a drawable.
@@ -203,6 +275,50 @@ impl RenderCtx {
 			.zip(root_drawable_uuid_zsort_vec.iter())
 			.for_each(|(old, new)| *old = new.0);
 	}
+}
+
+fn sample_mesh_deform(mesh: &Mesh, deforms: &[Vec2], p: Vec2) -> Vec2 {
+	let mut best_dist = f32::INFINITY;
+	let mut best_deform = Vec2::ZERO;
+
+	for tri in mesh.indices.chunks_exact(3) {
+		let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+		if i0 >= mesh.vertices.len() || i1 >= mesh.vertices.len() || i2 >= mesh.vertices.len() {
+			continue;
+		}
+		let a = mesh.vertices[i0];
+		let b = mesh.vertices[i1];
+		let c = mesh.vertices[i2];
+
+		let v0 = b - a;
+		let v1 = c - a;
+		let v2 = p - a;
+		let denom = v0.x * v1.y - v1.x * v0.y;
+		if denom.abs() < 1e-6 {
+			continue;
+		}
+		let v = (v2.x * v1.y - v1.x * v2.y) / denom;
+		let w = (v0.x * v2.y - v2.x * v0.y) / denom;
+		let u = 1.0 - v - w;
+
+		if u >= -1e-3 && v >= -1e-3 && w >= -1e-3 {
+			return deforms[i0] * u + deforms[i1] * v + deforms[i2] * w;
+		}
+
+		let centroid = (a + b + c) / 3.0;
+		let dist = (p - centroid).length_squared();
+		if dist < best_dist {
+			best_dist = dist;
+			let uc = u.clamp(0.0, 1.0);
+			let vc = v.clamp(0.0, 1.0);
+			let wc = w.clamp(0.0, 1.0);
+			let sum = (uc + vc + wc).max(1e-6);
+			best_deform = (deforms[i0] * uc + deforms[i1] * vc + deforms[i2] * wc) / sum;
+		}
+	}
+
+	let _ = vec2(0.0, 0.0);
+	best_deform
 }
 
 /// Same as the reference Inochi2D implementation, Inox2D also aims for a "bring your own rendering backend" design.

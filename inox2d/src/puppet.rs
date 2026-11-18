@@ -5,34 +5,40 @@ mod world;
 
 use std::collections::HashMap;
 
+use crate::animation::PuppetAnimation;
+use crate::math::transform::TransformOffset;
+use crate::node::components::{TransformStore, ZSort};
 use crate::node::{InoxNode, InoxNodeUuid};
-use crate::params::{Param, ParamCtx};
+use crate::params::{Param, ParamCtx, ParamUuid};
 use crate::physics::{PhysicsCtx, PuppetPhysics};
 use crate::render::RenderCtx;
+use crate::INOCHI2D_SPEC_VERSION;
 
 use meta::PuppetMeta;
-use transforms::TransformCtx;
+pub use transforms::TransformCtx;
 pub use tree::InoxNodeTree;
 pub use world::World;
 
 /// Inochi2D puppet.
 pub struct Puppet {
 	pub meta: PuppetMeta,
-	physics: PuppetPhysics,
+	pub physics: PuppetPhysics,
 	physics_ctx: Option<PhysicsCtx>,
-	pub(crate) nodes: InoxNodeTree,
-	pub(crate) node_comps: World,
+	pub nodes: InoxNodeTree,
+	pub node_comps: World,
 	/// Currently only a marker for if transform/zsort components are initialized.
-	pub(crate) transform_ctx: Option<TransformCtx>,
+	pub transform_ctx: Option<TransformCtx>,
 	/// Context for rendering this puppet. See `.init_rendering()`.
 	pub render_ctx: Option<RenderCtx>,
-	pub(crate) params: HashMap<String, Param>,
+	pub params: HashMap<String, Param>,
 	/// Context for animating puppet with parameters. See `.init_params()`
 	pub param_ctx: Option<ParamCtx>,
+	/// Named animations stored in the puppet.
+	pub animations: HashMap<String, PuppetAnimation>,
 }
 
 impl Puppet {
-	pub(crate) fn new(
+	pub fn new(
 		meta: PuppetMeta,
 		physics: PuppetPhysics,
 		root: InoxNode,
@@ -48,7 +54,91 @@ impl Puppet {
 			render_ctx: None,
 			params,
 			param_ctx: None,
+			animations: HashMap::new(),
 		}
+	}
+
+	/// Create an empty puppet with a Root node and default metadata/physics.
+	pub fn new_empty(name: impl Into<String>) -> Self {
+		let meta = PuppetMeta {
+			name: Some(name.into()),
+			version: INOCHI2D_SPEC_VERSION.to_owned(),
+			rigger: Some("inox2d-mcp".to_owned()),
+			artist: Some("inox2d-mcp".to_owned()),
+			rights: None,
+			copyright: None,
+			license_url: None,
+			contact: None,
+			reference: None,
+			thumbnail_id: None,
+			preserve_pixels: false,
+		};
+		let physics = PuppetPhysics {
+			pixels_per_meter: 1000.0,
+			gravity: 9.8,
+		};
+		let root = InoxNode {
+			uuid: InoxNodeUuid(0),
+			name: "Root".to_owned(),
+			enabled: true,
+			zsort: 0.0,
+			trans_offset: TransformOffset::default(),
+			lock_to_root: false,
+		};
+		Self::new(meta, physics, root, HashMap::new())
+	}
+
+	/// Allocate the next unused node UUID.
+	pub fn next_node_uuid(&self) -> InoxNodeUuid {
+		let max_id = self.nodes.iter().map(|n| n.uuid.0).max().unwrap_or(0);
+		InoxNodeUuid(max_id + 1)
+	}
+
+	/// Allocate the next unused parameter UUID.
+	pub fn next_param_uuid(&self) -> ParamUuid {
+		let max_id = self.params.values().map(|p| p.uuid.0).max().unwrap_or(0);
+		ParamUuid(max_id + 1)
+	}
+
+	/// Add a child node under `parent` and return its UUID.
+	pub fn add_node(&mut self, parent: InoxNodeUuid, node: InoxNode) -> InoxNodeUuid {
+		let id = node.uuid;
+		self.nodes.add(parent, id, node);
+		id
+	}
+
+	/// Clear runtime evaluation contexts so the puppet can be re-initialized after edits.
+	pub fn reset_contexts(&mut self) {
+		self.physics_ctx = None;
+		self.param_ctx = None;
+		self.render_ctx = None;
+		self.transform_ctx = None;
+	}
+
+	/// Initialize all runtime contexts (transforms, rendering, params, physics) idempotently.
+	pub fn init_all(&mut self) {
+		if self.transform_ctx.is_none() {
+			self.init_transforms();
+		}
+		if self.render_ctx.is_none() {
+			self.init_rendering();
+		}
+		if self.param_ctx.is_none() {
+			self.init_params();
+		}
+		if self.physics_ctx.is_none() {
+			self.init_physics();
+		}
+	}
+
+	/// Get evaluated zsort for a node after `end_frame()`.
+	pub fn node_zsort(&self, id: InoxNodeUuid) -> Option<f32> {
+		self.node_comps.get::<ZSort>(id).map(|z| z.0)
+	}
+
+	/// Get evaluated TransformStore for a node after `end_frame()`.
+	pub fn node_transform(&self, id: InoxNodeUuid) -> Option<&TransformStore> {
+		self.node_comps.get::<TransformStore>(id)
 	}
 
 	/// Create a copy of node transform/zsort for modification. Panicks on second call.

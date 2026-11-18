@@ -1,60 +1,104 @@
 <p align="center">
-  <h1 align="center">Inox2D</h1>
+  <h1 align="center">Inox2D + inox2d-mcp</h1>
   <p align="center">
     <img width="200" height="256" src="inox2d_logo.svg">
   </p>
   <div align="center">
 
-Officially supported experimental Rust port of [Inochi2D](https://github.com/Inochi2D/inochi2d).
-    &nbsp;
-    <a align="center" href="https://discord.com/invite/abnxwN6r9v">
-      <img align="center" src="https://img.shields.io/discord/855173611409506334?color=7289DA&label=%20&logo=discord&logoColor=white" alt="Discord" />
-    </a>
+Fork of [Inochi2D/inox2d](https://github.com/Inochi2D/inox2d) (BSD-2-Clause) upgraded with a **read-write Inochi2D Creator core**, **headless CPU renderer**, **layered PSD importer/exporter**, **VTuber auto-rigger**, and **MCP (Model Context Protocol) server** (`inox2d-mcp`) for AI agents.
+
   </div>
 </p>
 
 &nbsp;
 
-The Inox2D workgroup provides support in the **#inox2d** channel on the [Inochi2D Discord][discord-invite].
+## What `inox2d-mcp` Adds on Top of Upstream `Inox2D`
 
-**Currently this library and the specification is in a prototype state**, it is not recommended to use this library in production.
+Upstream `Inochi2D/inox2d` was a read-only runtime prototype. This fork (`ken-aa-cpu/inox2d-mcp`) turns it into an **Agent-native Inochi Creator engine** modeled after the [ArtCraft](https://getartcraft.com/) CLI/MCP architecture:
 
-[discord-invite]: https://discord.com/invite/abnxwN6r9v
+1. **Read-Write `inox2d` Core (`inox2d`)**:
+   - Full `.inp` / JSON serialization (`Puppet::to_json`, `write_inp`) with round-trip fidelity (`TRNSRTS\0`, `TEX_SECT`, `EXT_SECT`).
+   - Completed `MeshGroup` deformation propagation (barycentric transfer from `MeshGroup` meshes to descendant `Part` vertices), `Animations` (`PuppetAnimation` / `AnimationLane` / `Keyframe`), and dynamic `zSort` bindings.
+   - Fixed `ParamCtx::apply` zero-value skipping (`Eye:: Open = 0.0` blinks now evaluate properly) and `Matrix2d::get_mut` transposition.
+2. **Headless Software Renderer & Visual Inspection (`inox2d-mcp`)**:
+   - Implements `inox2d::render::InoxRenderer` on CPU (`render_frame`) with bilinear UV sampling, blend modes, masks, and optional mesh wireframes.
+   - **`render-grid`**: Generates 3×3 parameter sweep contact sheets (e.g., `Head:: Yaw-Pitch`) so multimodal AI agents can visually inspect rigs and self-correct.
+   - **`render-anim`**: Renders multi-frame animation/physics sprite sheets (e.g., `Idle`).
+3. **Auto-Meshing & VTuber Auto-Rigger**:
+   - Subdivided grid (`mesh.auto_grid`) and alpha contour-culled meshing (`mesh.auto_contour`).
+   - High-level parametric rigging operators: 2.5D head yaw/pitch perspective warp (`rig.auto_head_perspective`), eyelid blink (`rig.auto_blink`), mouth open/form (`rig.auto_mouth_form`), head roll (`rig.auto_head_roll`), breathing (`rig.auto_breath`), pendulum hair physics (`physics.add_pendulum`), and semantic one-click auto-rigging (`rig.auto_rig_vtuber`, EN/ZH layer names).
+4. **Native Layered `.psd` Importer/Exporter & `PhotoCraft` Bridge**:
+   - Pure-Rust 8-bit RGBA `.psd` reader & writer (Raw + PackBits RLE, `luni` Unicode layer names, `lsct` folder hierarchy, clipping masks, alpha bounding-box trimming).
+   - Optional integration with `D:\app\PhotoCraft\photocraft-cli.exe` (`photocraft.inspect`, `photocraft.convert`).
 
-&nbsp;
+### Quick Start (`inox2d-mcp`)
 
-## Rigging
+```sh
+# Build & run all tests
+cargo test -p inox2d -p inox2d-mcp -p inox2d-opengl
 
-If you're a model rigger you may want to check out [Inochi Creator](https://github.com/Inochi2D/inochi-creator), the official Inochi2D rigging app in development.  
-This repository is purely for developers and is not useful if you're an end user.
+# Generate a rigged sample VTuber puppet (.inp, opens in official Inochi Creator)
+cargo run -p inox2d-mcp -- new --out sample_vtuber.inp --sample
+
+# Inspect nodes, meshes, parameters, and animations
+cargo run -p inox2d-mcp -- info sample_vtuber.inp
+
+# Render a 3x3 Head Yaw-Pitch contact sheet with mesh wireframes
+cargo run -p inox2d-mcp -- render-grid sample_vtuber.inp --param "Head:: Yaw-Pitch" --out head_grid.png --wireframe
+
+# Render an 8-frame Idle animation sheet
+cargo run -p inox2d-mcp -- render-anim sample_vtuber.inp --out idle_sheet.png --anim Idle --frames 8 --wireframe
+
+# Import a layered PSD and auto-rig it into an .inp puppet
+cargo run -p inox2d-mcp -- import-psd character.psd --out character.inp
+
+# Export an .inp puppet back to a layered PSD
+cargo run -p inox2d-mcp -- export-psd sample_vtuber.inp --out character.psd
+
+# List all engine commands
+cargo run -p inox2d-mcp -- commands
+
+# Run as an MCP server (JSON-RPC 2.0 over stdio)
+cargo run -p inox2d-mcp -- mcp sample_vtuber.inp
+```
+
+### MCP Client Configuration
+
+```json
+{
+  "mcpServers": {
+    "inox2d": {
+      "command": "cargo",
+      "args": ["run", "--quiet", "-p", "inox2d-mcp", "--", "mcp", "--sample"]
+    }
+  }
+}
+```
 
 &nbsp;
 
 ## Status
 
-Both INP and INX files get parsed correctly.
-
-The OpenGL renderer works on all models we could test them on (Aka, Midori, Arch-chan).
-The newer models which use the MeshGroup feature don't work yet though.
-
-Support for mesh groups and animations is on the way!
+Both INP and INX files get parsed **and serialized** (`write_inp`) cleanly.
 
 ### Feature tree
 
-- [x] Parsing
-  - [x] INP format
-  - [x] INX format
+- [x] Parsing & Serialization
+  - [x] INP format (read + write round-trip)
+  - [x] INX / JSON payload (read + write)
+  - [x] Layered `.psd` import & export (`inox2d-mcp`)
 - [x] Rendering
   - [x] OpenGL
     - [x] WASM (WebGL)
-  - [ ] Draw List
+  - [x] Headless CPU Software Renderer + 3×3 / Animation Contact Sheets (`inox2d-mcp`)
 - [x] Parameters
   - [x] Deforms (mesh vertex offsets)
   - [x] Values (node transform offsets)
-  - [ ] Z-sort
-- [x] Physics
-- [ ] Animations
-- [ ] Mesh groups
+  - [x] Z-sort
+- [x] Physics (`SimplePhysics` Rigid & Spring Pendulums)
+- [x] Animations (`PuppetAnimation`, `AnimationLane`, `Keyframe`)
+- [x] Mesh groups (`MeshGroup` barycentric deform propagation)
+- [x] Agent / MCP Server (`inox2d-mcp` CLI, JSON-lines `serve`, JSON-RPC 2.0 `mcp`)
 
 ### INP and INX parsing
 

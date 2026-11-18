@@ -14,6 +14,7 @@ use crate::node::{
 use crate::puppet::{InoxNodeTree, Puppet, World};
 
 /// Parameter binding to a node. This allows to animate a node based on the value of the parameter that owns it.
+#[derive(Debug, Clone)]
 pub struct Binding {
 	pub node: InoxNodeUuid,
 	pub is_set: Matrix2d<bool>,
@@ -58,6 +59,7 @@ fn ranges_out(
 pub struct ParamUuid(pub u32);
 
 /// Parameter. A simple bounded value that is used to animate nodes through bindings.
+#[derive(Debug, Clone)]
 pub struct Param {
 	pub uuid: ParamUuid,
 	pub name: String,
@@ -76,8 +78,15 @@ impl Param {
 	/// End users may repeatedly apply a same parameter for multiple times in between frames,
 	/// but other facilities should be present to make sure this `apply()` is only called once per parameter.
 	pub(crate) fn apply(&self, val: Vec2, nodes: &InoxNodeTree, comps: &mut World) {
+		if self.axis_points.x.is_empty() || self.axis_points.y.is_empty() {
+			return;
+		}
 		let val = val.clamp(self.min, self.max);
-		let val_normed = (val - self.min) / (self.max - self.min);
+		let span = self.max - self.min;
+		let val_normed = vec2(
+			if span.x.abs() > 1e-8 { (val.x - self.min.x) / span.x } else { 0.0 },
+			if span.y.abs() > 1e-8 { (val.y - self.min.y) / span.y } else { 0.0 },
+		);
 
 		// calculate axis point indexes
 		let (x_mindex, x_maxdex) = {
@@ -264,13 +273,17 @@ impl ParamCtx {
 		}
 	}
 
+	/// Get current parameter values.
+	pub fn values(&self) -> &HashMap<String, Vec2> {
+		&self.values
+	}
+
 	/// Modify components as specified by all params. Must be called ONCE per frame.
 	pub(crate) fn apply(&self, params: &HashMap<String, Param>, nodes: &InoxNodeTree, comps: &mut World) {
 		// a correct implementation should not care about the order of `.apply()`
 		for (param_name, val) in self.values.iter() {
-			// TODO: a correct implementation should not fail on param value (0, 0)
-			if *val != Vec2::ZERO {
-				params.get(param_name).unwrap().apply(*val, nodes, comps);
+			if let Some(param) = params.get(param_name) {
+				param.apply(*val, nodes, comps);
 			}
 		}
 	}

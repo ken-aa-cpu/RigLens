@@ -1,5 +1,6 @@
 use std::fmt;
 
+#[derive(Clone, Debug)]
 pub struct PuppetMeta {
 	/// Name of the puppet.
 	pub name: Option<String>,
@@ -83,6 +84,7 @@ impl fmt::Display for PuppetMeta {
 }
 
 /// Terms of usage of the puppet.
+#[derive(Clone, Debug)]
 pub struct PuppetUsageRights {
 	/// Who is allowed to use the puppet?
 	pub allowed_users: PuppetAllowedUsers,
@@ -129,7 +131,7 @@ impl fmt::Display for PuppetUsageRights {
 }
 
 /// Who is allowed to use the puppet?
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PuppetAllowedUsers {
 	/// Only the author(s) are allowed to use the puppet.
 	#[default]
@@ -155,7 +157,7 @@ impl fmt::Display for PuppetAllowedUsers {
 }
 
 /// Can the puppet be redistributed?
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PuppetAllowedRedistribution {
 	/// Redistribution is prohibited
 	#[default]
@@ -185,7 +187,7 @@ impl fmt::Display for PuppetAllowedRedistribution {
 }
 
 /// Can the puppet be modified?
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PuppetAllowedModification {
 	/// Modification is prohibited
 	#[default]

@@ -1,14 +1,13 @@
 use std::io;
 
 use image::{ImageBuffer, ImageError, ImageFormat, Rgba};
-use tracing::error;
 
 use crate::model::ModelTexture;
 
 use simple_tga_reader::{read_tga, TgaDecodeError, TgaImage};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TextureId(pub(crate) usize);
+pub struct TextureId(pub usize);
 
 impl TextureId {
 	pub fn raw(&self) -> usize {
@@ -23,6 +22,10 @@ pub struct ShallowTexture {
 }
 
 impl ShallowTexture {
+	pub fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+		Self { pixels, width, height }
+	}
+
 	pub fn pixels(&self) -> &[u8] {
 		&self.pixels
 	}
