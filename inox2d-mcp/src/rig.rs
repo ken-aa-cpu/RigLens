@@ -1517,22 +1517,15 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 /// Apply a Gaussian soft-brush deform to a Part node's parameter keyframe using either
 /// a semantic anchor (`center`, `left`, `right`, `top`, `bottom`, `top_left`, `top_right`, `bottom_left`, `bottom_right`)
 /// or explicit local `(x, y)` coordinates.
-pub fn apply_deform_brush(
+/// Ensure `param_name` and a `BindingValues::Deform` binding exist for `node_id`,
+/// returning `(binding_idx, ix, iy)` snapped to the closest axis grid keypoint.
+fn ensure_deform_binding_keypoint(
 	puppet: &mut Puppet,
 	node_id: InoxNodeUuid,
 	param_name: &str,
 	param_val: Vec2,
-	anchor: Option<&str>,
-	local_xy: Option<Vec2>,
-	radius_ratio: f32,
-	delta: Vec2,
+	vert_count: usize,
 ) -> Result<(usize, usize, usize), String> {
-	let mesh = puppet
-		.node_comps
-		.get::<Mesh>(node_id)
-		.ok_or_else(|| format!("Node {} does not have a Mesh component", node_id.0))?
-		.clone();
-
 	if !puppet.params.contains_key(param_name) {
 		ensure_param(
 			puppet,
@@ -1582,6 +1575,46 @@ pub fn apply_deform_brush(
 		.map(|(i, _)| i)
 		.unwrap_or(0);
 
+	let x_len = param.axis_points.x.len();
+	let y_len = param.axis_points.y.len();
+	let existing_idx = param
+		.bindings
+		.iter()
+		.position(|b| b.node == node_id && matches!(b.values, BindingValues::Deform(_)));
+
+	if existing_idx.is_none() {
+		let zero_mat = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| vec![Vec2::ZERO; vert_count]);
+		let is_set = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| true);
+		param.bindings.push(Binding {
+			node: node_id,
+			is_set,
+			interpolate_mode: InterpolateMode::Linear,
+			values: BindingValues::Deform(zero_mat),
+		});
+	}
+
+	let b_idx = existing_idx.unwrap_or(param.bindings.len() - 1);
+	Ok((b_idx, ix, iy))
+}
+
+pub fn apply_deform_brush(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	param_name: &str,
+	param_val: Vec2,
+	anchor: Option<&str>,
+	local_xy: Option<Vec2>,
+	radius_ratio: f32,
+	delta: Vec2,
+) -> Result<(usize, usize, usize), String> {
+	let mesh = puppet
+		.node_comps
+		.get::<Mesh>(node_id)
+		.ok_or_else(|| format!("Node {} does not have a Mesh component", node_id.0))?
+		.clone();
+
+	let (b_idx, ix, iy) = ensure_deform_binding_keypoint(puppet, node_id, param_name, param_val, mesh.vertices.len())?;
+
 	let (mn, mx) = mesh_bounds(&mesh);
 	let center = (mn + mx) * 0.5;
 	let size = (mx - mn).max(vec2(4.0, 4.0));
@@ -1604,25 +1637,10 @@ pub fn apply_deform_brush(
 	let radius = (size.length() * radius_ratio.clamp(0.05, 3.0)).max(2.0);
 	let sigma2 = 2.0 * (radius * 0.5).powi(2);
 
-	let x_len = param.axis_points.x.len();
-	let y_len = param.axis_points.y.len();
-	let existing_idx = param
-		.bindings
-		.iter()
-		.position(|b| b.node == node_id && matches!(b.values, BindingValues::Deform(_)));
-
-	if existing_idx.is_none() {
-		let zero_mat = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| vec![Vec2::ZERO; mesh.vertices.len()]);
-		let is_set = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| true);
-		param.bindings.push(Binding {
-			node: node_id,
-			is_set,
-			interpolate_mode: InterpolateMode::Linear,
-			values: BindingValues::Deform(zero_mat),
-		});
-	}
-
-	let b_idx = existing_idx.unwrap_or(param.bindings.len() - 1);
+	let param = puppet
+		.params
+		.get_mut(param_name)
+		.ok_or_else(|| format!("Parameter '{param_name}' missing"))?;
 	let mut affected = 0usize;
 	if let BindingValues::Deform(ref mut mat) = param.bindings[b_idx].values {
 		if let Some(cell) = mat.get_mut(ix, iy) {
@@ -1640,6 +1658,48 @@ pub fn apply_deform_brush(
 	}
 
 	Ok((ix, iy, affected))
+}
+
+/// Apply an exact deform delta `(dx, dy)` (or reset to `0`) to explicitly selected vertex `indices`
+/// at the active keypoint of `param_name`.
+pub fn apply_vertex_deform_delta(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	param_name: &str,
+	param_val: Vec2,
+	indices: &[u32],
+	delta: Vec2,
+	reset: bool,
+) -> Result<(usize, usize, usize), String> {
+	let vert_count = puppet
+		.node_comps
+		.get::<Mesh>(node_id)
+		.ok_or_else(|| format!("Node {} does not have a Mesh component", node_id.0))?
+		.vertices
+		.len();
+
+	let (b_idx, ix, iy) = ensure_deform_binding_keypoint(puppet, node_id, param_name, param_val, vert_count)?;
+	let param = puppet
+		.params
+		.get_mut(param_name)
+		.ok_or_else(|| format!("Parameter '{param_name}' missing"))?;
+
+	let mut updated = 0usize;
+	if let BindingValues::Deform(ref mut mat) = param.bindings[b_idx].values {
+		if let Some(cell) = mat.get_mut(ix, iy) {
+			for &vi in indices {
+				if let Some(slot) = cell.get_mut(vi as usize) {
+					if reset {
+						*slot = Vec2::ZERO;
+					} else {
+						*slot += delta;
+					}
+					updated += 1;
+				}
+			}
+		}
+	}
+	Ok((ix, iy, updated))
 }
 
 /// Bind a 0..1 opacity toggle/slider parameter onto a node (`BindingValues::Opacity`).
@@ -2070,6 +2130,379 @@ fn in_circumcircle_ccw(a: DelaunayPt, b: DelaunayPt, c: DelaunayPt, p: DelaunayP
 	det > 0.0
 }
 
+fn bowyer_watson_tris(pts: &[DelaunayPt], min_scale: f64) -> Vec<[usize; 3]> {
+	let n = pts.len();
+	if n < 3 {
+		return Vec::new();
+	}
+
+	// Perturb predicates infinitesimally (Simulation of Simplicity) so exact circles never degenerate.
+	let mut bw_pts: Vec<DelaunayPt> = pts
+		.iter()
+		.enumerate()
+		.map(|(i, p)| {
+			let jx = (((i.wrapping_mul(2654435761) & 1023) as f64) / 1023.0 - 0.5) * 1e-4;
+			let jy = (((i.wrapping_mul(1597334677) & 1023) as f64) / 1023.0 - 0.5) * 1e-4;
+			DelaunayPt {
+				x: p.x + jx,
+				y: p.y + jy,
+			}
+		})
+		.collect();
+
+	let (mut bx0, mut bx1) = (f64::INFINITY, f64::NEG_INFINITY);
+	let (mut by0, mut by1) = (f64::INFINITY, f64::NEG_INFINITY);
+	for p in &bw_pts {
+		bx0 = bx0.min(p.x);
+		bx1 = bx1.max(p.x);
+		by0 = by0.min(p.y);
+		by1 = by1.max(p.y);
+	}
+	let dmax = (bx1 - bx0).max(by1 - by0).max(min_scale).max(16.0);
+	let mid_x = (bx0 + bx1) * 0.5;
+	let mid_y = (by0 + by1) * 0.5;
+
+	let s0 = DelaunayPt {
+		x: mid_x - 20.0 * dmax,
+		y: mid_y - dmax,
+	};
+	let s1 = DelaunayPt {
+		x: mid_x + 20.0 * dmax,
+		y: mid_y - dmax,
+	};
+	let s2 = DelaunayPt {
+		x: mid_x,
+		y: mid_y + 20.0 * dmax,
+	};
+	bw_pts.push(s0);
+	bw_pts.push(s1);
+	bw_pts.push(s2);
+
+	let mut tris: Vec<[usize; 3]> = if orient2d_f64(bw_pts[n], bw_pts[n + 1], bw_pts[n + 2]) > 0.0 {
+		vec![[n, n + 1, n + 2]]
+	} else {
+		vec![[n, n + 2, n + 1]]
+	};
+
+	for pi in 0..n {
+		let p = bw_pts[pi];
+		let mut edge_counts: HashMap<(usize, usize), (usize, (usize, usize))> = HashMap::new();
+		let mut keep_tris = Vec::with_capacity(tris.len());
+
+		for tri in tris {
+			if in_circumcircle_ccw(bw_pts[tri[0]], bw_pts[tri[1]], bw_pts[tri[2]], p) {
+				let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
+				for (u, v) in edges {
+					let key = (u.min(v), u.max(v));
+					edge_counts
+						.entry(key)
+						.and_modify(|e| e.0 += 1)
+						.or_insert((1usize, (u, v)));
+				}
+			} else {
+				keep_tris.push(tri);
+			}
+		}
+
+		for (_, (count, (u, v))) in edge_counts {
+			if count == 1 {
+				let area = orient2d_f64(bw_pts[u], bw_pts[v], p);
+				if area > 1e-9 {
+					keep_tris.push([u, v, pi]);
+				} else if area < -1e-9 {
+					keep_tris.push([v, u, pi]);
+				}
+			}
+		}
+		tris = keep_tris;
+	}
+
+	tris.into_iter()
+		.filter(|t| t[0] < n && t[1] < n && t[2] < n)
+		.collect()
+}
+
+/// Replace `node_id`'s vertex array with `new_verts`, recompute UVs smoothly from existing
+/// vertex->UV correspondence, retriangulate with Bowyer-Watson Delaunay, and remap all
+/// existing `BindingValues::Deform` keyframes onto the new topology via IDW interpolation.
+pub fn retriangulate_points_preserving_deforms(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	new_verts: Vec<Vec2>,
+) -> Result<(usize, usize), String> {
+	if new_verts.len() < 3 {
+		return Err("Mesh requires at least 3 vertices".to_owned());
+	}
+	let old_mesh = puppet
+		.node_comps
+		.get::<Mesh>(node_id)
+		.ok_or_else(|| format!("Node {} does not have a Mesh component", node_id.0))?
+		.clone();
+	if old_mesh.vertices.is_empty() {
+		return Err("Existing mesh has no vertices".to_owned());
+	}
+
+	// Derive linear fallback UV mapping from existing mesh bbox so added outer vertices map accurately.
+	let (old_min, old_max) = mesh_bounds(&old_mesh);
+	let (mut umin, mut vmin) = (f32::INFINITY, f32::INFINITY);
+	let (mut umax, mut vmax) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+	for &uv in &old_mesh.uvs {
+		umin = umin.min(uv.x);
+		vmin = vmin.min(uv.y);
+		umax = umax.max(uv.x);
+		vmax = vmax.max(uv.y);
+	}
+	let span_v = (old_max - old_min).max(vec2(1.0, 1.0));
+	let span_uv = vec2((umax - umin).max(1e-4), (vmax - vmin).max(1e-4));
+
+	let mut new_uvs = Vec::with_capacity(new_verts.len());
+	for &nv in &new_verts {
+		if let Some((oi, _)) = old_mesh
+			.vertices
+			.iter()
+			.enumerate()
+			.find(|(_, &ov)| (ov - nv).length_squared() < 0.01)
+		{
+			new_uvs.push(*old_mesh.uvs.get(oi).unwrap_or(&vec2(0.5, 0.5)));
+		} else {
+			let tx = ((nv.x - old_min.x) / span_v.x).clamp(-0.2, 1.2);
+			let ty = ((nv.y - old_min.y) / span_v.y).clamp(-0.2, 1.2);
+			new_uvs.push(vec2((umin + tx * span_uv.x).clamp(0.0, 1.0), (vmin + ty * span_uv.y).clamp(0.0, 1.0)));
+		}
+	}
+
+	let pts64: Vec<DelaunayPt> = new_verts
+		.iter()
+		.map(|v| DelaunayPt {
+			x: v.x as f64,
+			y: v.y as f64,
+		})
+		.collect();
+	let raw_tris = bowyer_watson_tris(&pts64, (span_v.x.max(span_v.y)) as f64);
+	let mut indices = Vec::with_capacity(raw_tris.len() * 3);
+	for tri in raw_tris {
+		let area = orient2d_f64(pts64[tri[0]], pts64[tri[1]], pts64[tri[2]]);
+		if area.abs() <= 1e-6 {
+			continue;
+		}
+		if area > 0.0 {
+			indices.extend_from_slice(&[tri[0] as u32, tri[1] as u32, tri[2] as u32]);
+		} else {
+			indices.extend_from_slice(&[tri[0] as u32, tri[2] as u32, tri[1] as u32]);
+		}
+	}
+	if indices.len() < 3 {
+		return Err("Delaunay retriangulation produced no valid triangles (points may be collinear)".to_owned());
+	}
+
+	// Precompute IDW weights from old vertices -> new vertices so deform bindings survive edits.
+	let map_weights: Vec<Vec<(usize, f32)>> = new_verts
+		.iter()
+		.map(|&nv| {
+			let mut dists: Vec<(usize, f32)> = old_mesh
+				.vertices
+				.iter()
+				.enumerate()
+				.map(|(oi, &ov)| (oi, (ov - nv).length_squared()))
+				.collect();
+			dists.sort_by(|a, b| a.1.total_cmp(&b.1));
+			if let Some(&(oi, d2)) = dists.first() {
+				if d2 < 0.01 {
+					return vec![(oi, 1.0)];
+				}
+			}
+			let top: Vec<(usize, f32)> = dists
+				.into_iter()
+				.take(3)
+				.map(|(oi, d2)| (oi, 1.0 / (d2 + 1e-4)))
+				.collect();
+			let sum_w: f32 = top.iter().map(|&(_, w)| w).sum::<f32>().max(1e-6);
+			top.into_iter().map(|(oi, w)| (oi, w / sum_w)).collect()
+		})
+		.collect();
+
+	for param in puppet.params.values_mut() {
+		for binding in &mut param.bindings {
+			if binding.node != node_id {
+				continue;
+			}
+			if let BindingValues::Deform(ref mut mat) = binding.values {
+				let old_mat = mat.clone();
+				let (x_len, y_len) = (old_mat.width(), old_mat.height());
+				let new_mat = Matrix2d::from_grid_transposed(x_len, y_len, |ix, iy| {
+					let old_cell = old_mat.get(ix, iy);
+					map_weights
+						.iter()
+						.map(|weights| {
+							let Some(cell) = old_cell else {
+								return Vec2::ZERO;
+							};
+							let mut acc = Vec2::ZERO;
+							for &(oi, w) in weights {
+								if let Some(&d) = cell.get(oi) {
+									acc += d * w;
+								}
+							}
+							acc
+						})
+						.collect()
+				});
+				*mat = new_mat;
+			}
+		}
+	}
+
+	let vert_count = new_verts.len();
+	let tri_count = indices.len() / 3;
+	puppet.node_comps.set(
+		node_id,
+		Mesh {
+			vertices: new_verts,
+			uvs: new_uvs,
+			indices,
+			origin: old_mesh.origin,
+		},
+	);
+	puppet.reset_contexts();
+	Ok((vert_count, tri_count))
+}
+
+/// Configure an existing `SimplePhysics` pendulum node.
+pub fn configure_pendulum_physics(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	model_type: Option<PhysicsModel>,
+	length: Option<f32>,
+	frequency: Option<f32>,
+	angle_damping: Option<f32>,
+	length_damping: Option<f32>,
+	gravity: Option<f32>,
+	output_scale: Option<Vec2>,
+) -> Result<(), String> {
+	let phys = puppet
+		.node_comps
+		.get_mut::<SimplePhysics>(node_id)
+		.ok_or_else(|| format!("Node {} does not have a SimplePhysics component", node_id.0))?;
+
+	if let Some(mt) = model_type {
+		phys.model_type = mt;
+	}
+	if let Some(l) = length {
+		phys.props.length = l.clamp(5.0, 800.0);
+	}
+	if let Some(f) = frequency {
+		phys.props.frequency = f.clamp(0.1, 20.0);
+	}
+	if let Some(ad) = angle_damping {
+		phys.props.angle_damping = ad.clamp(0.0, 10.0);
+	}
+	if let Some(ld) = length_damping {
+		phys.props.length_damping = ld.clamp(0.0, 10.0);
+	}
+	if let Some(g) = gravity {
+		phys.props.gravity = g.clamp(-5.0, 10.0);
+	}
+	if let Some(os) = output_scale {
+		phys.props.output_scale = os;
+	}
+	puppet.reset_contexts();
+	Ok(())
+}
+
+/// Insert or update a keyframe on `anim_name` for `(param_name, target)` (creating the lane/animation if needed).
+pub fn set_animation_keyframe(
+	puppet: &mut Puppet,
+	anim_name: &str,
+	param_name: &str,
+	target: u8,
+	frame: i32,
+	value: f32,
+	tension: f32,
+	interpolation: Option<InterpolateMode>,
+) -> Result<(), String> {
+	let param_uuid = puppet
+		.params
+		.get(param_name)
+		.map(|p| p.uuid)
+		.ok_or_else(|| format!("Parameter '{param_name}' does not exist"))?;
+
+	let anim = puppet.animations.entry(anim_name.to_owned()).or_insert_with(|| PuppetAnimation {
+		timestep: 1.0 / 30.0,
+		additive: false,
+		length: 120,
+		lead_in: 0,
+		lead_out: 0,
+		lanes: Vec::new(),
+	});
+	let frame = frame.max(0);
+	if frame + 1 > anim.length {
+		anim.length = frame + 1;
+	}
+
+	let lane = if let Some(existing) = anim
+		.lanes
+		.iter_mut()
+		.find(|l| l.param_uuid == param_uuid && l.target == target)
+	{
+		existing
+	} else {
+		anim.lanes.push(AnimationLane {
+			interpolation: interpolation.unwrap_or(InterpolateMode::Linear),
+			param_uuid,
+			target,
+			keyframes: Vec::new(),
+			merge_mode: "Forced".to_owned(),
+		});
+		anim.lanes.last_mut().unwrap()
+	};
+
+	if let Some(mode) = interpolation {
+		lane.interpolation = mode;
+	}
+
+	let kf = Keyframe {
+		frame,
+		value,
+		tension: tension.clamp(0.0, 1.0),
+	};
+	if let Some(pos) = lane.keyframes.iter().position(|k| k.frame == frame) {
+		lane.keyframes[pos] = kf;
+	} else {
+		lane.keyframes.push(kf);
+		lane.keyframes.sort_by_key(|k| k.frame);
+	}
+	Ok(())
+}
+
+/// Remove a keyframe at `frame` from `(anim_name, param_name, target)`. Returns true if removed.
+pub fn remove_animation_keyframe(
+	puppet: &mut Puppet,
+	anim_name: &str,
+	param_name: &str,
+	target: u8,
+	frame: i32,
+) -> Result<bool, String> {
+	let param_uuid = puppet
+		.params
+		.get(param_name)
+		.map(|p| p.uuid)
+		.ok_or_else(|| format!("Parameter '{param_name}' does not exist"))?;
+
+	let Some(anim) = puppet.animations.get_mut(anim_name) else {
+		return Err(format!("Animation '{anim_name}' not found"));
+	};
+	let Some(lane) = anim
+		.lanes
+		.iter_mut()
+		.find(|l| l.param_uuid == param_uuid && l.target == target)
+	else {
+		return Ok(false);
+	};
+	let before = lane.keyframes.len();
+	lane.keyframes.retain(|k| k.frame != frame);
+	Ok(lane.keyframes.len() < before)
+}
+
 /// Generate a true contour-hugging Delaunay triangle mesh using:
 /// 1) 2px separable morphological dilation on the alpha channel,
 /// 2) Poisson-spaced boundary contour sampling (preserving silhouette extremes),
@@ -2277,93 +2710,11 @@ pub fn generate_delaunay_mesh(
 		return generate_contour_mesh(img, width, height, 4, 4, alpha_threshold);
 	}
 
-	// Perturb predicates infinitesimally (Simulation of Simplicity) so exact circles never degenerate.
-	let mut bw_pts: Vec<DelaunayPt> = pts
-		.iter()
-		.enumerate()
-		.map(|(i, p)| {
-			let jx = (((i.wrapping_mul(2654435761) & 1023) as f64) / 1023.0 - 0.5) * 1e-4;
-			let jy = (((i.wrapping_mul(1597334677) & 1023) as f64) / 1023.0 - 0.5) * 1e-4;
-			DelaunayPt {
-				x: p.x + jx,
-				y: p.y + jy,
-			}
-		})
-		.collect();
-
-	let (mut bx0, mut bx1) = (f64::INFINITY, f64::NEG_INFINITY);
-	let (mut by0, mut by1) = (f64::INFINITY, f64::NEG_INFINITY);
-	for p in &bw_pts {
-		bx0 = bx0.min(p.x);
-		bx1 = bx1.max(p.x);
-		by0 = by0.min(p.y);
-		by1 = by1.max(p.y);
-	}
-	let dmax = (bx1 - bx0).max(by1 - by0).max(w64).max(h64).max(16.0);
-	let mid_x = (bx0 + bx1) * 0.5;
-	let mid_y = (by0 + by1) * 0.5;
-
-	let s0 = DelaunayPt {
-		x: mid_x - 20.0 * dmax,
-		y: mid_y - dmax,
-	};
-	let s1 = DelaunayPt {
-		x: mid_x + 20.0 * dmax,
-		y: mid_y - dmax,
-	};
-	let s2 = DelaunayPt {
-		x: mid_x,
-		y: mid_y + 20.0 * dmax,
-	};
-	bw_pts.push(s0);
-	bw_pts.push(s1);
-	bw_pts.push(s2);
-
-	let mut tris: Vec<[usize; 3]> = if orient2d_f64(bw_pts[n], bw_pts[n + 1], bw_pts[n + 2]) > 0.0 {
-		vec![[n, n + 1, n + 2]]
-	} else {
-		vec![[n, n + 2, n + 1]]
-	};
-
-	for pi in 0..n {
-		let p = bw_pts[pi];
-		let mut edge_counts: HashMap<(usize, usize), (usize, (usize, usize))> = HashMap::new();
-		let mut keep_tris = Vec::with_capacity(tris.len());
-
-		for tri in tris {
-			if in_circumcircle_ccw(bw_pts[tri[0]], bw_pts[tri[1]], bw_pts[tri[2]], p) {
-				let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
-				for (u, v) in edges {
-					let key = (u.min(v), u.max(v));
-					edge_counts
-						.entry(key)
-						.and_modify(|e| e.0 += 1)
-						.or_insert((1usize, (u, v)));
-				}
-			} else {
-				keep_tris.push(tri);
-			}
-		}
-
-		for (_, (count, (u, v))) in edge_counts {
-			if count == 1 {
-				let area = orient2d_f64(bw_pts[u], bw_pts[v], p);
-				if area > 1e-9 {
-					keep_tris.push([u, v, pi]);
-				} else if area < -1e-9 {
-					keep_tris.push([v, u, pi]);
-				}
-			}
-		}
-		tris = keep_tris;
-	}
+	let tris = bowyer_watson_tris(&pts, w64.max(h64));
 
 	// Remove super-triangle vertices & cull convex chords spanning empty alpha bays.
 	let mut clean_tris: Vec<[usize; 3]> = Vec::new();
 	for tri in tris {
-		if tri[0] >= n || tri[1] >= n || tri[2] >= n {
-			continue;
-		}
 		let pa = pts[tri[0]];
 		let pb = pts[tri[1]];
 		let pc = pts[tri[2]];

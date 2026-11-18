@@ -370,6 +370,43 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("radius_ratio", json::object! { type: "number" });
 				props.insert("dx", json::object! { type: "number" });
 				props.insert("dy", json::object! { type: "number" });
+			} else if spec.id == "deform.set_vertices" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("kx", json::object! { type: "number" });
+				props.insert("ky", json::object! { type: "number" });
+				props.insert("indices", json::object! { type: "array" });
+				props.insert("dx", json::object! { type: "number" });
+				props.insert("dy", json::object! { type: "number" });
+				props.insert("reset", json::object! { type: "boolean" });
+			} else if spec.id == "mesh.edit_topology" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("action", json::object! { type: "string" });
+				props.insert("vertex_index", json::object! { type: "integer" });
+				props.insert("indices", json::object! { type: "array" });
+				props.insert("x", json::object! { type: "number" });
+				props.insert("y", json::object! { type: "number" });
+				props.insert("dx", json::object! { type: "number" });
+				props.insert("dy", json::object! { type: "number" });
+			} else if spec.id == "physics.configure" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("model_type", json::object! { type: "string" });
+				props.insert("length", json::object! { type: "number" });
+				props.insert("frequency", json::object! { type: "number" });
+				props.insert("angle_damping", json::object! { type: "number" });
+				props.insert("length_damping", json::object! { type: "number" });
+				props.insert("gravity", json::object! { type: "number" });
+			} else if spec.id == "anim.set_keyframe" || spec.id == "anim.remove_keyframe" {
+				props.insert("anim", json::object! { type: "string" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("target", json::object! { type: "integer" });
+				props.insert("frame", json::object! { type: "integer" });
+				props.insert("value", json::object! { type: "number" });
+				props.insert("tension", json::object! { type: "number" });
+				props.insert("interpolation", json::object! { type: "string" });
 			} else if spec.id == "render.diagnostic" {
 				props.insert("out", json::object! { type: "string" });
 				props.insert("width", json::object! { type: "integer" });
@@ -1426,5 +1463,113 @@ mod tests {
 		assert!(card_res["audit_score"].as_u32().is_some());
 		let _ = fs::remove_file(&card_png);
 		let _ = fs::remove_file(&card_svg);
+	}
+
+	#[test]
+	fn manual_vertex_topology_physics_and_keyframe_commands() {
+		use inox2d::node::components::{Mesh, SimplePhysics};
+		use inox2d::params::BindingValues;
+
+		let mut session = Session::new_sample();
+		let face_id = session
+			.model
+			.puppet
+			.nodes
+			.iter()
+			.find(|n| n.name == "Face")
+			.unwrap()
+			.uuid;
+
+		let orig_verts = session
+			.model
+			.puppet
+			.node_comps
+			.get::<Mesh>(face_id)
+			.unwrap()
+			.vertices
+			.len();
+
+		// 1) Move explicit vertices in deform keypoint (kx = 1.0, ky = 0.0)
+		let vres = session
+			.exec(
+				"deform.set_vertices",
+				&json::object! {
+					node_name: "Face",
+					param: "Head:: Yaw-Pitch",
+					kx: 1.0,
+					ky: 0.0,
+					indices: [0, 1],
+					dx: 4.5,
+					dy: -2.0
+				},
+			)
+			.unwrap();
+		assert_eq!(vres["updated_vertices"].as_u32(), Some(2));
+
+		// 2) Insert a vertex via mesh.edit_topology & verify existing Face deform bindings resize & preserve!
+		let ins = session
+			.exec(
+				"mesh.edit_topology",
+				&json::object! { node_name: "Face", action: "insert", x: 5.0, y: 7.0 },
+			)
+			.unwrap();
+		let new_verts = ins["vertices"].as_usize().unwrap();
+		assert_eq!(new_verts, orig_verts + 1);
+
+		let head_param = session.model.puppet.params.get("Head:: Yaw-Pitch").unwrap();
+		let face_binding = head_param
+			.bindings
+			.iter()
+			.find(|b| b.node == face_id && matches!(b.values, BindingValues::Deform(_)))
+			.unwrap();
+		if let BindingValues::Deform(ref mat) = face_binding.values {
+			assert_eq!(mat.get(0, 0).unwrap().len(), new_verts);
+			// Ensure non-zero head perspective binding survived retriangulation
+			assert!(mat.get(2, 1).unwrap().iter().any(|v| v.length() > 0.5));
+		}
+
+		// 3) Remove the inserted vertex cleanly
+		let inserted_idx = ins["inserted_index"].as_u32().unwrap();
+		let rem = session
+			.exec(
+				"mesh.edit_topology",
+				&json::object! { node_name: "Face", action: "remove", indices: [inserted_idx] },
+			)
+			.unwrap();
+		assert_eq!(rem["vertices"].as_usize(), Some(orig_verts));
+
+		// 4) Configure existing SimplePhysics pendulum
+		let phys_id = session
+			.model
+			.puppet
+			.nodes
+			.iter()
+			.find(|n| session.model.puppet.node_comps.get::<SimplePhysics>(n.uuid).is_some())
+			.unwrap()
+			.uuid;
+		session
+			.exec(
+				"physics.configure",
+				&json::object! { node_uuid: phys_id.0, length: 125.0, frequency: 3.2, angle_damping: 0.65 },
+			)
+			.unwrap();
+		let phys = session.model.puppet.node_comps.get::<SimplePhysics>(phys_id).unwrap();
+		assert!((phys.props.length - 125.0).abs() < 0.01);
+		assert!((phys.props.frequency - 3.2).abs() < 0.01);
+
+		// 5) Insert and remove animation keyframe
+		session
+			.exec(
+				"anim.set_keyframe",
+				&json::object! { anim: "Idle", param: "Head:: Roll", target: 0, frame: 45, value: 0.55, tension: 0.8 },
+			)
+			.unwrap();
+		let rm_kf = session
+			.exec(
+				"anim.remove_keyframe",
+				&json::object! { anim: "Idle", param: "Head:: Roll", target: 0, frame: 45 },
+			)
+			.unwrap();
+		assert_eq!(rm_kf["removed"].as_bool(), Some(true));
 	}
 }

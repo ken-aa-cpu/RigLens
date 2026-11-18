@@ -52,16 +52,16 @@ Call `rig_analyze_anatomy` **before** manual tweaks.
    - Attaches missing `Mask` clippings to `Pupil`/`Iris`/`Tongue` nodes.
 3. Re-run `rig_audit` to verify `passed: true` and `score == 100`.
 
-### Stage 5: X-Ray Visual Inspection, Visual Diff & Semantic Soft-Brush Sculpting
+### Stage 5: X-Ray Visual Inspection, Visual Diff & Manual Fine-Tuning
 1. Save a checkpoint (`session_checkpoint`, `{"name": "before_sculpt"}`) before sculpting.
-2. Sculpt local refinements using `deform_brush` with **semantic anchors** (`"center"`, `"left"`, `"right"`, `"top"`, `"bottom"`, `"top_left"`, `"top_right"`, `"bottom_left"`, `"bottom_right"`).
+2. Sculpt local refinements using `deform_brush` with **semantic anchors** (`"center"`, `"left"`, `"right"`, `"top"`, `"bottom"`, `"top_left"`, `"top_right"`, `"bottom_left"`, `"bottom_right"`), or fine-tune exact vertices and topology (`deform_set_vertices`, `mesh_edit_topology` preserving deform bindings via Delaunay, `physics_configure`, `anim_set_keyframe` / `anim_remove_keyframe`).
 3. Verify your exact visual delta using `render_diff` (`checkpoint: "before_sculpt"`, `out: "diff.png"`), which outputs `[Before | After | Pixel Heatmap]` + `changed_pixel_pct`.
 4. Render an X-ray diagnostic image at extreme poses via `render_diagnostic` (`out: "diagnostic.png"`) and a 3×3 parameter sweep via `render_grid` (`param: "Head:: Yaw-Pitch"`, `wireframe: true`, `out: "head_grid.png"`).
-5. Always re-run `rig_audit` after sculpting with `deform_brush`.
+5. Always re-run `rig_audit` after sculpting with `deform_brush` or vertex tools.
 
-### Stage 6: Motion Verification, FigCraft Spec Card, Live OpenGL & Export
+### Stage 6: Motion Verification, FigCraft Spec Card, Craft Native Studio & Export
 1. Render the `Idle` animation + physics motion sheet via `render_anim_sheet` (`anim: "Idle"`, `frames: 8`, `out: "idle_sheet.png"`).
 2. Export a looping animated `.gif` preview via `render_gif` (`anim: "Idle"`, `frames: 24`, `fps: 15`, `out: "preview.gif"`) so humans can review blinking, breathing, and pendulum physics in one click.
 3. Generate a studio FigCraft Rigging Spec Card (`craft_figcraft_card`, `out: "spec_card.png"`, rendered via `FigCraft`) summarizing the transparent puppet preview, mesh/parameter stats, and 6-point audit breakdown.
-4. For human visual review and interactive GUI rigging in the Craft-style native desktop studio, launch `inox2d-mcp mcp --watch live.inp` alongside `cargo run -p inox2d-gui -- live.inp --watch live.inp` (2D XY Parameter Pads, Deform Brush `D`, Pose `P`, Timeline scrubber, `Ctrl+K` Command Palette, 1-click Auto-Fix, or `--screenshot` for visual verification) or `cargo run -p render-opengl live.inp` for GPU preview (`1`–`5` expressions, `B` blink, `M` visemes).
+4. For human visual review and interactive GUI rigging in the Craft-style native desktop studio, launch `inox2d-mcp mcp --watch live.inp` alongside `cargo run -p inox2d-gui -- live.inp --watch live.inp` (`V` Select/Move/Scale, `A` Vertex Subselection & Topology Edit, `D` Deform Brush `[`/`]`, `P` Pose 2.5D, `S` Physics Pendulum Gizmo, Interactive Timeline & Motion Curves Tension editor, 2D XY Pads w/ keypoint snap, `Ctrl+K` Command Palette, or `--screenshot` for visual verification).
 5. Save the final `.inp` model via `puppet_save` (`path: "output.inp"`). The output opens directly in official `Inochi Creator` and `Inochi Session`.

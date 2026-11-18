@@ -79,7 +79,7 @@ cargo run -p inox2d-mcp -- exec sample_vtuber.inp craft.figcraft_card '{\"out\":
 # Export an .inp puppet back to a layered PSD
 cargo run -p inox2d-mcp -- export-psd sample_vtuber.inp --out character.psd
 
-# List all 45 engine commands
+# List all 50 engine commands
 cargo run -p inox2d-mcp -- commands
 
 # Run as an MCP server (JSON-RPC 2.0 over stdio) with live .inp hot-reload watch
@@ -123,7 +123,8 @@ Both INP and INX files get parsed **and serialized** (`write_inp`) cleanly.
 - [x] Physics (`SimplePhysics` Rigid & Spring Pendulums)
 - [x] Animations (`PuppetAnimation`, `AnimationLane`, `Keyframe`)
 - [x] Mesh groups (`MeshGroup` barycentric deform propagation)
-- [x] Agent / MCP Server (`inox2d-mcp` CLI, JSON-lines `serve --watch`, JSON-RPC 2.0 `mcp --watch`, 45 tools)
+- [x] Agent / MCP Server (`inox2d-mcp` CLI, JSON-lines `serve --watch`, JSON-RPC 2.0 `mcp --watch`, 50 tools)
+- [x] Craft-Style Native Studio (`inox2d-gui`: `V` Move/Scale, `A` Vertex/Topology edit + Delaunay deform-preserving retriangulation, `D` Soft Brush, `P` 2.5D Pose, `S` Physics Pendulum Gizmo, Timeline diamonds & Motion Curves graph editor)
 
 ### INP and INX parsing
 

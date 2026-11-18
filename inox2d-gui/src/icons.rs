@@ -7,8 +7,9 @@ use crate::theme::{ACCENT_BLUE, BTN_ACTIVE, TEXT_MUTED};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StudioTool {
 	Select,
-	Pose25D,
+	VertexSubselect,
 	DeformBrush,
+	Pose25D,
 	Delaunay,
 	MeshGroup,
 	Physics,
@@ -17,27 +18,34 @@ pub enum StudioTool {
 }
 
 impl StudioTool {
-	pub fn all() -> &'static [StudioTool] {
+	/// Ordered in 3 ergonomic frequency groups matching AniCraft / Adobe Animate:
+	/// [Direct Stage Manipulation] | [Auto Structure & Physics] | [Stage Navigation]
+	pub fn groups() -> &'static [&'static [StudioTool]] {
 		&[
-			StudioTool::Select,
-			StudioTool::Pose25D,
-			StudioTool::DeformBrush,
-			StudioTool::Delaunay,
-			StudioTool::MeshGroup,
-			StudioTool::Physics,
-			StudioTool::HandPan,
-			StudioTool::ZoomFit,
+			&[
+				StudioTool::Select,
+				StudioTool::VertexSubselect,
+				StudioTool::DeformBrush,
+				StudioTool::Pose25D,
+			],
+			&[
+				StudioTool::Delaunay,
+				StudioTool::MeshGroup,
+				StudioTool::Physics,
+			],
+			&[StudioTool::HandPan, StudioTool::ZoomFit],
 		]
 	}
 
 	pub fn tooltip(self) -> &'static str {
 		match self {
-			StudioTool::Select => "Select / Move Node (V)",
-			StudioTool::Pose25D => "Pose 2.5D Head & Gaze on Stage (P)",
+			StudioTool::Select => "Select / Move / Scale Part (V)",
+			StudioTool::VertexSubselect => "Vertex Subselection & Topology Edit (A)",
 			StudioTool::DeformBrush => "Gaussian Soft Deform Brush (D)",
-			StudioTool::Delaunay => "Delaunay Contour Mesh (M)",
-			StudioTool::MeshGroup => "Wrap in MeshGroup Cage (G)",
-			StudioTool::Physics => "Attach SimplePhysics Pendulum (S)",
+			StudioTool::Pose25D => "Pose 2.5D Head & Gaze on Stage (P)",
+			StudioTool::Delaunay => "Rebuild Delaunay Contour Mesh (M)",
+			StudioTool::MeshGroup => "Wrap Part in MeshGroup Cage (G)",
+			StudioTool::Physics => "Physics Pendulum Gizmo & Tuning (S)",
 			StudioTool::HandPan => "Pan Stage View (H)",
 			StudioTool::ZoomFit => "Reset & Fit Stage Zoom (Z)",
 		}
@@ -76,15 +84,28 @@ pub fn draw_tool_button(ui: &mut Ui, tool: StudioTool, active: bool) -> bool {
 			];
 			painter.add(egui::Shape::convex_polygon(pts, fg, Stroke::NONE));
 		}
+		StudioTool::VertexSubselect => {
+			// Hollow subselection arrow + vertex node square (AniCraft `A` tool)
+			let pts = vec![
+				c + vec2(-5.0, -7.0),
+				c + vec2(-5.0, 5.5),
+				c + vec2(-1.5, 2.5),
+				c + vec2(3.5, 2.0),
+			];
+			painter.add(egui::Shape::closed_line(pts, st));
+			let node_box = Rect::from_center_size(c + vec2(4.0, 5.0), vec2(5.0, 5.0));
+			painter.rect_filled(node_box, 0.5, if active { ACCENT_BLUE } else { Color32::from_rgb(56, 189, 248) });
+			painter.rect_stroke(node_box, 0.5, Stroke::new(1.0_f32, Color32::WHITE));
+		}
+		StudioTool::DeformBrush => {
+			painter.circle_stroke(c, 6.5, st);
+			painter.circle_filled(c, 2.2, fg);
+		}
 		StudioTool::Pose25D => {
 			painter.circle_stroke(c, 6.5, st);
 			painter.line_segment([c - vec2(7.0, 0.0), c + vec2(7.0, 0.0)], Stroke::new(1.1_f32, fg));
 			painter.line_segment([c - vec2(0.0, 7.0), c + vec2(0.0, 7.0)], Stroke::new(1.1_f32, fg));
 			painter.circle_filled(c + vec2(2.0, -1.5), 2.0, ACCENT_BLUE);
-		}
-		StudioTool::DeformBrush => {
-			painter.circle_stroke(c, 6.5, st);
-			painter.circle_filled(c, 2.2, fg);
 		}
 		StudioTool::Delaunay => {
 			let a = c + vec2(0.0, -6.5);
@@ -102,10 +123,11 @@ pub fn draw_tool_button(ui: &mut Ui, tool: StudioTool, active: bool) -> bool {
 			painter.line_segment([pos2(b.left(), b.center().y), pos2(b.right(), b.center().y)], Stroke::new(1.0_f32, fg));
 		}
 		StudioTool::Physics => {
-			let top = c + vec2(0.0, -6.5);
-			let bob = c + vec2(2.0, 4.5);
-			painter.line_segment([top, bob], st);
-			painter.circle_filled(bob, 3.0, fg);
+			let top = c + vec2(-2.0, -6.5);
+			let bob = c + vec2(3.5, 4.5);
+			painter.circle_stroke(top, 2.0, Stroke::new(1.1_f32, fg));
+			painter.line_segment([top + vec2(0.8, 1.8), bob], st);
+			painter.circle_filled(bob, 3.2, fg);
 		}
 		StudioTool::HandPan => {
 			painter.line_segment([c - vec2(6.0, 0.0), c + vec2(6.0, 0.0)], st);

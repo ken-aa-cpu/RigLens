@@ -6,6 +6,7 @@ use std::path::Path;
 use glam::{vec2, vec3, Vec2};
 use image::{Rgba, RgbaImage};
 use inox2d::formats::inp::write_inp;
+use inox2d::math::interp::InterpolateMode;
 use inox2d::math::transform::TransformOffset;
 use inox2d::model::{Model, ModelTexture, VendorData};
 use inox2d::node::components::{
@@ -28,9 +29,10 @@ use crate::psd::{
 use crate::rig::{
 	add_grid_part, add_pendulum_physics, add_standard_vtuber_params, apply_blink_binding, apply_breath_binding,
 	apply_brow_binding, apply_deform_brush, apply_head_perspective_binding, apply_head_roll_binding,
-	apply_mouth_form_binding, apply_mouth_visemes_2d, apply_opacity_binding, auto_rig_vtuber,
-	build_sample_vtuber_model, create_idle_animation, generate_contour_mesh, generate_delaunay_mesh,
-	generate_grid_mesh, synthesize_expression_overlay,
+	apply_mouth_form_binding, apply_mouth_visemes_2d, apply_opacity_binding, apply_vertex_deform_delta,
+	auto_rig_vtuber, build_sample_vtuber_model, configure_pendulum_physics, create_idle_animation,
+	generate_contour_mesh, generate_delaunay_mesh, generate_grid_mesh, remove_animation_keyframe,
+	retriangulate_points_preserving_deforms, set_animation_keyframe, synthesize_expression_overlay,
 };
 
 pub struct CommandSpec {
@@ -162,14 +164,39 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			params_schema: r#"{"node_uuid?":1,"node_name?":"Mouth","param":"Head:: Yaw-Pitch","kx?":1.0,"ky?":0.0,"anchor?":"center","local_xy?":[0.0,0.0],"radius_ratio?":0.45,"dx":4.0,"dy":-2.0}"#,
 		},
 		CommandSpec {
+			id: "deform.set_vertices",
+			description: "Move or reset explicit mesh vertex deform offsets on an active parameter keypoint",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Face","param":"Head:: Yaw-Pitch","kx?":0.0,"ky?":0.0,"indices":[0,1],"dx?":2.0,"dy?":-1.0,"reset?":false}"#,
+		},
+		CommandSpec {
+			id: "mesh.edit_topology",
+			description: "Manually move, insert, or remove rest mesh vertices and retriangulate via Delaunay while preserving Deform bindings",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Face","action":"move|insert|remove","indices?":[0],"x?":0.0,"y?":0.0,"dx?":0.0,"dy?":0.0}"#,
+		},
+		CommandSpec {
 			id: "physics.add_pendulum",
 			description: "Attach a SimplePhysics pendulum driver node targeting a parameter",
 			params_schema: r#"{"name":"Hair_Physics","parent_uuid?":0,"parent_name?":"Head","param":"Hair:: Sway","model_type?":"Pendulum","length?":80.0,"frequency?":2.0,"angle_damping?":0.45,"output_scale?":[1.0,1.0]}"#,
 		},
 		CommandSpec {
+			id: "physics.configure",
+			description: "Modify length, frequency, damping, gravity, model type, or output scale of an existing SimplePhysics node",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Hair_Physics","model_type?":"Pendulum|SpringPendulum","length?":80.0,"frequency?":2.0,"angle_damping?":0.45,"length_damping?":0.5,"gravity?":1.0,"output_scale?":[1.0,1.0]}"#,
+		},
+		CommandSpec {
 			id: "anim.create_idle",
 			description: "Create a 120-frame @ 30fps Idle animation (breath, blinks, head sway)",
 			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "anim.set_keyframe",
+			description: "Insert or update a keyframe (frame, value, tension, interpolation) on an animation lane",
+			params_schema: r#"{"anim?":"Idle","param":"Head:: Roll","target?":0,"frame":30,"value":0.4,"tension?":0.5,"interpolation?":"Linear|Nearest"}"#,
+		},
+		CommandSpec {
+			id: "anim.remove_keyframe",
+			description: "Delete a keyframe at a specific frame from an animation lane",
+			params_schema: r#"{"anim?":"Idle","param":"Head:: Roll","target?":0,"frame":30}"#,
 		},
 		CommandSpec {
 			id: "render.frame",
@@ -1048,6 +1075,213 @@ impl Session {
 					grid_cell: [ix, iy],
 					affected_vertices: affected
 				})
+			}
+			"deform.set_vertices" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let param_name = params["param"].as_str().unwrap_or("Head:: Yaw-Pitch");
+				let kx = params["kx"].as_f32().unwrap_or(0.0);
+				let ky = params["ky"].as_f32().unwrap_or(0.0);
+				let dx = params["dx"].as_f32().unwrap_or(0.0);
+				let dy = params["dy"].as_f32().unwrap_or(0.0);
+				let reset = params["reset"].as_bool().unwrap_or(false);
+				let mut indices = Vec::new();
+				if let JsonValue::Array(arr) = &params["indices"] {
+					for item in arr {
+						if let Some(vi) = item.as_u32() {
+							indices.push(vi);
+						}
+					}
+				}
+				if indices.is_empty() {
+					return Err("Missing non-empty 'indices' array".to_owned());
+				}
+				let (ix, iy, updated) = apply_vertex_deform_delta(
+					&mut self.model.puppet,
+					id,
+					param_name,
+					vec2(kx, ky),
+					&indices,
+					vec2(dx, dy),
+					reset,
+				)?;
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name,
+					grid_cell: [ix, iy],
+					updated_vertices: updated
+				})
+			}
+			"mesh.edit_topology" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let action = params["action"]
+					.as_str()
+					.ok_or_else(|| "Missing 'action' (move|insert|remove)".to_owned())?;
+				let mut verts = self
+					.model
+					.puppet
+					.node_comps
+					.get::<Mesh>(id)
+					.ok_or_else(|| format!("Node {} has no Mesh", id.0))?
+					.vertices
+					.clone();
+
+				let mut inserted_index: Option<usize> = None;
+				match action {
+					"move" => {
+						let dx = params["dx"].as_f32();
+						let dy = params["dy"].as_f32();
+						let abs_x = params["x"].as_f32();
+						let abs_y = params["y"].as_f32();
+						let mut idx_list = Vec::new();
+						if let Some(single) = params["vertex_index"].as_usize() {
+							idx_list.push(single);
+						}
+						if let JsonValue::Array(arr) = &params["indices"] {
+							for item in arr {
+								if let Some(vi) = item.as_usize() {
+									idx_list.push(vi);
+								}
+							}
+						}
+						if idx_list.is_empty() {
+							return Err("Action 'move' requires 'vertex_index' or 'indices'".to_owned());
+						}
+						for vi in idx_list {
+							let Some(v) = verts.get_mut(vi) else {
+								return Err(format!("Vertex index {vi} out of bounds ({})", verts.len()));
+							};
+							if let Some(x) = abs_x {
+								v.x = x;
+							} else if let Some(d) = dx {
+								v.x += d;
+							}
+							if let Some(y) = abs_y {
+								v.y = y;
+							} else if let Some(d) = dy {
+								v.y += d;
+							}
+						}
+					}
+					"insert" => {
+						let x = params["x"].as_f32().ok_or_else(|| "Action 'insert' requires 'x'".to_owned())?;
+						let y = params["y"].as_f32().ok_or_else(|| "Action 'insert' requires 'y'".to_owned())?;
+						let pt = vec2(x, y);
+						if verts.iter().any(|&v| (v - pt).length_squared() < 1.0) {
+							return Err("A vertex already exists within 1px of that coordinate".to_owned());
+						}
+						verts.push(pt);
+						inserted_index = Some(verts.len() - 1);
+					}
+					"remove" => {
+						let mut del = HashSet::new();
+						if let Some(single) = params["vertex_index"].as_usize() {
+							del.insert(single);
+						}
+						if let JsonValue::Array(arr) = &params["indices"] {
+							for item in arr {
+								if let Some(vi) = item.as_usize() {
+									del.insert(vi);
+								}
+							}
+						}
+						let kept: Vec<Vec2> = verts
+							.into_iter()
+							.enumerate()
+							.filter(|(i, _)| !del.contains(i))
+							.map(|(_, v)| v)
+							.collect();
+						if kept.len() < 3 {
+							return Err("Cannot delete vertices: mesh must retain at least 3 vertices".to_owned());
+						}
+						verts = kept;
+					}
+					other => return Err(format!("Unknown topology action '{other}'")),
+				}
+
+				let (vc, tc) = retriangulate_points_preserving_deforms(&mut self.model.puppet, id, verts)?;
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					action: action,
+					inserted_index: inserted_index.map(|i| JsonValue::from(i as u64)).unwrap_or(JsonValue::Null),
+					vertices: vc,
+					triangles: tc
+				})
+			}
+			"physics.configure" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let model_type = params["model_type"].as_str().map(|s| match s {
+					"SpringPendulum" => PhysicsModel::SpringPendulum,
+					_ => PhysicsModel::RigidPendulum,
+				});
+				let output_scale = if let JsonValue::Array(arr) = &params["output_scale"] {
+					Some(vec2(
+						arr.first().and_then(JsonValue::as_f32).unwrap_or(1.0),
+						arr.get(1).and_then(JsonValue::as_f32).unwrap_or(1.0),
+					))
+				} else {
+					None
+				};
+				configure_pendulum_physics(
+					&mut self.model.puppet,
+					id,
+					model_type,
+					params["length"].as_f32(),
+					params["frequency"].as_f32(),
+					params["angle_damping"].as_f32(),
+					params["length_damping"].as_f32(),
+					params["gravity"].as_f32(),
+					output_scale,
+				)?;
+				self.revision += 1;
+				Ok(json::object! { node_uuid: id.0, configured: true })
+			}
+			"anim.set_keyframe" => {
+				let anim_name = params["anim"].as_str().unwrap_or("Idle");
+				let param_name = params["param"]
+					.as_str()
+					.ok_or_else(|| "Missing 'param'".to_owned())?;
+				let target = params["target"].as_u8().unwrap_or(0);
+				let frame = params["frame"]
+					.as_i32()
+					.ok_or_else(|| "Missing 'frame'".to_owned())?;
+				let value = params["value"]
+					.as_f32()
+					.ok_or_else(|| "Missing 'value'".to_owned())?;
+				let tension = params["tension"].as_f32().unwrap_or(0.5);
+				let interpolation = params["interpolation"].as_str().map(|s| match s {
+					"Nearest" | "nearest" => InterpolateMode::Nearest,
+					_ => InterpolateMode::Linear,
+				});
+				set_animation_keyframe(
+					&mut self.model.puppet,
+					anim_name,
+					param_name,
+					target,
+					frame,
+					value,
+					tension,
+					interpolation,
+				)?;
+				self.revision += 1;
+				Ok(json::object! { anim: anim_name, param: param_name, frame: frame, value: value })
+			}
+			"anim.remove_keyframe" => {
+				let anim_name = params["anim"].as_str().unwrap_or("Idle");
+				let param_name = params["param"]
+					.as_str()
+					.ok_or_else(|| "Missing 'param'".to_owned())?;
+				let target = params["target"].as_u8().unwrap_or(0);
+				let frame = params["frame"]
+					.as_i32()
+					.ok_or_else(|| "Missing 'frame'".to_owned())?;
+				let removed = remove_animation_keyframe(&mut self.model.puppet, anim_name, param_name, target, frame)?;
+				if removed {
+					self.revision += 1;
+				}
+				Ok(json::object! { anim: anim_name, param: param_name, frame: frame, removed: removed })
 			}
 			"render.diagnostic" => {
 				let out = params["out"].as_str().unwrap_or("diagnostic.png");
