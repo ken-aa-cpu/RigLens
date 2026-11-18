@@ -131,6 +131,63 @@ fn sample_bilinear(tex: &ShallowTexture, uv: Vec2) -> [f32; 4] {
 	out
 }
 
+/// Separable per-channel blend function (source `s`, destination `d`, both 0..=1).
+fn blend_channel(mode: BlendMode, s: f32, d: f32) -> f32 {
+	let v = match mode {
+		BlendMode::Normal | BlendMode::ClipToLower | BlendMode::SliceFromLower | BlendMode::DestinationIn => s,
+		BlendMode::Multiply => s * d,
+		BlendMode::Screen => 1.0 - (1.0 - s) * (1.0 - d),
+		BlendMode::Overlay => {
+			if d < 0.5 {
+				2.0 * s * d
+			} else {
+				1.0 - 2.0 * (1.0 - s) * (1.0 - d)
+			}
+		}
+		BlendMode::HardLight => {
+			if s < 0.5 {
+				2.0 * s * d
+			} else {
+				1.0 - 2.0 * (1.0 - s) * (1.0 - d)
+			}
+		}
+		BlendMode::SoftLight => {
+			if s <= 0.5 {
+				d - (1.0 - 2.0 * s) * d * (1.0 - d)
+			} else {
+				let g = if d <= 0.25 {
+					((16.0 * d - 12.0) * d + 4.0) * d
+				} else {
+					d.sqrt()
+				};
+				d + (2.0 * s - 1.0) * (g - d)
+			}
+		}
+		BlendMode::Darken => s.min(d),
+		BlendMode::Lighten => s.max(d),
+		BlendMode::ColorDodge => {
+			if s >= 0.999 {
+				1.0
+			} else {
+				d / (1.0 - s)
+			}
+		}
+		BlendMode::LinearDodge | BlendMode::AddGlow => s + d,
+		BlendMode::ColorBurn => {
+			if s <= 0.001 {
+				0.0
+			} else {
+				1.0 - (1.0 - d) / s
+			}
+		}
+		BlendMode::Difference => (s - d).abs(),
+		BlendMode::Exclusion => s + d - 2.0 * s * d,
+		BlendMode::Subtract => d - s,
+		BlendMode::Inverse => 1.0 - d,
+	};
+	v.clamp(0.0, 1.0)
+}
+
 fn blend_pixel(dst: &mut [u8; 4], src: [f32; 4], mode: BlendMode) {
 	let sa = src[3].clamp(0.0, 1.0);
 	if sa <= 0.001 {
@@ -141,21 +198,9 @@ fn blend_pixel(dst: &mut [u8; 4], src: [f32; 4], mode: BlendMode) {
 	let db = dst[2] as f32 / 255.0;
 	let da = dst[3] as f32 / 255.0;
 
-	let (sr, sg, sb) = match mode {
-		BlendMode::Normal | BlendMode::ClipToLower | BlendMode::SliceFromLower => (src[0], src[1], src[2]),
-		BlendMode::Multiply => (src[0] * dr, src[1] * dg, src[2] * db),
-		BlendMode::Screen => (
-			1.0 - (1.0 - src[0]) * (1.0 - dr),
-			1.0 - (1.0 - src[1]) * (1.0 - dg),
-			1.0 - (1.0 - src[2]) * (1.0 - db),
-		),
-		BlendMode::LinearDodge => ((src[0] + dr).min(1.0), (src[1] + dg).min(1.0), (src[2] + db).min(1.0)),
-		BlendMode::ColorDodge => (
-			if src[0] >= 0.999 { 1.0 } else { (dr / (1.0 - src[0])).min(1.0) },
-			if src[1] >= 0.999 { 1.0 } else { (dg / (1.0 - src[1])).min(1.0) },
-			if src[2] >= 0.999 { 1.0 } else { (db / (1.0 - src[2])).min(1.0) },
-		),
-	};
+	let sr = blend_channel(mode, src[0], dr);
+	let sg = blend_channel(mode, src[1], dg);
+	let sb = blend_channel(mode, src[2], db);
 
 	let out_a = sa + da * (1.0 - sa);
 	if out_a <= 1e-6 {

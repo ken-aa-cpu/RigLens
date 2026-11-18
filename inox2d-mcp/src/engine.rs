@@ -1688,7 +1688,8 @@ impl Session {
 			node_count: nodes.len(),
 			nodes: nodes,
 			params: params_json,
-			animations: anim_names
+			animations: anim_names,
+			warnings: self.model.puppet.diagnostics.clone()
 		}
 	}
 }

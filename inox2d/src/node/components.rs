@@ -18,6 +18,22 @@ use crate::physics::{
 };
 use crate::texture::TextureId;
 
+/* --- RAW (UNKNOWN) NODE --- */
+
+/// Preserves a node whose `type` this crate does not understand (e.g. nijilive's
+/// `GridDeformer`, `PathDeformer`, `AnimatedPart`, `DynamicComposite`, `Driver`).
+///
+/// The original type name and all type-specific JSON fields are kept verbatim so
+/// that saving the puppet again does not destroy data written by other tools.
+/// The node is otherwise treated as a plain transform node.
+#[derive(Clone, Debug)]
+pub struct RawNodeData {
+	pub type_name: String,
+	/// Type-specific fields only. Common fields (`uuid`, `name`, `type`, `enabled`,
+	/// `zsort`, `transform`, `lockToRoot`, `children`) are handled by the node itself.
+	pub fields: json::object::Object,
+}
+
 /* --- COMPOSITE --- */
 
 /// If has this as a component, the node should composite all children
@@ -53,19 +69,43 @@ pub struct Blending {
 	pub opacity: f32,
 }
 
-#[derive(Default, PartialEq, Clone, Copy, Debug)]
+#[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum BlendMode {
 	/// Normal blending mode.
 	#[default]
 	Normal,
-	/// Multiply blending mode.
+	/// Multiply.
 	Multiply,
-	/// Color Dodge.
-	ColorDodge,
-	/// Linear Dodge.
-	LinearDodge,
 	/// Screen.
 	Screen,
+	/// Overlay.
+	Overlay,
+	/// Darken.
+	Darken,
+	/// Lighten.
+	Lighten,
+	/// ColorDodge.
+	ColorDodge,
+	/// LinearDodge.
+	LinearDodge,
+	/// AddGlow.
+	AddGlow,
+	/// ColorBurn.
+	ColorBurn,
+	/// HardLight.
+	HardLight,
+	/// SoftLight.
+	SoftLight,
+	/// Difference.
+	Difference,
+	/// Exclusion.
+	Exclusion,
+	/// Subtract.
+	Subtract,
+	/// Inverse.
+	Inverse,
+	/// DestinationIn.
+	DestinationIn,
 	/// Clip to Lower.
 	/// Special blending mode that clips the drawable
 	/// to a lower rendered area.
@@ -78,15 +118,79 @@ pub enum BlendMode {
 }
 
 impl BlendMode {
-	pub const VALUES: [BlendMode; 7] = [
+	/// All blend modes known to the nijilive / Inochi2D family of formats.
+	pub const VALUES: [BlendMode; 19] = [
 		BlendMode::Normal,
 		BlendMode::Multiply,
+		BlendMode::Screen,
+		BlendMode::Overlay,
+		BlendMode::Darken,
+		BlendMode::Lighten,
 		BlendMode::ColorDodge,
 		BlendMode::LinearDodge,
-		BlendMode::Screen,
+		BlendMode::AddGlow,
+		BlendMode::ColorBurn,
+		BlendMode::HardLight,
+		BlendMode::SoftLight,
+		BlendMode::Difference,
+		BlendMode::Exclusion,
+		BlendMode::Subtract,
+		BlendMode::Inverse,
+		BlendMode::DestinationIn,
 		BlendMode::ClipToLower,
 		BlendMode::SliceFromLower,
 	];
+
+	/// Name used in `.inp` files.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			BlendMode::Normal => "Normal",
+			BlendMode::Multiply => "Multiply",
+			BlendMode::Screen => "Screen",
+			BlendMode::Overlay => "Overlay",
+			BlendMode::Darken => "Darken",
+			BlendMode::Lighten => "Lighten",
+			BlendMode::ColorDodge => "ColorDodge",
+			BlendMode::LinearDodge => "LinearDodge",
+			BlendMode::AddGlow => "AddGlow",
+			BlendMode::ColorBurn => "ColorBurn",
+			BlendMode::HardLight => "HardLight",
+			BlendMode::SoftLight => "SoftLight",
+			BlendMode::Difference => "Difference",
+			BlendMode::Exclusion => "Exclusion",
+			BlendMode::Subtract => "Subtract",
+			BlendMode::Inverse => "Inverse",
+			BlendMode::DestinationIn => "DestinationIn",
+			BlendMode::ClipToLower => "ClipToLower",
+			BlendMode::SliceFromLower => "SliceFromLower",
+		}
+	}
+
+	/// Parse an `.inp` blend mode name. Returns `None` for names we do not know.
+	pub fn from_name(name: &str) -> Option<BlendMode> {
+		match name {
+			"Normal" => Some(BlendMode::Normal),
+			"Multiply" => Some(BlendMode::Multiply),
+			"Screen" => Some(BlendMode::Screen),
+			"Overlay" => Some(BlendMode::Overlay),
+			"Darken" => Some(BlendMode::Darken),
+			"Lighten" => Some(BlendMode::Lighten),
+			"ColorDodge" => Some(BlendMode::ColorDodge),
+			"LinearDodge" => Some(BlendMode::LinearDodge),
+			"AddGlow" => Some(BlendMode::AddGlow),
+			"ColorBurn" => Some(BlendMode::ColorBurn),
+			"HardLight" => Some(BlendMode::HardLight),
+			"SoftLight" => Some(BlendMode::SoftLight),
+			"Difference" => Some(BlendMode::Difference),
+			"Exclusion" => Some(BlendMode::Exclusion),
+			"Subtract" => Some(BlendMode::Subtract),
+			"Inverse" => Some(BlendMode::Inverse),
+			"DestinationIn" => Some(BlendMode::DestinationIn),
+			"ClipToLower" => Some(BlendMode::ClipToLower),
+			"SliceFromLower" => Some(BlendMode::SliceFromLower),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Clone, Debug)]

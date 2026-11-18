@@ -304,6 +304,36 @@ impl OpenglRenderer {
 					gl.blend_equation(glow::FUNC_SUBTRACT);
 					gl.blend_func(glow::ONE_MINUS_DST_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
 				}
+				BlendMode::AddGlow => {
+					gl.blend_equation(glow::FUNC_ADD);
+					gl.blend_func(glow::ONE, glow::ONE);
+				}
+				BlendMode::Darken => {
+					gl.blend_equation(glow::MIN);
+					gl.blend_func(glow::ONE, glow::ONE);
+				}
+				BlendMode::Lighten => {
+					gl.blend_equation(glow::MAX);
+					gl.blend_func(glow::ONE, glow::ONE);
+				}
+				BlendMode::Subtract => {
+					gl.blend_equation(glow::FUNC_REVERSE_SUBTRACT);
+					gl.blend_func(glow::ONE, glow::ONE);
+				}
+				// Modes that need a shader reading the backdrop (Overlay, SoftLight, HardLight, ColorBurn,
+				// Difference, Exclusion, Inverse, DestinationIn) are not available with fixed-function
+				// blending. They are preserved in files but drawn as Normal by this renderer.
+				BlendMode::Overlay
+				| BlendMode::ColorBurn
+				| BlendMode::HardLight
+				| BlendMode::SoftLight
+				| BlendMode::Difference
+				| BlendMode::Exclusion
+				| BlendMode::Inverse
+				| BlendMode::DestinationIn => {
+					gl.blend_equation(glow::FUNC_ADD);
+					gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+				}
 			}
 		}
 	}

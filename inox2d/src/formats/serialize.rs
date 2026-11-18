@@ -6,6 +6,7 @@ use crate::animation::PuppetAnimation;
 use crate::math::interp::InterpolateMode;
 use crate::math::transform::TransformOffset;
 use crate::node::components::{
+	RawNodeData,
 	BlendMode, Composite, Drawable, MaskMode, Masks, Mesh, MeshGroup, PhysicsModel, PhysicsParamMapMode,
 	SimplePhysics, TexturedMesh,
 };
@@ -109,15 +110,7 @@ fn serialize_transform(t: &TransformOffset) -> JsonValue {
 }
 
 fn blend_mode_str(mode: BlendMode) -> &'static str {
-	match mode {
-		BlendMode::Normal => "Normal",
-		BlendMode::Multiply => "Multiply",
-		BlendMode::ColorDodge => "ColorDodge",
-		BlendMode::LinearDodge => "LinearDodge",
-		BlendMode::Screen => "Screen",
-		BlendMode::ClipToLower => "ClipToLower",
-		BlendMode::SliceFromLower => "SliceFromLower",
-	}
+	mode.as_str()
 }
 
 fn serialize_masks(masks: &Masks, obj: &mut Object) {
@@ -244,7 +237,11 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 	let has_phys = puppet.node_comps.get::<SimplePhysics>(id);
 	let has_mg = puppet.node_comps.get::<MeshGroup>(id);
 
-	let ty = if has_tm.is_some() && has_mesh.is_some() {
+	let has_raw = puppet.node_comps.get::<RawNodeData>(id);
+
+	let ty: &str = if let Some(raw) = has_raw {
+		raw.type_name.as_str()
+	} else if has_tm.is_some() && has_mesh.is_some() {
 		"Part"
 	} else if has_mg.is_some() && has_mesh.is_some() {
 		"MeshGroup"
@@ -293,7 +290,15 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 				obj.insert("mesh", serialize_mesh(mesh));
 			}
 		}
-		_ => {}
+		_ => {
+			if let Some(raw) = has_raw {
+				for (k, v) in raw.fields.iter() {
+					if !obj.iter().any(|(ek, _)| ek == k) {
+						obj.insert(k, v.clone());
+					}
+				}
+			}
+		}
 	}
 
 	let children: Vec<JsonValue> = puppet

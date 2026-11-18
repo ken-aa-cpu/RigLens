@@ -179,15 +179,12 @@ fn deserialize_simple_physics(obj: JsonObject) -> InoxParseResult<SimplePhysics>
 fn deserialize_drawable(obj: JsonObject) -> InoxParseResult<Drawable> {
 	Ok(Drawable {
 		blending: Blending {
-			mode: match obj.get_str("blend_mode")? {
-				"Normal" => BlendMode::Normal,
-				"Multiply" => BlendMode::Multiply,
-				"ColorDodge" => BlendMode::ColorDodge,
-				"LinearDodge" => BlendMode::LinearDodge,
-				"Screen" => BlendMode::Screen,
-				"ClipToLower" => BlendMode::ClipToLower,
-				"SliceFromLower" => BlendMode::SliceFromLower,
-				_ => BlendMode::default(),
+			mode: {
+				let name = obj.get_str("blend_mode")?;
+				BlendMode::from_name(name).unwrap_or_else(|| {
+					tracing::warn!("unknown blend mode {name:?}, falling back to Normal");
+					BlendMode::default()
+				})
 			},
 			tint: obj.get_vec3("tint").unwrap_or(vec3(1.0, 1.0, 1.0)),
 			screen_tint: obj.get_vec3("screenTint").unwrap_or(vec3(0.0, 0.0, 0.0)),
@@ -353,6 +350,21 @@ impl Puppet {
 					.add(id, vals("mesh", deserialize_mesh(data.get_object("mesh")?))?);
 			}
 			custom => {
+				let mut fields = data.0.clone();
+				for key in ["uuid", "name", "type", "enabled", "zsort", "transform", "lockToRoot", "children"] {
+					fields.remove(key);
+				}
+				self.node_comps.add(
+					id,
+					RawNodeData {
+						type_name: custom.to_owned(),
+						fields,
+					},
+				);
+				self.diagnostics.push(format!(
+					"node {} has unsupported type {custom:?}; kept as opaque data (not rendered or deformed)",
+					id.0
+				));
 				if let Some(func) = load_node_data_custom {
 					func(self, custom, data)?
 				}
@@ -513,18 +525,18 @@ fn deserialize_puppet_meta(obj: JsonObject) -> InoxParseResult<PuppetMeta> {
 	Ok(PuppetMeta {
 		name: obj.get_nullable_str("name")?.map(str::to_owned),
 		version: obj.get_str("version")?.to_owned(),
-		rigger: obj.get_nullable_str("rigger")?.map(str::to_owned),
-		artist: obj.get_nullable_str("artist")?.map(str::to_owned),
+		rigger: obj.get_nullable_str("rigger").unwrap_or(None).map(str::to_owned),
+		artist: obj.get_nullable_str("artist").unwrap_or(None).map(str::to_owned),
 		rights: match obj.get_object("rights").ok() {
 			Some(rights) => Some(deserialize_puppet_usage_rights(rights)?),
 			None => None,
 		},
-		copyright: obj.get_nullable_str("copyright")?.map(str::to_owned),
-		license_url: obj.get_nullable_str("licenseURL")?.map(str::to_owned),
-		contact: obj.get_nullable_str("contact")?.map(str::to_owned),
-		reference: obj.get_nullable_str("reference")?.map(str::to_owned),
+		copyright: obj.get_nullable_str("copyright").unwrap_or(None).map(str::to_owned),
+		license_url: obj.get_nullable_str("licenseURL").unwrap_or(None).map(str::to_owned),
+		contact: obj.get_nullable_str("contact").unwrap_or(None).map(str::to_owned),
+		reference: obj.get_nullable_str("reference").unwrap_or(None).map(str::to_owned),
 		thumbnail_id: obj.get_u32("thumbnailId").ok().filter(|&id| id != u32::MAX),
-		preserve_pixels: obj.get_bool("preservePixels")?,
+		preserve_pixels: obj.get_bool("preservePixels").unwrap_or(false),
 	})
 }
 

@@ -52,7 +52,9 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 | Target | Status |
 | :--- | :--- |
 | Inochi2D v0.8-era `.inp` | Implemented; verified against the upstream `inox2d` loader. |
-| nijilive / nijigenerate `.inp` / `.inx` | **Not yet verified.** Testing is planned (see Roadmap). |
+| nijilive-only nodes (`GridDeformer`, `PathDeformer`, `AnimatedPart`, `DynamicComposite`, `Driver`, ...) | **Preserved, not interpreted.** Kept as opaque data and written back unchanged; not rendered or deformed. Loading reports a warning (`warnings` in `puppet.info`). Covered by synthetic regression tests. |
+| All 19 nijilive blend modes | Preserved on round trip. The software renderer implements them; the OpenGL renderer approximates some (see source). |
+| nijilive / nijigenerate parameter bindings, animations, `.inx` extension data | **Not yet verified against real files.** Bindings we cannot parse are currently dropped with a log message. |
 | Live2D `.moc3` | Not supported; proprietary format. Not planned in core. |
 
 ## Quick start
@@ -94,7 +96,8 @@ cargo run -p inox2d-mcp -- commands
 
 ## Roadmap
 
-- [ ] Verify `.inp` / `.inx` round-trip with nijigenerate / nijilive output.
+- [x] Lossless round trip for unknown node types and all blend modes (synthetic tests).
+- [ ] Verify `.inp` / `.inx` round-trip with real nijigenerate / nijilive files (bindings, animations, `.inx`).
 - [ ] Format-neutral rig model and a public **`Exporter` trait** so users can bind their own library and emit any format.
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
 - [ ] Rename crates and publish documentation.

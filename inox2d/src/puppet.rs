@@ -35,6 +35,8 @@ pub struct Puppet {
 	pub param_ctx: Option<ParamCtx>,
 	/// Named animations stored in the puppet.
 	pub animations: HashMap<String, PuppetAnimation>,
+	/// Non-fatal problems found while loading (unknown node types, lossy conversions, ...).
+	pub diagnostics: Vec<String>,
 }
 
 impl Puppet {
@@ -55,6 +57,7 @@ impl Puppet {
 			params,
 			param_ctx: None,
 			animations: HashMap::new(),
+			diagnostics: Vec::new(),
 		}
 	}
 
