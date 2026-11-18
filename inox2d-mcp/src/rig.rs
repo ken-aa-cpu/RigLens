@@ -1051,6 +1051,7 @@ pub fn build_sample_vtuber_model() -> Model {
 	let _ = apply_head_roll_binding(&mut model.puppet, head_group, "Head:: Roll", 15.0);
 	let _ = apply_breath_binding(&mut model.puppet, body_group, "Breath", 0.02, 4.0);
 	create_idle_animation(&mut model.puppet);
+	crate::audit::auto_fix_puppet(&mut model.puppet);
 
 	model
 }
@@ -1393,6 +1394,20 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 		.iter()
 		.any(|n| puppet.node_comps.get::<SimplePhysics>(n.uuid).is_some());
 
+	// Measure Face bounding box for proportional displacement scaling
+	let (face_w, face_h) = crate::audit::find_face_node(puppet)
+		.and_then(|fid| puppet.node_comps.get::<Mesh>(fid))
+		.map(|m| {
+			let (mn, mx) = mesh_bounds(m);
+			((mx.x - mn.x).max(40.0), (mx.y - mn.y).max(40.0))
+		})
+		.unwrap_or((170.0, 175.0));
+	let yaw_px = (face_w * 0.14).clamp(10.0, 120.0);
+	let pitch_px = (face_h * 0.11).clamp(8.0, 100.0);
+	let mouth_open_px = (face_h * 0.068).clamp(6.0, 48.0);
+	let sway_front = (face_h * 0.10).clamp(8.0, 60.0);
+	let sway_back = (face_h * 0.14).clamp(12.0, 80.0);
+
 	for &(id, ref raw_name, is_part) in &nodes {
 		let lower = raw_name.to_lowercase();
 		if head_anchor.is_none() && (lower == "head" || lower.contains("頭部") || lower.contains("head_group")) {
@@ -1406,43 +1421,43 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 		}
 
 		if lower.contains("hair_back") || lower.contains("back_hair") || lower.contains("後髮") || lower.contains("后发") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", -0.85, 28.0, 20.0);
-			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", 24.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", -0.85, yaw_px * 1.05, pitch_px);
+			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", sway_back);
 			actions.push(format!("Rigged back hair '{raw_name}' (depth_z=-0.85 + sway)"));
 		} else if lower.contains("hair_front") || lower.contains("bang") || lower.contains("ahoge") || lower.contains("前髮") || lower.contains("劉海") || lower.contains("刘海") || lower.contains("呆毛") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.25, 26.0, 20.0);
-			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", 18.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.25, yaw_px, pitch_px);
+			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", sway_front);
 			actions.push(format!("Rigged front hair '{raw_name}' (depth_z=1.25 + sway)"));
 		} else if lower.contains("hair_side") || lower.contains("side_hair") || lower.contains("側髮") || lower.contains("鬢角") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 0.65, 26.0, 20.0);
-			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", 20.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 0.65, yaw_px, pitch_px);
+			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", sway_front * 1.1);
 			actions.push(format!("Rigged side hair '{raw_name}' (depth_z=0.65 + sway)"));
 		} else if lower.contains("eye_l") || lower.contains("left_eye") || lower.contains("左眼") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.0, 26.0, 20.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.0, yaw_px, pitch_px);
 			let _ = apply_blink_binding(puppet, id, "Eye:: Left:: Open", 0.65);
-			let _ = apply_eye_gaze_binding(puppet, id, "Eye:: Gaze", 5.0, 4.0);
+			let _ = apply_eye_gaze_binding(puppet, id, "Eye:: Gaze", yaw_px * 0.2, pitch_px * 0.2);
 			actions.push(format!("Rigged left eye '{raw_name}' (perspective + blink + gaze)"));
 		} else if lower.contains("eye_r") || lower.contains("right_eye") || lower.contains("右眼") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.0, 26.0, 20.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.0, yaw_px, pitch_px);
 			let _ = apply_blink_binding(puppet, id, "Eye:: Right:: Open", 0.65);
-			let _ = apply_eye_gaze_binding(puppet, id, "Eye:: Gaze", 5.0, 4.0);
+			let _ = apply_eye_gaze_binding(puppet, id, "Eye:: Gaze", yaw_px * 0.2, pitch_px * 0.2);
 			actions.push(format!("Rigged right eye '{raw_name}' (perspective + blink + gaze)"));
 		} else if lower.contains("mouth") || lower.contains("lip") || lower.contains("嘴") || lower.contains("口") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.1, 26.0, 20.0);
-			let _ = apply_mouth_open_binding(puppet, id, "Mouth:: Open", 12.0);
-			let _ = apply_mouth_form_binding(puppet, id, "Mouth:: Form", 6.0, 5.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.1, yaw_px, pitch_px);
+			let _ = apply_mouth_open_binding(puppet, id, "Mouth:: Open", mouth_open_px);
+			let _ = apply_mouth_form_binding(puppet, id, "Mouth:: Form", mouth_open_px * 0.5, mouth_open_px * 0.4);
 			actions.push(format!("Rigged mouth '{raw_name}' (perspective + open + form)"));
 		} else if lower.contains("nose") || lower.contains("鼻") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.35, 26.0, 20.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.35, yaw_px, pitch_px);
 			actions.push(format!("Rigged nose '{raw_name}' (depth_z=1.35)"));
 		} else if lower.contains("brow") || lower.contains("眉") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.05, 26.0, 20.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.05, yaw_px, pitch_px);
 			actions.push(format!("Rigged brow '{raw_name}' (depth_z=1.05)"));
 		} else if lower.contains("ear") || lower.contains("耳") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", -0.55, 24.0, 18.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", -0.55, yaw_px * 0.9, pitch_px * 0.9);
 			actions.push(format!("Rigged ear '{raw_name}' (depth_z=-0.55)"));
 		} else if lower.contains("face") || lower.contains("head") || lower.contains("臉") || lower.contains("脸") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 0.25, 24.0, 18.0);
+			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 0.25, yaw_px * 0.9, pitch_px * 0.9);
 			if head_anchor.is_none() {
 				head_anchor = Some(id);
 			}
@@ -1491,5 +1506,178 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 
 	create_idle_animation(puppet);
 	actions.push("Created 'Idle' animation (120 frames @ 30fps)".to_owned());
+	let fix_res = crate::audit::auto_fix_puppet(puppet);
+	actions.push(format!("Auto-fixed constraints: {}", json::stringify(fix_res)));
 	actions
+}
+
+/// Apply a Gaussian soft-brush deform to a Part node's parameter keyframe using either
+/// a semantic anchor (`center`, `left`, `right`, `top`, `bottom`, `top_left`, `top_right`, `bottom_left`, `bottom_right`)
+/// or explicit local `(x, y)` coordinates.
+pub fn apply_deform_brush(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	param_name: &str,
+	param_val: Vec2,
+	anchor: Option<&str>,
+	local_xy: Option<Vec2>,
+	radius_ratio: f32,
+	delta: Vec2,
+) -> Result<(usize, usize, usize), String> {
+	let mesh = puppet
+		.node_comps
+		.get::<Mesh>(node_id)
+		.ok_or_else(|| format!("Node {} does not have a Mesh component", node_id.0))?
+		.clone();
+
+	if !puppet.params.contains_key(param_name) {
+		ensure_param(
+			puppet,
+			param_name,
+			true,
+			vec2(-1.0, -1.0),
+			vec2(1.0, 1.0),
+			vec2(0.0, 0.0),
+			AxisPoints {
+				x: vec![0.0, 0.5, 1.0],
+				y: vec![0.0, 0.5, 1.0],
+			},
+		);
+	}
+
+	let param = puppet
+		.params
+		.get_mut(param_name)
+		.ok_or_else(|| format!("Parameter '{param_name}' missing"))?;
+
+	let span = param.max - param.min;
+	let norm_x = if span.x.abs() > 1e-6 {
+		((param_val.x - param.min.x) / span.x).clamp(0.0, 1.0)
+	} else {
+		0.0
+	};
+	let norm_y = if span.y.abs() > 1e-6 {
+		((param_val.y - param.min.y) / span.y).clamp(0.0, 1.0)
+	} else {
+		0.0
+	};
+
+	let ix = param
+		.axis_points
+		.x
+		.iter()
+		.enumerate()
+		.min_by(|a, b| (a.1 - norm_x).abs().total_cmp(&(b.1 - norm_x).abs()))
+		.map(|(i, _)| i)
+		.unwrap_or(0);
+	let iy = param
+		.axis_points
+		.y
+		.iter()
+		.enumerate()
+		.min_by(|a, b| (a.1 - norm_y).abs().total_cmp(&(b.1 - norm_y).abs()))
+		.map(|(i, _)| i)
+		.unwrap_or(0);
+
+	let (mn, mx) = mesh_bounds(&mesh);
+	let center = (mn + mx) * 0.5;
+	let size = (mx - mn).max(vec2(4.0, 4.0));
+	let brush_center = if let Some(xy) = local_xy {
+		xy
+	} else {
+		match anchor.unwrap_or("center").to_lowercase().as_str() {
+			"left" => vec2(mn.x, center.y),
+			"right" => vec2(mx.x, center.y),
+			"top" => vec2(center.x, mn.y),
+			"bottom" => vec2(center.x, mx.y),
+			"top_left" => vec2(mn.x, mn.y),
+			"top_right" => vec2(mx.x, mn.y),
+			"bottom_left" => vec2(mn.x, mx.y),
+			"bottom_right" => vec2(mx.x, mx.y),
+			_ => center,
+		}
+	};
+
+	let radius = (size.length() * radius_ratio.clamp(0.05, 3.0)).max(2.0);
+	let sigma2 = 2.0 * (radius * 0.5).powi(2);
+
+	let x_len = param.axis_points.x.len();
+	let y_len = param.axis_points.y.len();
+	let existing_idx = param
+		.bindings
+		.iter()
+		.position(|b| b.node == node_id && matches!(b.values, BindingValues::Deform(_)));
+
+	if existing_idx.is_none() {
+		let zero_mat = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| vec![Vec2::ZERO; mesh.vertices.len()]);
+		let is_set = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| true);
+		param.bindings.push(Binding {
+			node: node_id,
+			is_set,
+			interpolate_mode: InterpolateMode::Linear,
+			values: BindingValues::Deform(zero_mat),
+		});
+	}
+
+	let b_idx = existing_idx.unwrap_or(param.bindings.len() - 1);
+	let mut affected = 0usize;
+	if let BindingValues::Deform(ref mut mat) = param.bindings[b_idx].values {
+		if let Some(cell) = mat.get_mut(ix, iy) {
+			for (vi, &v) in mesh.vertices.iter().enumerate() {
+				let d2 = (v - brush_center).length_squared();
+				let w = (-d2 / sigma2).exp();
+				if w > 0.02 {
+					if let Some(slot) = cell.get_mut(vi) {
+						*slot += delta * w;
+						affected += 1;
+					}
+				}
+			}
+		}
+	}
+
+	Ok((ix, iy, affected))
+}
+
+/// Bind a 0..1 opacity toggle/slider parameter onto a node (`BindingValues::Opacity`).
+pub fn apply_opacity_binding(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	param_name: &str,
+	opacity_at_0: f32,
+	opacity_at_1: f32,
+) -> Result<(), String> {
+	if puppet.nodes.get_node(node_id).is_none() {
+		return Err(format!("Node {} not found", node_id.0));
+	}
+	ensure_param(
+		puppet,
+		param_name,
+		false,
+		vec2(0.0, 0.0),
+		vec2(1.0, 0.0),
+		vec2(0.0, 0.0),
+		AxisPoints {
+			x: vec![0.0, 1.0],
+			y: vec![0.0],
+		},
+	);
+	let param = puppet.params.get_mut(param_name).unwrap();
+	let x_len = param.axis_points.x.len();
+	let y_len = param.axis_points.y.len();
+	let values = Matrix2d::from_grid_transposed(x_len, y_len, |ix, _| {
+		let tx = param.axis_points.x[ix];
+		opacity_at_0 + (opacity_at_1 - opacity_at_0) * tx
+	});
+	let is_set = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| true);
+	upsert_binding(
+		param,
+		Binding {
+			node: node_id,
+			is_set,
+			interpolate_mode: InterpolateMode::Linear,
+			values: BindingValues::Opacity(values),
+		},
+	);
+	Ok(())
 }

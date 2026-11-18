@@ -10,8 +10,9 @@ use glam::{vec2, Vec2};
 use inox2d::formats::inp::{parse_inp, write_inp};
 use inox2d::model::Model;
 use inox2d::puppet::Puppet;
+use inox2d_mcp::audit::{audit_rig, auto_fix_rig};
 use inox2d_mcp::engine::{command_registry, Session};
-use inox2d_mcp::headless_render::{render_anim_sheet, render_frame, render_grid, RenderOptions};
+use inox2d_mcp::headless_render::{render_anim_sheet, render_diagnostic, render_frame, render_grid, RenderOptions};
 use inox2d_mcp::psd::{export_model_to_psd, import_psd_to_model, parse_psd_bytes};
 use inox2d_mcp::rig::{auto_rig_vtuber, build_sample_vtuber_model};
 use json::JsonValue;
@@ -115,6 +116,30 @@ enum Commands {
 		tile_size: u32,
 		#[arg(long)]
 		wireframe: bool,
+	},
+	/// Run 6-point deterministic geometric & visual rig audit
+	Audit {
+		input: String,
+	},
+	/// Auto-fix containment leaks, triangle foldovers, and missing masks
+	AutoFix {
+		input: String,
+		#[arg(long)]
+		out: Option<PathBuf>,
+	},
+	/// Render X-ray diagnostic PNG (coordinate grid, foldover heatmap, Face containment contour)
+	Diagnostic {
+		input: String,
+		#[arg(long)]
+		out: PathBuf,
+		#[arg(long, default_value_t = 512)]
+		width: u32,
+		#[arg(long, default_value_t = 512)]
+		height: u32,
+		#[arg(long, default_value_t = 1.0)]
+		scale: f32,
+		#[arg(long = "param")]
+		params: Vec<String>,
 	},
 	/// List all engine commands as JSON
 	Commands,
@@ -272,6 +297,27 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("param", json::object! { type: "string" });
 				props.insert("scale_amp", json::object! { type: "number" });
 				props.insert("y_amp", json::object! { type: "number" });
+			} else if spec.id == "rig.bind_opacity" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("opacity_at_0", json::object! { type: "number" });
+				props.insert("opacity_at_1", json::object! { type: "number" });
+			} else if spec.id == "deform.brush" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("kx", json::object! { type: "number" });
+				props.insert("ky", json::object! { type: "number" });
+				props.insert("anchor", json::object! { type: "string" });
+				props.insert("radius_ratio", json::object! { type: "number" });
+				props.insert("dx", json::object! { type: "number" });
+				props.insert("dy", json::object! { type: "number" });
+			} else if spec.id == "render.diagnostic" {
+				props.insert("out", json::object! { type: "string" });
+				props.insert("width", json::object! { type: "integer" });
+				props.insert("height", json::object! { type: "integer" });
+				props.insert("scale", json::object! { type: "number" });
 			} else if spec.id == "physics.add_pendulum" {
 				props.insert("name", json::object! { type: "string" });
 				props.insert("parent_name", json::object! { type: "string" });
@@ -503,6 +549,37 @@ fn run() -> Result<(), String> {
 			img.save(&out)
 				.map_err(|e| format!("Failed to save '{}': {e}", out.display()))?;
 			println!("Rendered {frames}-frame animation sheet to {} ({w}x{h})", out.display());
+		}
+		Commands::Audit { input } => {
+			let mut model = load_model(&input)?;
+			let report = audit_rig(&mut model);
+			println!("{}", json::stringify_pretty(report, 2));
+		}
+		Commands::AutoFix { input, out } => {
+			let mut model = load_model(&input)?;
+			let fixed = auto_fix_rig(&mut model);
+			if let Some(out_path) = out {
+				let file = File::create(&out_path)
+					.map_err(|e| format!("Failed to create {}: {e}", out_path.display()))?;
+				let mut w = BufWriter::new(file);
+				write_inp(&model, &mut w).map_err(|e| format!("Failed to write .inp: {e}"))?;
+			}
+			println!("{}", json::stringify_pretty(fixed, 2));
+		}
+		Commands::Diagnostic {
+			input,
+			out,
+			width,
+			height,
+			scale,
+			params,
+		} => {
+			let mut model = load_model(&input)?;
+			let param_map = parse_param_overrides(&params)?;
+			let img = render_diagnostic(&mut model, &param_map, width, height, scale)?;
+			img.save(&out)
+				.map_err(|e| format!("Failed to save '{}': {e}", out.display()))?;
+			println!("Rendered diagnostic X-ray to {} ({width}x{height})", out.display());
 		}
 		Commands::Commands => {
 			let arr: Vec<JsonValue> = command_registry()
@@ -885,5 +962,91 @@ mod tests {
 			child_deforms.iter().any(|d| (d.x - 12.0).abs() < 0.2 && (d.y + 6.0).abs() < 0.2),
 			"Expected MeshGroup deform (12, -6) to propagate to child vertices, got {child_deforms:?}"
 		);
+	}
+
+	#[test]
+	fn opacity_binding_roundtrip_and_render() {
+		let mut session = Session::new_sample();
+		session
+			.exec(
+				"node.add_part",
+				&json::object! {
+					name: "Blush",
+					parent_name: "Head",
+					zsort: -2.0,
+					x: 0.0,
+					y: 12.0,
+					width: 100.0,
+					height: 30.0,
+					color: [255, 90, 120, 220]
+				},
+			)
+			.unwrap();
+		session
+			.exec(
+				"rig.bind_opacity",
+				&json::object! {
+					node_name: "Blush",
+					param: "Expr:: Blush",
+					opacity_at_0: 0.0,
+					opacity_at_1: 1.0
+				},
+			)
+			.unwrap();
+
+		let mut bytes = Vec::new();
+		write_inp(&session.model, &mut bytes).expect("write opacity .inp");
+		let mut parsed = parse_inp(bytes.as_slice()).expect("parse opacity .inp");
+
+		let mut off_map = HashMap::new();
+		off_map.insert("Expr:: Blush".to_owned(), vec2(0.0, 0.0));
+		let img_off = render_frame(&mut parsed, &off_map, &RenderOptions::default()).unwrap();
+
+		let mut on_map = HashMap::new();
+		on_map.insert("Expr:: Blush".to_owned(), vec2(1.0, 0.0));
+		let img_on = render_frame(&mut parsed, &on_map, &RenderOptions::default()).unwrap();
+
+		assert_ne!(img_off.as_raw(), img_on.as_raw());
+	}
+
+	#[test]
+	fn audit_detects_leaks_and_foldovers_then_auto_fix_repairs() {
+		let mut session = Session::new_sample();
+		let anatomy = session.exec("rig.analyze_anatomy", &json::object! {}).unwrap();
+		assert_eq!(anatomy["face_anchor"]["name"].as_str(), Some("Face"));
+
+		// Intentionally push Eye_L's right edge far left across its own mesh and out of the face boundary
+		session
+			.exec(
+				"deform.brush",
+				&json::object! {
+					node_name: "Eye_L",
+					param: "Head:: Yaw-Pitch",
+					kx: -1.0,
+					ky: 0.0,
+					anchor: "right",
+					radius_ratio: 0.25,
+					dx: -160.0,
+					dy: 0.0
+				},
+			)
+			.unwrap();
+
+		let bad_report = session.exec("rig.audit", &json::object! {}).unwrap();
+		assert_eq!(bad_report["passed"].as_bool(), Some(false));
+		assert!(bad_report["summary"]["containment_leaks"].as_u32().unwrap() > 0);
+		assert!(bad_report["summary"]["mesh_foldovers"].as_u32().unwrap() > 0);
+
+		let fixed = session.exec("rig.auto_fix", &json::object! {}).unwrap();
+		assert!(fixed["clamped_vertices"].as_u32().unwrap() > 0);
+		assert!(fixed["relaxed_cells"].as_u32().unwrap() > 0);
+
+		let clean_report = session.exec("rig.audit", &json::object! {}).unwrap();
+		assert_eq!(clean_report["summary"]["containment_leaks"].as_u32(), Some(0));
+		assert_eq!(clean_report["summary"]["mesh_foldovers"].as_u32(), Some(0));
+		assert_eq!(clean_report["passed"].as_bool(), Some(true));
+
+		let diag = render_diagnostic(&mut session.model, &HashMap::new(), 256, 256, 0.7).unwrap();
+		assert_eq!(diag.dimensions(), (256, 256));
 	}
 }

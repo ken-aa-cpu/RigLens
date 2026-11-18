@@ -263,3 +263,9 @@ impl std::ops::Deref for ZSort {
 		&self.0
 	}
 }
+
+/* --- OPACITY STORE --- */
+
+/// Component holding evaluated opacity values across frames.
+#[derive(Default, Clone, Debug)]
+pub struct OpacityStore(pub f32);

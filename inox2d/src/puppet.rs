@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::animation::PuppetAnimation;
 use crate::math::transform::TransformOffset;
-use crate::node::components::{TransformStore, ZSort};
+use crate::node::components::{OpacityStore, TransformStore, ZSort};
 use crate::node::{InoxNode, InoxNodeUuid};
 use crate::params::{Param, ParamCtx, ParamUuid};
 use crate::physics::{PhysicsCtx, PuppetPhysics};
@@ -139,6 +139,11 @@ impl Puppet {
 	/// Get evaluated TransformStore for a node after `end_frame()`.
 	pub fn node_transform(&self, id: InoxNodeUuid) -> Option<&TransformStore> {
 		self.node_comps.get::<TransformStore>(id)
+	}
+
+	/// Get evaluated OpacityStore for a node after `end_frame()`.
+	pub fn node_opacity(&self, id: InoxNodeUuid) -> Option<f32> {
+		self.node_comps.get::<OpacityStore>(id).map(|o| o.0)
 	}
 
 	/// Create a copy of node transform/zsort for modification. Panicks on second call.

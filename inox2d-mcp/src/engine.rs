@@ -13,14 +13,16 @@ use inox2d::texture::decode_model_textures;
 use json::object::Object;
 use json::JsonValue;
 
-use crate::headless_render::{render_anim_sheet, render_frame, render_grid, RenderOptions};
+use crate::audit::{analyze_anatomy, audit_rig, auto_fix_rig};
+use crate::headless_render::{render_anim_sheet, render_diagnostic, render_frame, render_grid, RenderOptions};
 use crate::psd::{
 	export_model_to_psd, import_psd_to_model, parse_psd_bytes, photocraft_convert, photocraft_inspect,
 };
 use crate::rig::{
 	add_grid_part, add_pendulum_physics, add_standard_vtuber_params, apply_blink_binding, apply_breath_binding,
-	apply_head_perspective_binding, apply_head_roll_binding, apply_mouth_form_binding, auto_rig_vtuber,
-	build_sample_vtuber_model, create_idle_animation, generate_contour_mesh, generate_grid_mesh,
+	apply_deform_brush, apply_head_perspective_binding, apply_head_roll_binding, apply_mouth_form_binding,
+	apply_opacity_binding, auto_rig_vtuber, build_sample_vtuber_model, create_idle_animation,
+	generate_contour_mesh, generate_grid_mesh,
 };
 
 pub struct CommandSpec {
@@ -122,6 +124,31 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			params_schema: r#"{"node_uuid?":1,"node_name?":"Body","param?":"Breath","scale_amp?":0.02,"y_amp?":4.0}"#,
 		},
 		CommandSpec {
+			id: "rig.bind_opacity",
+			description: "Bind a 0..1 opacity toggle/slider parameter onto a node (blush, tears, expressions)",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Blush","param":"Expr:: Blush","opacity_at_0?":0.0,"opacity_at_1?":1.0}"#,
+		},
+		CommandSpec {
+			id: "rig.analyze_anatomy",
+			description: "Measure all Parts in Face-normalized coordinates and margins so AI never guesses layout",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "rig.audit",
+			description: "Run 6-point deterministic geometric/visual rig audit (containment, foldovers, stretch, blink, symmetry, masks)",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "rig.auto_fix",
+			description: "Clamp facial feature containment leaks, relax triangle fold-overs, and attach missing masks",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "deform.brush",
+			description: "Apply a Gaussian soft-brush deform to a parameter keyframe via semantic anchor or local coordinates",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Mouth","param":"Head:: Yaw-Pitch","kx?":1.0,"ky?":0.0,"anchor?":"center","local_xy?":[0.0,0.0],"radius_ratio?":0.45,"dx":4.0,"dy":-2.0}"#,
+		},
+		CommandSpec {
 			id: "physics.add_pendulum",
 			description: "Attach a SimplePhysics pendulum driver node targeting a parameter",
 			params_schema: r#"{"name":"Hair_Physics","parent_uuid?":0,"parent_name?":"Head","param":"Hair:: Sway","model_type?":"Pendulum","length?":80.0,"frequency?":2.0,"angle_damping?":0.45,"output_scale?":[1.0,1.0]}"#,
@@ -145,6 +172,11 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			id: "render.anim_sheet",
 			description: "Render sampled animation or motion-test frames into a sprite contact sheet PNG",
 			params_schema: r#"{"out":"anim_sheet.png","anim?":"Idle","frames?":8,"tile_size?":180,"wireframe?":false}"#,
+		},
+		CommandSpec {
+			id: "render.diagnostic",
+			description: "Render X-ray diagnostic PNG (50px coordinate grid, foldover/stretch heatmap, Face containment contour, pivots)",
+			params_schema: r#"{"out":"diagnostic.png","width?":512,"height?":512,"scale?":1.0}"#,
 		},
 	]
 }
@@ -625,6 +657,81 @@ impl Session {
 					frames: frames,
 					width: w,
 					height: h
+				})
+			}
+			"rig.bind_opacity" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let param_name = params["param"]
+					.as_str()
+					.ok_or_else(|| "Missing 'param'".to_owned())?;
+				let op0 = params["opacity_at_0"].as_f32().unwrap_or(0.0);
+				let op1 = params["opacity_at_1"].as_f32().unwrap_or(1.0);
+				apply_opacity_binding(&mut self.model.puppet, id, param_name, op0, op1)?;
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name,
+					opacity_at_0: op0,
+					opacity_at_1: op1
+				})
+			}
+			"rig.analyze_anatomy" => Ok(analyze_anatomy(&mut self.model.puppet)),
+			"rig.audit" => Ok(audit_rig(&mut self.model)),
+			"rig.auto_fix" => {
+				let res = auto_fix_rig(&mut self.model);
+				self.revision += 1;
+				Ok(res)
+			}
+			"deform.brush" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let param_name = params["param"]
+					.as_str()
+					.unwrap_or("Head:: Yaw-Pitch");
+				let kx = params["kx"].as_f32().unwrap_or(0.0);
+				let ky = params["ky"].as_f32().unwrap_or(0.0);
+				let anchor = params["anchor"].as_str();
+				let local_xy = if let JsonValue::Array(arr) = &params["local_xy"] {
+					Some(vec2(
+						arr.first().and_then(JsonValue::as_f32).unwrap_or(0.0),
+						arr.get(1).and_then(JsonValue::as_f32).unwrap_or(0.0),
+					))
+				} else {
+					None
+				};
+				let radius_ratio = params["radius_ratio"].as_f32().unwrap_or(0.45);
+				let dx = params["dx"].as_f32().unwrap_or(0.0);
+				let dy = params["dy"].as_f32().unwrap_or(0.0);
+				let (ix, iy, affected) = apply_deform_brush(
+					&mut self.model.puppet,
+					id,
+					param_name,
+					vec2(kx, ky),
+					anchor,
+					local_xy,
+					radius_ratio,
+					vec2(dx, dy),
+				)?;
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name,
+					grid_cell: [ix, iy],
+					affected_vertices: affected
+				})
+			}
+			"render.diagnostic" => {
+				let out = params["out"].as_str().unwrap_or("diagnostic.png");
+				let width = params["width"].as_u32().unwrap_or(512);
+				let height = params["height"].as_u32().unwrap_or(512);
+				let scale = params["scale"].as_f32().unwrap_or(1.0);
+				let img = render_diagnostic(&mut self.model, &self.param_overrides, width, height, scale)?;
+				img.save(out).map_err(|e| format!("Failed to save '{out}': {e}"))?;
+				Ok(json::object! {
+					out: out,
+					width: width,
+					height: height
 				})
 			}
 			other => Err(format!("Unknown command: '{other}'")),

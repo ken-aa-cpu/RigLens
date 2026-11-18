@@ -8,7 +8,7 @@ use crate::math::{
 	matrix::Matrix2d,
 };
 use crate::node::{
-	components::{DeformSource, DeformStack, Mesh, TransformStore, ZSort},
+	components::{DeformSource, DeformStack, Mesh, OpacityStore, TransformStore, ZSort},
 	InoxNodeUuid,
 };
 use crate::puppet::{InoxNodeTree, Puppet, World};
@@ -33,8 +33,7 @@ pub enum BindingValues {
 	TransformRY(Matrix2d<f32>),
 	TransformRZ(Matrix2d<f32>),
 	Deform(Matrix2d<Vec<Vec2>>),
-	// TODO
-	Opacity,
+	Opacity(Matrix2d<f32>),
 }
 
 #[derive(Debug, Clone)]
@@ -237,8 +236,12 @@ impl Param {
 						.expect("Nodes being deformed must have a DeformStack component.")
 						.push(DeformSource::Param(self.uuid), Deform::Direct(direct_deform));
 				}
-				// TODO
-				BindingValues::Opacity => {}
+				BindingValues::Opacity(ref matrix) => {
+					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
+					if let Some(op) = comps.get_mut::<OpacityStore>(binding.node) {
+						op.0 *= bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+					}
+				}
 			}
 		}
 	}

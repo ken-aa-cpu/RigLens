@@ -363,7 +363,7 @@ fn serialize_binding(b: &Binding) -> JsonValue {
 				.collect();
 			("deform", JsonValue::Array(rows))
 		}
-		BindingValues::Opacity => ("opacity", JsonValue::Array(Vec::new())),
+		BindingValues::Opacity(m) => ("opacity", serialize_f32_matrix(m)),
 	};
 
 	obj.insert("param_name", JsonValue::String(param_name.to_owned()));

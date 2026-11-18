@@ -1,4 +1,4 @@
-use crate::node::components::{TransformStore, ZSort};
+use crate::node::components::{Drawable, OpacityStore, TransformStore, ZSort};
 
 use super::{InoxNodeTree, Puppet, World};
 
@@ -10,15 +10,18 @@ impl TransformCtx {
 		for node in puppet.nodes.iter() {
 			puppet.node_comps.set(node.uuid, TransformStore::default());
 			puppet.node_comps.set(node.uuid, ZSort::default());
+			puppet.node_comps.set(node.uuid, OpacityStore(1.0));
 		}
 		TransformCtx {}
 	}
 
-	/// Reset all transform/zsort values to default.
+	/// Reset all transform/zsort/opacity values to default.
 	pub fn reset(&mut self, nodes: &InoxNodeTree, comps: &mut World) {
 		for node in nodes.iter() {
 			comps.get_mut::<TransformStore>(node.uuid).unwrap().relative = node.trans_offset.clone();
 			comps.get_mut::<ZSort>(node.uuid).unwrap().0 = node.zsort;
+			let base_op = comps.get::<Drawable>(node.uuid).map(|d| d.blending.opacity).unwrap_or(1.0);
+			comps.get_mut::<OpacityStore>(node.uuid).unwrap().0 = base_op;
 		}
 	}
 
