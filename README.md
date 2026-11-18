@@ -35,11 +35,28 @@ Upstream `Inochi2D/inox2d` was a read-only runtime prototype. This fork (`ken-aa
    - Pure-Rust 8-bit RGBA `.psd` reader & writer (Raw + PackBits RLE, `luni` Unicode layer names, `lsct` folder hierarchy, clipping masks, alpha bounding-box trimming) + `D:\app\PhotoCraft\photocraft-cli.exe` integration.
    - Includes AI operator playbook at [`.agent/skills/inox2d-vtuber-rigger/SKILL.md`](.agent/skills/inox2d-vtuber-rigger/SKILL.md).
 
+### Craft-Style Native Desktop Studio (`inox2d-gui`)
+
+Modeled after the [ArtCraft](https://getartcraft.com/) / `AniCraft` / `FigCraft` pure-Rust architecture (`L5 egui shell` driving `L3 inox2d-mcp Session` with `#![forbid(unsafe_code)]`, design blueprint at [`docs/ui/studio_design.figcraft`](docs/ui/studio_design.figcraft)):
+
+![Inox2D Studio GUI](docs/ui/inox2d_studio_screenshot.png)
+
+```sh
+# Launch native desktop rigging studio (sample VTuber or .inp / .psd file)
+cargo run -p inox2d-gui -- --sample
+
+# Run side-by-side with `inox2d-mcp mcp --watch live.inp` for bidirectional live sync
+cargo run -p inox2d-gui -- live.inp --watch live.inp
+
+# Capture a headless/automated desktop UI screenshot
+cargo run -p inox2d-gui -- --screenshot docs/ui/inox2d_studio_screenshot.png
+```
+
 ### Quick Start (`inox2d-mcp`)
 
 ```sh
 # Build & run all tests
-cargo test -p inox2d -p inox2d-mcp -p inox2d-opengl
+cargo test -p inox2d -p inox2d-mcp -p inox2d-opengl -p inox2d-gui
 
 # Generate a rigged sample VTuber puppet (.inp, opens in official Inochi Creator)
 cargo run -p inox2d-mcp -- new --out sample_vtuber.inp --sample

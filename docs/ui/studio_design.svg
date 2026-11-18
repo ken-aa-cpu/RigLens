@@ -1,0 +1,193 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <!-- Craft-Series Dark Studio Blueprint (1280x760) for Inox2D Studio -->
+  <rect width="1280" height="760" fill="#1E1E22"/>
+
+  <!-- Top Menu Bar (#141417) -->
+  <rect x="0" y="0" width="1280" height="28" fill="#141417"/>
+  <rect x="0" y="27" width="1280" height="1" fill="#2A2A30"/>
+  <text x="16" y="18" fill="#D4D4D8" font-family="sans-serif" font-size="11.5">File    Edit    View    Rig    Audit    Overlays    Commands (Ctrl+K)    Help</text>
+  <text x="1264" y="18" text-anchor="end" fill="#71717A" font-family="monospace" font-size="11">Inox2D Studio v0.1</text>
+
+  <!-- Sub-Header Context Bar -->
+  <rect x="0" y="28" width="1280" height="32" fill="#1C1C20"/>
+  <rect x="0" y="59" width="1280" height="1" fill="#2A2A30"/>
+  <rect x="10" y="34" width="136" height="20" rx="4" fill="#27272C" stroke="#34343C"/>
+  <text x="20" y="48" fill="#E4E4E7" font-family="sans-serif" font-size="11" font-weight="600">InochiSampleVTuber</text>
+  <text x="156" y="48" fill="#71717A" font-family="sans-serif" font-size="11">&#8250;  Face</text>
+  <rect x="215" y="34" width="66" height="20" rx="4" fill="#27272C" stroke="#34343C"/>
+  <text x="248" y="48" text-anchor="middle" fill="#D4D4D8" font-family="sans-serif" font-size="10.5">Auto-Rig</text>
+  <rect x="287" y="34" width="66" height="20" rx="4" fill="#27272C" stroke="#34343C"/>
+  <text x="320" y="48" text-anchor="middle" fill="#D4D4D8" font-family="sans-serif" font-size="10.5">Auto-Fix</text>
+  <rect x="359" y="34" width="62" height="20" rx="4" fill="#27272C" stroke="#34343C"/>
+  <text x="390" y="48" text-anchor="middle" fill="#D4D4D8" font-family="sans-serif" font-size="10.5">Delaunay</text>
+
+  <!-- Right side of sub-header -->
+  <text x="772" y="48" fill="#9CA3AF" font-family="monospace" font-size="11">512 x 512 px   Wireframe   X-Ray</text>
+  <rect x="1044" y="34" width="112" height="20" rx="4" fill="#064E3B" stroke="#10B981"/>
+  <text x="1100" y="48" text-anchor="middle" fill="#6EE7B7" font-family="monospace" font-size="10.5" font-weight="700">100/100 PASS</text>
+  <rect x="1166" y="34" width="54" height="20" rx="4" fill="#27272C" stroke="#34343C"/>
+  <text x="1193" y="48" text-anchor="middle" fill="#E4E4E7" font-family="monospace" font-size="10.5">100%</text>
+
+  <!-- Left Vector Tool Rail (38px) -->
+  <rect x="0" y="60" width="38" height="676" fill="#1E1E22"/>
+  <rect x="37" y="60" width="1" height="676" fill="#2A2A30"/>
+  <!-- Active Select Tool Tile + Blue Accent Bar -->
+  <rect x="0" y="68" width="2.5" height="28" fill="#3B82F6"/>
+  <rect x="5" y="68" width="28" height="28" rx="4" fill="#1D4ED8"/>
+  <polygon points="15,74 15,89 19,85 23,90 25,88 21,83 26,83" fill="#FFFFFF"/>
+  <!-- Tool icons 2..8 -->
+  <circle cx="19" cy="116" r="7" fill="none" stroke="#9CA3AF" stroke-width="1.5"/>
+  <line x1="12" y1="116" x2="26" y2="116" stroke="#9CA3AF" stroke-width="1.2"/>
+  <line x1="19" y1="109" x2="19" y2="123" stroke="#9CA3AF" stroke-width="1.2"/>
+  <circle cx="19" cy="150" r="6" fill="none" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="2,2"/>
+  <polygon points="19,176 26,188 12,188" fill="none" stroke="#9CA3AF" stroke-width="1.4"/>
+  <rect x="13" y="208" width="12" height="12" fill="none" stroke="#9CA3AF" stroke-width="1.4"/>
+  <line x1="19" y1="238" x2="19" y2="250" stroke="#9CA3AF" stroke-width="1.4"/>
+  <circle cx="19" cy="253" r="3" fill="#9CA3AF"/>
+
+  <!-- Center Stage Pasteboard (#2B2D31) -->
+  <rect x="38" y="60" width="932" height="440" fill="#2B2D31"/>
+  <!-- Centered Puppet Viewport Card -->
+  <rect x="288" y="88" width="432" height="384" rx="2" fill="#1A1B1F" stroke="#101014" stroke-width="1"/>
+  <rect x="288" y="88" width="432" height="384" fill="none" stroke="#3B82F6" stroke-width="1" stroke-dasharray="4,3"/>
+  <!-- Stylized vector character placeholder representing live stage -->
+  <ellipse cx="504" cy="240" rx="52" ry="62" fill="#F6D0C0" stroke="#A87060" stroke-width="1.5"/>
+  <ellipse cx="484" cy="236" rx="10" ry="12" fill="#FFFFFF" stroke="#222" stroke-width="1"/>
+  <circle cx="484" cy="236" r="5" fill="#2563EB"/>
+  <ellipse cx="524" cy="236" rx="10" ry="12" fill="#FFFFFF" stroke="#222" stroke-width="1"/>
+  <circle cx="524" cy="236" r="5" fill="#2563EB"/>
+  <ellipse cx="504" cy="272" rx="11" ry="5" fill="#BE4B5C"/>
+  <ellipse cx="504" cy="368" rx="60" ry="52" fill="#4668A6" stroke="#243864" stroke-width="1.5"/>
+  <!-- Stage Zoom Pill Bottom Right -->
+  <rect x="920" y="476" width="42" height="18" rx="3" fill="#1E1E22" stroke="#34343C"/>
+  <text x="941" y="489" text-anchor="middle" fill="#9CA3AF" font-family="monospace" font-size="10">100%</text>
+
+  <!-- Right Inspector Panel (310px wide: x=970..1280) -->
+  <rect x="970" y="60" width="310" height="676" fill="#1E1E22"/>
+  <rect x="970" y="60" width="1" height="676" fill="#2A2A30"/>
+
+  <!-- Section 1: Properties -->
+  <rect x="970" y="60" width="2" height="28" fill="#3B82F6"/>
+  <text x="984" y="79" fill="#E4E4E7" font-family="sans-serif" font-size="12" font-weight="600">Properties</text>
+  <rect x="970" y="88" width="310" height="1" fill="#2A2A30"/>
+  <text x="984" y="108" fill="#9CA3AF" font-family="sans-serif" font-size="11">Node</text>
+  <rect x="1060" y="95" width="204" height="20" rx="3" fill="#141417" stroke="#2E2E36"/>
+  <text x="1068" y="109" fill="#F4F4F5" font-family="monospace" font-size="11">Face  (UUID 5)</text>
+  <text x="984" y="134" fill="#9CA3AF" font-family="sans-serif" font-size="11">Pos</text>
+  <rect x="1060" y="121" width="98" height="20" rx="3" fill="#141417" stroke="#2E2E36"/>
+  <text x="1068" y="135" fill="#E4E4E7" font-family="monospace" font-size="10.5">0.0 px</text>
+  <rect x="1166" y="121" width="98" height="20" rx="3" fill="#141417" stroke="#2E2E36"/>
+  <text x="1174" y="135" fill="#E4E4E7" font-family="monospace" font-size="10.5">-12.0 px</text>
+  <text x="984" y="160" fill="#9CA3AF" font-family="sans-serif" font-size="11">Mesh</text>
+  <rect x="1060" y="147" width="64" height="20" rx="3" fill="#27272C" stroke="#34343C"/>
+  <text x="1092" y="161" text-anchor="middle" fill="#60A5FA" font-family="sans-serif" font-size="10">Delaunay</text>
+  <rect x="1130" y="147" width="64" height="20" rx="3" fill="#27272C" stroke="#34343C"/>
+  <text x="1162" y="161" text-anchor="middle" fill="#D4D4D8" font-family="sans-serif" font-size="10">Contour</text>
+  <rect x="1200" y="147" width="64" height="20" rx="3" fill="#27272C" stroke="#34343C"/>
+  <text x="1232" y="161" text-anchor="middle" fill="#D4D4D8" font-family="sans-serif" font-size="10">Grid</text>
+
+  <!-- Section 2: 2D Parameter Pads -->
+  <rect x="970" y="180" width="310" height="1" fill="#2A2A30"/>
+  <rect x="970" y="181" width="2" height="28" fill="#3B82F6"/>
+  <text x="984" y="200" fill="#E4E4E7" font-family="sans-serif" font-size="12" font-weight="600">2D Parameter Pads</text>
+  <rect x="984" y="216" width="132" height="120" rx="6" fill="#141417" stroke="#2E2E36"/>
+  <line x1="984" y1="276" x2="1116" y2="276" stroke="#26262C"/>
+  <line x1="1050" y1="216" x2="1050" y2="336" stroke="#26262C"/>
+  <circle cx="1050" cy="276" r="6" fill="#3B82F6" stroke="#93C5FD" stroke-width="1.5"/>
+  <text x="1050" y="352" text-anchor="middle" fill="#9CA3AF" font-family="monospace" font-size="10">Head:: Yaw-Pitch</text>
+
+  <rect x="1132" y="216" width="132" height="120" rx="6" fill="#141417" stroke="#2E2E36"/>
+  <line x1="1132" y1="276" x2="1264" y2="276" stroke="#26262C"/>
+  <line x1="1198" y1="216" x2="1198" y2="336" stroke="#26262C"/>
+  <circle cx="1198" cy="260" r="6" fill="#8B5CF6" stroke="#C4B5FD" stroke-width="1.5"/>
+  <text x="1198" y="352" text-anchor="middle" fill="#9CA3AF" font-family="monospace" font-size="10">Mouth:: Viseme</text>
+
+  <!-- Section 3: Parameters & Overlays -->
+  <rect x="970" y="366" width="310" height="1" fill="#2A2A30"/>
+  <rect x="970" y="367" width="2" height="28" fill="#3B82F6"/>
+  <text x="984" y="386" fill="#E4E4E7" font-family="sans-serif" font-size="12" font-weight="600">Parameters &amp; Overlays</text>
+  <text x="984" y="410" fill="#9CA3AF" font-family="monospace" font-size="10">Eye Open</text>
+  <rect x="1064" y="402" width="196" height="8" rx="4" fill="#141417"/>
+  <rect x="1064" y="402" width="196" height="8" rx="4" fill="#2563EB"/>
+  <text x="984" y="434" fill="#9CA3AF" font-family="monospace" font-size="10">Breath</text>
+  <rect x="1064" y="426" width="196" height="8" rx="4" fill="#141417"/>
+  <rect x="1064" y="426" width="104" height="8" rx="4" fill="#10B981"/>
+  <text x="984" y="458" fill="#9CA3AF" font-family="monospace" font-size="10">Expr:: Blush</text>
+  <rect x="1064" y="450" width="196" height="8" rx="4" fill="#141417"/>
+  <rect x="1064" y="450" width="80" height="8" rx="4" fill="#F43F5E"/>
+
+  <!-- Section 4: 6-Point Rig Audit -->
+  <rect x="970" y="476" width="310" height="1" fill="#2A2A30"/>
+  <rect x="970" y="477" width="2" height="28" fill="#3B82F6"/>
+  <text x="984" y="496" fill="#E4E4E7" font-family="sans-serif" font-size="12" font-weight="600">6-Point Rig Audit</text>
+  <text x="984" y="520" fill="#34D399" font-family="monospace" font-size="10">OK  Containment Leaks (0)</text>
+  <text x="984" y="538" fill="#34D399" font-family="monospace" font-size="10">OK  Mesh Foldovers (0)</text>
+  <text x="984" y="556" fill="#34D399" font-family="monospace" font-size="10">OK  Extreme Stretch (0)</text>
+  <text x="984" y="574" fill="#34D399" font-family="monospace" font-size="10">OK  Blink &amp; Yaw Symmetry (0)</text>
+  <text x="984" y="592" fill="#34D399" font-family="monospace" font-size="10">OK  Clipping Masks (0)</text>
+  <rect x="984" y="612" width="134" height="24" rx="4" fill="#27272C" stroke="#34343C"/>
+  <text x="1051" y="628" text-anchor="middle" fill="#E4E4E7" font-family="sans-serif" font-size="11">Run Audit</text>
+  <rect x="1128" y="612" width="136" height="24" rx="4" fill="#1D4ED8"/>
+  <text x="1196" y="628" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="11" font-weight="600">1-Click Auto-Fix</text>
+
+  <!-- Bottom Timeline & Hierarchy Dock (y=500..736) -->
+  <rect x="38" y="500" width="932" height="236" fill="#1E1E22"/>
+  <rect x="38" y="500" width="932" height="1" fill="#2A2A30"/>
+  <!-- Dock toolbar -->
+  <rect x="48" y="508" width="70" height="22" rx="4" fill="#1D4ED8"/>
+  <text x="83" y="523" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="11" font-weight="600">Timeline</text>
+  <rect x="124" y="508" width="94" height="22" rx="4" fill="#27272C"/>
+  <text x="171" y="523" text-anchor="middle" fill="#D4D4D8" font-family="sans-serif" font-size="11">Motion Curves</text>
+  <text x="410" y="523" fill="#D4D4D8" font-family="monospace" font-size="11">Frame 1   30 fps   0.00 s</text>
+  <rect x="790" y="508" width="76" height="22" rx="4" fill="#27272C" stroke="#34343C"/>
+  <text x="828" y="523" text-anchor="middle" fill="#D4D4D8" font-family="sans-serif" font-size="10.5">+ Part</text>
+  <rect x="872" y="508" width="88" height="22" rx="4" fill="#27272C" stroke="#34343C"/>
+  <text x="916" y="523" text-anchor="middle" fill="#D4D4D8" font-family="sans-serif" font-size="10.5">+ MeshGroup</text>
+  <rect x="38" y="537" width="932" height="1" fill="#2A2A30"/>
+
+  <!-- Left Layers / Node Tree (x=38..258) -->
+  <text x="48" y="556" fill="#9CA3AF" font-family="sans-serif" font-size="11">Nodes</text>
+  <rect x="40" y="564" width="216" height="24" rx="2" fill="#1E3A8A"/>
+  <rect x="242" y="571" width="8" height="8" rx="1" fill="#EF4444"/>
+  <text x="52" y="580" fill="#FFFFFF" font-family="sans-serif" font-size="11">Face</text>
+  <rect x="242" y="597" width="8" height="8" rx="1" fill="#10B981"/>
+  <text x="52" y="606" fill="#D4D4D8" font-family="sans-serif" font-size="11">Eye_L / Pupil_L [Mask]</text>
+  <rect x="242" y="623" width="8" height="8" rx="1" fill="#10B981"/>
+  <text x="52" y="632" fill="#D4D4D8" font-family="sans-serif" font-size="11">Eye_R / Pupil_R [Mask]</text>
+  <rect x="242" y="649" width="8" height="8" rx="1" fill="#F59E0B"/>
+  <text x="52" y="658" fill="#D4D4D8" font-family="sans-serif" font-size="11">Mouth</text>
+  <rect x="242" y="675" width="8" height="8" rx="1" fill="#8B5CF6"/>
+  <text x="52" y="684" fill="#D4D4D8" font-family="sans-serif" font-size="11">Hair_Front_L</text>
+  <rect x="242" y="701" width="8" height="8" rx="1" fill="#3B82F6"/>
+  <text x="52" y="710" fill="#D4D4D8" font-family="sans-serif" font-size="11">Body</text>
+  <rect x="257" y="538" width="1" height="198" fill="#2A2A30"/>
+
+  <!-- Timeline Keyframe Ruler + AniCraft-style Violet/Emerald Tween Bars -->
+  <text x="274" y="556" fill="#9CA3AF" font-family="monospace" font-size="10">1        10        20        30        40        50        60</text>
+  <rect x="270" y="542" width="14" height="18" rx="2" fill="#EF4444"/>
+  <text x="277" y="555" text-anchor="middle" fill="#FFFFFF" font-family="monospace" font-size="10" font-weight="700">1</text>
+  <line x1="277" y1="560" x2="277" y2="736" stroke="#EF4444" stroke-width="1.5"/>
+
+  <rect x="277" y="566" width="440" height="20" rx="2" fill="#6D28D9"/>
+  <circle cx="283" cy="576" r="3" fill="#0F172A"/>
+  <circle cx="497" cy="576" r="3" fill="#0F172A"/>
+  <line x1="286" y1="576" x2="494" y2="576" stroke="#0F172A" stroke-width="1.2"/>
+
+  <rect x="277" y="592" width="440" height="20" rx="2" fill="#059669"/>
+  <circle cx="283" cy="602" r="3" fill="#0F172A"/>
+
+  <rect x="277" y="618" width="440" height="20" rx="2" fill="#059669"/>
+  <circle cx="283" cy="628" r="3" fill="#0F172A"/>
+
+  <rect x="277" y="644" width="440" height="20" rx="2" fill="#6D28D9"/>
+  <circle cx="283" cy="654" r="3" fill="#0F172A"/>
+
+  <rect x="277" y="670" width="440" height="20" rx="2" fill="#059669"/>
+  <rect x="277" y="696" width="440" height="20" rx="2" fill="#059669"/>
+
+  <!-- Bottom Status Strip (#141417) -->
+  <rect x="0" y="736" width="1280" height="24" fill="#141417"/>
+  <rect x="0" y="736" width="1280" height="1" fill="#2A2A30"/>
+  <text x="14" y="752" fill="#34D399" font-family="sans-serif" font-size="11">Ready. Drag on 2D XY Pads or switch to Deform Brush (D) to sculpt live.</text>
+  <text x="1266" y="752" text-anchor="end" fill="#9CA3AF" font-family="monospace" font-size="10.5">render 2.8 ms  |  8 parts  |  392 tris  |  audit 100/100  |  undo 0  |  rev 1</text>
+</svg>
