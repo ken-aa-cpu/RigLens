@@ -15,7 +15,7 @@ use inox2d_mcp::engine::{command_registry, Session};
 use inox2d_mcp::headless_render::{
 	render_anim_gif, render_anim_sheet, render_diagnostic, render_frame, render_grid, RenderOptions,
 };
-use inox2d_mcp::psd::{export_model_to_psd, import_psd_to_model, parse_psd_bytes};
+use inox2d_mcp::psd::{export_model_to_psd, import_psd_to_model_with_mode, parse_psd_bytes};
 use inox2d_mcp::rig::{auto_rig_vtuber, build_sample_vtuber_model};
 use json::JsonValue;
 
@@ -42,7 +42,7 @@ enum Commands {
 		#[arg(long, default_value = "NewPuppet")]
 		name: String,
 	},
-	/// Import a layered .psd file into an .inp puppet (with optional contour meshing & auto-rig)
+	/// Import a layered .psd file into an .inp puppet (with optional Delaunay/contour meshing & auto-rig)
 	ImportPsd {
 		psd: PathBuf,
 		#[arg(long)]
@@ -51,6 +51,8 @@ enum Commands {
 		name: Option<String>,
 		#[arg(long)]
 		no_contour: bool,
+		#[arg(long)]
+		delaunay: bool,
 		#[arg(long)]
 		no_auto_rig: bool,
 		#[arg(long, default_value_t = 8)]
@@ -178,11 +180,17 @@ enum Commands {
 	Serve {
 		#[arg(default_value = "--sample")]
 		input: String,
+		/// Auto-save modified .inp atomically whenever the session mutates (for live render-opengl hot-reload)
+		#[arg(long)]
+		watch: Option<PathBuf>,
 	},
 	/// Run Model Context Protocol (MCP) JSON-RPC 2.0 server on stdio
 	Mcp {
 		#[arg(default_value = "--sample")]
 		input: String,
+		/// Auto-save modified .inp atomically whenever an MCP tool mutates the puppet
+		#[arg(long)]
+		watch: Option<PathBuf>,
 	},
 }
 
@@ -221,6 +229,25 @@ fn parse_param_overrides(items: &[String]) -> Result<HashMap<String, Vec2>, Stri
 	Ok(map)
 }
 
+fn write_inp_atomic(model: &Model, path: &Path) -> Result<(), String> {
+	if let Some(parent) = path.parent() {
+		if !parent.as_os_str().is_empty() {
+			fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir for '{}': {e}", path.display()))?;
+		}
+	}
+	let tmp_path = path.with_extension("inp.tmp");
+	{
+		let file = File::create(&tmp_path)
+			.map_err(|e| format!("Failed to create temp watch file '{}': {e}", tmp_path.display()))?;
+		let mut w = BufWriter::new(file);
+		write_inp(model, &mut w).map_err(|e| format!("Failed to serialize watch .inp: {e}"))?;
+		w.flush().map_err(|e| format!("Failed to flush watch .inp: {e}"))?;
+	}
+	fs::rename(&tmp_path, path)
+		.map_err(|e| format!("Failed to replace watch file '{}': {e}", path.display()))?;
+	Ok(())
+}
+
 fn tool_name_to_cmd(name: &str) -> String {
 	command_registry()
 		.iter()
@@ -243,6 +270,7 @@ fn mcp_tools_list() -> JsonValue {
 			} else if spec.id == "puppet.import_psd" {
 				props.insert("path", json::object! { type: "string", description: "Input .psd path" });
 				props.insert("name", json::object! { type: "string" });
+				props.insert("mesh_mode", json::object! { type: "string", description: "delaunay | contour | grid" });
 				props.insert("contour_mesh", json::object! { type: "boolean" });
 				props.insert("auto_rig", json::object! { type: "boolean" });
 				props.insert("cols", json::object! { type: "integer" });
@@ -289,6 +317,13 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("node_uuid", json::object! { type: "integer" });
 				props.insert("cols", json::object! { type: "integer" });
 				props.insert("rows", json::object! { type: "integer" });
+				props.insert("alpha_threshold", json::object! { type: "integer" });
+			} else if spec.id == "mesh.auto_delaunay" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("width", json::object! { type: "number" });
+				props.insert("height", json::object! { type: "number" });
+				props.insert("step_px", json::object! { type: "number" });
 				props.insert("alpha_threshold", json::object! { type: "integer" });
 			} else if spec.id == "rig.auto_head_perspective" {
 				props.insert("node_name", json::object! { type: "string" });
@@ -354,6 +389,8 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("height", json::object! { type: "integer" });
 				props.insert("scale", json::object! { type: "number" });
 				props.insert("wireframe", json::object! { type: "boolean" });
+			} else if spec.id == "craft.figcraft_card" {
+				props.insert("out", json::object! { type: "string", description: "Output PNG path (.svg written alongside)" });
 			} else if spec.id == "session.checkpoint" || spec.id == "session.restore" {
 				props.insert("name", json::object! { type: "string" });
 			} else if spec.id == "session.batch" {
@@ -529,6 +566,7 @@ fn run() -> Result<(), String> {
 			out,
 			name,
 			no_contour,
+			delaunay,
 			no_auto_rig,
 			cols,
 			rows,
@@ -541,7 +579,14 @@ fn run() -> Result<(), String> {
 					.unwrap_or("PsdPuppet")
 					.to_owned()
 			});
-			let model = import_psd_to_model(&doc, &puppet_name, !no_contour, !no_auto_rig, cols, rows);
+			let mesh_mode = if delaunay {
+				"delaunay"
+			} else if !no_contour {
+				"contour"
+			} else {
+				"grid"
+			};
+			let model = import_psd_to_model_with_mode(&doc, &puppet_name, mesh_mode, !no_auto_rig, cols, rows);
 			let file = File::create(&out).map_err(|e| format!("Failed to create {}: {e}", out.display()))?;
 			let mut w = BufWriter::new(file);
 			write_inp(&model, &mut w).map_err(|e| format!("Failed to write .inp: {e}"))?;
@@ -710,8 +755,13 @@ fn run() -> Result<(), String> {
 			}
 			println!("{}", json::stringify_pretty(result, 2));
 		}
-		Commands::Serve { input } => {
+		Commands::Serve { input, watch } => {
 			let mut session = Session::new(load_model(&input)?);
+			if let Some(ref wpath) = watch {
+				if !wpath.exists() {
+					write_inp_atomic(&session.model, wpath)?;
+				}
+			}
 			let stdin = io::stdin();
 			let mut stdout = io::stdout();
 			for line in stdin.lock().lines() {
@@ -735,13 +785,21 @@ fn run() -> Result<(), String> {
 				}
 				let id = req["id"].clone();
 				let params = &req["params"];
+				let prev_rev = session.revision;
 				let resp = match session.exec(cmd, params) {
-					Ok(res) => json::object! {
-						id: id,
-						ok: true,
-						revision: session.revision,
-						result: res
-					},
+					Ok(res) => {
+						if session.revision != prev_rev {
+							if let Some(ref wpath) = watch {
+								write_inp_atomic(&session.model, wpath)?;
+							}
+						}
+						json::object! {
+							id: id,
+							ok: true,
+							revision: session.revision,
+							result: res
+						}
+					}
 					Err(err) => json::object! {
 						id: id,
 						ok: false,
@@ -753,8 +811,13 @@ fn run() -> Result<(), String> {
 				stdout.flush().map_err(|e| e.to_string())?;
 			}
 		}
-		Commands::Mcp { input } => {
+		Commands::Mcp { input, watch } => {
 			let mut session = Session::new(load_model(&input)?);
+			if let Some(ref wpath) = watch {
+				if !wpath.exists() {
+					write_inp_atomic(&session.model, wpath)?;
+				}
+			}
 			let stdin = io::stdin();
 			let mut stdout = io::stdout();
 			for line in stdin.lock().lines() {
@@ -764,7 +827,13 @@ fn run() -> Result<(), String> {
 					continue;
 				}
 				if let Ok(req) = json::parse(trimmed) {
+					let prev_rev = session.revision;
 					if let Some(resp) = handle_mcp_request(&mut session, &req) {
+						if session.revision != prev_rev {
+							if let Some(ref wpath) = watch {
+								write_inp_atomic(&session.model, wpath)?;
+							}
+						}
 						writeln!(stdout, "{}", json::stringify(resp)).map_err(|e| e.to_string())?;
 						stdout.flush().map_err(|e| e.to_string())?;
 					}
@@ -785,6 +854,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use inox2d_mcp::psd::import_psd_to_model;
 
 	#[test]
 	fn sample_vtuber_roundtrip_and_render_grid() {
@@ -1293,5 +1363,68 @@ mod tests {
 		let gif_bytes = fs::read(&gif_path).unwrap();
 		assert!(gif_bytes.starts_with(b"GIF89a"));
 		let _ = fs::remove_file(&gif_path);
+	}
+
+	#[test]
+	fn delaunay_mesh_and_figcraft_card() {
+		use image::{Rgba, RgbaImage};
+		use inox2d_mcp::rig::generate_delaunay_mesh;
+
+		// Concave L-shaped silhouette: top-right quadrant (x >= 64 && y < 64) is transparent.
+		let mut img = RgbaImage::from_pixel(128, 128, Rgba([0, 0, 0, 0]));
+		for y in 8..120 {
+			for x in 8..120 {
+				if !(x >= 68 && y <= 60) {
+					img.put_pixel(x, y, Rgba([220, 180, 190, 255]));
+				}
+			}
+		}
+
+		let mesh = generate_delaunay_mesh(&img, 128.0, 128.0, 18.0, 4);
+		assert!(mesh.vertices.len() >= 12);
+		assert!(mesh.indices.len() >= 12 && mesh.indices.len() % 3 == 0);
+		for &uv in &mesh.uvs {
+			assert!(uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0);
+		}
+		// Ensure no triangle centroid falls deep inside the empty top-right bay (x > 84, y < 44 => local x > 20, y < -20).
+		for tri in mesh.indices.chunks_exact(3) {
+			let a = mesh.vertices[tri[0] as usize];
+			let b = mesh.vertices[tri[1] as usize];
+			let c = mesh.vertices[tri[2] as usize];
+			let g = (a + b + c) / 3.0;
+			assert!(
+				!(g.x > 20.0 && g.y < -20.0),
+				"Delaunay culling leaked triangle into concave bay at {:?}",
+				g
+			);
+		}
+
+		let mut session = Session::new_sample();
+		let res = session
+			.exec(
+				"mesh.auto_delaunay",
+				&json::object! { node_name: "Face", step_px: 20.0 },
+			)
+			.unwrap();
+		assert_eq!(res["triangulation"].as_str(), Some("bowyer_watson_delaunay"));
+		assert!(res["triangles"].as_u32().unwrap() >= 8);
+
+		let card_png = std::env::temp_dir().join("inox2d_test_spec_card.png");
+		let card_svg = card_png.with_extension("svg");
+		let card_res = session
+			.exec(
+				"craft.figcraft_card",
+				&json::object! { out: card_png.to_string_lossy().as_ref() },
+			)
+			.unwrap();
+		assert!(card_png.exists());
+		assert!(card_svg.exists());
+		let png_bytes = fs::read(&card_png).unwrap();
+		assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+		let svg_text = fs::read_to_string(&card_svg).unwrap();
+		assert!(svg_text.contains("6-POINT RIG AUDIT BREAKDOWN"));
+		assert!(card_res["audit_score"].as_u32().is_some());
+		let _ = fs::remove_file(&card_png);
+		let _ = fs::remove_file(&card_svg);
 	}
 }

@@ -18,18 +18,19 @@ use json::object::Object;
 use json::JsonValue;
 
 use crate::audit::{analyze_anatomy, audit_rig, auto_fix_rig};
+use crate::craft_ui::generate_rig_spec_card;
 use crate::headless_render::{
 	render_anim_gif, render_anim_sheet, render_diagnostic, render_diff, render_frame, render_grid, RenderOptions,
 };
 use crate::psd::{
-	export_model_to_psd, import_psd_to_model, parse_psd_bytes, photocraft_convert, photocraft_inspect,
+	export_model_to_psd, import_psd_to_model_with_mode, parse_psd_bytes, photocraft_convert, photocraft_inspect,
 };
 use crate::rig::{
 	add_grid_part, add_pendulum_physics, add_standard_vtuber_params, apply_blink_binding, apply_breath_binding,
 	apply_brow_binding, apply_deform_brush, apply_head_perspective_binding, apply_head_roll_binding,
 	apply_mouth_form_binding, apply_mouth_visemes_2d, apply_opacity_binding, auto_rig_vtuber,
-	build_sample_vtuber_model, create_idle_animation, generate_contour_mesh, generate_grid_mesh,
-	synthesize_expression_overlay,
+	build_sample_vtuber_model, create_idle_animation, generate_contour_mesh, generate_delaunay_mesh,
+	generate_grid_mesh, synthesize_expression_overlay,
 };
 
 pub struct CommandSpec {
@@ -57,8 +58,8 @@ pub fn command_registry() -> &'static [CommandSpec] {
 		},
 		CommandSpec {
 			id: "puppet.import_psd",
-			description: "Import a layered .psd artwork file into an Inochi2D puppet with optional contour meshing and auto-rigging",
-			params_schema: r#"{"path":"string","name?":"string","contour_mesh?":true,"auto_rig?":true,"cols?":8,"rows?":8}"#,
+			description: "Import a layered .psd artwork file into an Inochi2D puppet with optional Delaunay/contour meshing and auto-rigging",
+			params_schema: r#"{"path":"string","name?":"string","mesh_mode?":"delaunay|contour|grid","contour_mesh?":true,"auto_rig?":true,"cols?":8,"rows?":8}"#,
 		},
 		CommandSpec {
 			id: "puppet.export_psd",
@@ -89,6 +90,11 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			id: "mesh.auto_contour",
 			description: "Rebuild a Part node's mesh by culling transparent cells around its alpha contour",
 			params_schema: r#"{"node_uuid?":1,"node_name?":"string","cols?":8,"rows?":8,"alpha_threshold?":4}"#,
+		},
+		CommandSpec {
+			id: "mesh.auto_delaunay",
+			description: "Rebuild a Part node's mesh using Bowyer-Watson Delaunay contour triangulation and staggered interior hex lattice",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"string","step_px?":22.0,"alpha_threshold?":4}"#,
 		},
 		CommandSpec {
 			id: "param.add_standard_vtuber",
@@ -194,6 +200,11 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			id: "render.gif",
 			description: "Render a looping animated .gif of an animation or continuous physics motion test",
 			params_schema: r#"{"out":"preview.gif","anim?":"Idle","frames?":24,"fps?":15,"width?":320,"height?":320,"scale?":0.85,"wireframe?":false}"#,
+		},
+		CommandSpec {
+			id: "craft.figcraft_card",
+			description: "Generate a FigCraft SVG+PNG Rigging Spec Card showing puppet render preview, 6-point audit breakdown, mesh stats, and parameter pills",
+			params_schema: r#"{"out":"spec_card.png"}"#,
 		},
 		CommandSpec {
 			id: "edit.undo",
@@ -364,6 +375,7 @@ impl Session {
 				| "render.diagnostic"
 				| "render.diff"
 				| "render.gif"
+				| "craft.figcraft_card"
 				| "edit.undo"
 				| "edit.redo"
 				| "session.checkpoint"
@@ -520,11 +532,17 @@ impl Session {
 							.unwrap_or("PsdPuppet")
 							.to_owned()
 					});
-				let contour_mesh = params["contour_mesh"].as_bool().unwrap_or(true);
+				let mesh_mode = if let Some(m) = params["mesh_mode"].as_str() {
+					m
+				} else if params["contour_mesh"].as_bool().unwrap_or(true) {
+					"contour"
+				} else {
+					"grid"
+				};
 				let auto_rig = params["auto_rig"].as_bool().unwrap_or(true);
 				let cols = params["cols"].as_usize().unwrap_or(8);
 				let rows = params["rows"].as_usize().unwrap_or(8);
-				self.model = import_psd_to_model(&psd, &model_name, contour_mesh, auto_rig, cols, rows);
+				self.model = import_psd_to_model_with_mode(&psd, &model_name, mesh_mode, auto_rig, cols, rows);
 				self.param_overrides.clear();
 				self.revision += 1;
 				Ok(self.cmd_info())
@@ -693,6 +711,53 @@ impl Session {
 				self.revision += 1;
 				Ok(json::object! {
 					node_uuid: id.0,
+					vertices: vcount,
+					triangles: tcount
+				})
+			}
+			"mesh.auto_delaunay" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let step_px = params["step_px"].as_f32().unwrap_or(22.0);
+				let alpha_threshold = params["alpha_threshold"].as_u8().unwrap_or(4);
+
+				let existing = self
+					.model
+					.puppet
+					.node_comps
+					.get::<Mesh>(id)
+					.ok_or_else(|| format!("Node {} has no Mesh", id.0))?
+					.clone();
+				let tm = self
+					.model
+					.puppet
+					.node_comps
+					.get::<TexturedMesh>(id)
+					.ok_or_else(|| format!("Node {} has no TexturedMesh", id.0))?
+					.clone();
+				let decoded = decode_model_textures(self.model.textures.iter());
+				let tex = decoded
+					.get(tm.tex_albedo.0)
+					.ok_or_else(|| format!("Texture {} missing", tm.tex_albedo.0))?;
+				let img = RgbaImage::from_raw(tex.width(), tex.height(), tex.pixels().to_vec())
+					.ok_or_else(|| "Failed to construct RgbaImage from texture".to_owned())?;
+
+				let (min_v, max_v) = existing.vertices.iter().fold(
+					(vec2(f32::INFINITY, f32::INFINITY), vec2(f32::NEG_INFINITY, f32::NEG_INFINITY)),
+					|(mn, mx), &v| (mn.min(v), mx.max(v)),
+				);
+				let cur_size = (max_v - min_v).max(vec2(16.0, 16.0));
+				let width = params["width"].as_f32().unwrap_or(cur_size.x);
+				let height = params["height"].as_f32().unwrap_or(cur_size.y);
+
+				let new_mesh = generate_delaunay_mesh(&img, width, height, step_px, alpha_threshold);
+				let vcount = new_mesh.vertices.len();
+				let tcount = new_mesh.indices.len() / 3;
+				self.model.puppet.node_comps.set(id, new_mesh);
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					triangulation: "bowyer_watson_delaunay",
 					vertices: vcount,
 					triangles: tcount
 				})
@@ -1046,6 +1111,10 @@ impl Session {
 					fps: fps,
 					bytes: gif_bytes.len()
 				})
+			}
+			"craft.figcraft_card" => {
+				let out = params["out"].as_str().unwrap_or("spec_card.png");
+				generate_rig_spec_card(&mut self.model, Path::new(out))
 			}
 			"node.configure" => {
 				let id = self.resolve_node(params, "node_uuid", "node_name")?;

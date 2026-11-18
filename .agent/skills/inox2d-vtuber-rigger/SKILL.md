@@ -23,7 +23,7 @@ Never guess raw vertex coordinates or eyeball whether a 2.5D head turn leaks out
    - `Mouth` / `嘴` (`depth_z = 1.1` + `Mouth:: Open` + `Mouth:: Form` + `Mouth:: Viseme`)
    - `Brow` / `眉` (`depth_z = 1.05` + `Brow:: Left/Right`), `Nose` / `鼻` (`depth_z = 1.35`), `Ear` / `耳` (`depth_z = -0.55`)
    - `Torso` / `Body` / `身體` (`Breath`)
-3. Import into the session using `puppet_import_psd` (`path`, `contour_mesh: true`, `auto_rig: true`).
+3. Import into the session using `puppet_import_psd` (`path`, `mesh_mode: "delaunay"` recommended for organic curved hair/face silhouettes or `"contour"`, `auto_rig: true`). To upgrade any existing Part mesh individually, call `mesh_auto_delaunay` (`node_name`, `step_px`).
 4. Fix any hierarchy, zsort, transform, or clipping mistakes cleanly using `node_configure`, `node_set_mask`, `node_add_meshgroup`, or `node_remove`.
 
 ### Stage 2: Anatomical Telemetry (`rig_analyze_anatomy`)
@@ -59,7 +59,9 @@ Call `rig_analyze_anatomy` **before** manual tweaks.
 4. Render an X-ray diagnostic image at extreme poses via `render_diagnostic` (`out: "diagnostic.png"`) and a 3×3 parameter sweep via `render_grid` (`param: "Head:: Yaw-Pitch"`, `wireframe: true`, `out: "head_grid.png"`).
 5. Always re-run `rig_audit` after sculpting with `deform_brush`.
 
-### Stage 6: Motion Verification, Animated GIF & Export
+### Stage 6: Motion Verification, FigCraft Spec Card, Live OpenGL & Export
 1. Render the `Idle` animation + physics motion sheet via `render_anim_sheet` (`anim: "Idle"`, `frames: 8`, `out: "idle_sheet.png"`).
 2. Export a looping animated `.gif` preview via `render_gif` (`anim: "Idle"`, `frames: 24`, `fps: 15`, `out: "preview.gif"`) so humans can review blinking, breathing, and pendulum physics in one click.
-3. Save the final `.inp` model via `puppet_save` (`path: "output.inp"`). The output opens directly in official `Inochi Creator` and `Inochi Session`.
+3. Generate a studio FigCraft Rigging Spec Card (`craft_figcraft_card`, `out: "spec_card.png"`, rendered via `FigCraft`) summarizing the transparent puppet preview, mesh/parameter stats, and 6-point audit breakdown.
+4. For real-time OpenGL review while editing, launch `inox2d-mcp mcp --watch live.inp` alongside `cargo run -p render-opengl live.inp` (hotkeys: Mouse=track head/eyes, `Space`=Idle anim, `B`=blink, `M`=visemes, `1`–`5`=animated `OpacityStore` expression overlays, `F`=fit camera, `R`=reload).
+5. Save the final `.inp` model via `puppet_save` (`path: "output.inp"`). The output opens directly in official `Inochi Creator` and `Inochi Session`.

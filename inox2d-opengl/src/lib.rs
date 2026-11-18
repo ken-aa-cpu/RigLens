@@ -407,6 +407,24 @@ impl OpenglRenderer {
 			self.gl.clear(glow::COLOR_BUFFER_BIT);
 		}
 	}
+
+	/// Release renderer-owned OpenGL objects and return the underlying `glow::Context`
+	/// so callers can cleanly rebuild `OpenglRenderer` on model hot-reload without VRAM leaks.
+	pub fn into_gl(self) -> glow::Context {
+		let gl = &self.gl;
+		unsafe {
+			gl.bind_vertex_array(None);
+			gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+			gl.delete_vertex_array(self.vao);
+			gl.delete_buffer(self.deform_buffer);
+			gl.delete_framebuffer(self.composite_framebuffer);
+			gl.delete_texture(self.cf_albedo);
+			gl.delete_texture(self.cf_emissive);
+			gl.delete_texture(self.cf_bump);
+			gl.delete_texture(self.cf_stencil);
+		}
+		self.gl
+	}
 }
 
 impl InoxRenderer for OpenglRenderer {
@@ -515,7 +533,7 @@ impl InoxRenderer for OpenglRenderer {
 			part_shader.set_mvp(gl, mvp);
 
 			// frag uniforms
-			part_shader.set_opacity(gl, components.drawable.blending.opacity);
+			part_shader.set_opacity(gl, components.opacity);
 			part_shader.set_mult_color(gl, components.drawable.blending.tint);
 			part_shader.set_screen_color(gl, components.drawable.blending.screen_tint);
 		}
@@ -604,7 +622,7 @@ impl InoxRenderer for OpenglRenderer {
 
 			self.set_blend_mode(blending.mode);
 
-			let opacity = blending.opacity.clamp(0.0, 1.0);
+			let opacity = components.opacity.clamp(0.0, 1.0);
 			let tint = blending.tint.clamp(Vec3::ZERO, Vec3::ONE);
 			let screen_tint = blending.screen_tint.clamp(Vec3::ZERO, Vec3::ONE);
 

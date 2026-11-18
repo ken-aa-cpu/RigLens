@@ -10,7 +10,9 @@ use inox2d::puppet::Puppet;
 use inox2d::texture::{decode_model_textures, TextureId};
 use json::JsonValue;
 
-use crate::rig::{auto_rig_vtuber, encode_rgba_png, generate_contour_mesh, generate_grid_mesh};
+use crate::rig::{
+	auto_rig_vtuber, encode_rgba_png, generate_contour_mesh, generate_delaunay_mesh, generate_grid_mesh,
+};
 
 pub const DEFAULT_PHOTOCRAFT_CLI: &str = r"D:\app\PhotoCraft\photocraft-cli.exe";
 
@@ -619,11 +621,12 @@ fn trim_layer_alpha(layer: &PsdLayer) -> Option<(RgbaImage, i32, i32)> {
 	Some((cropped, layer.left + x0 as i32, layer.top + y0 as i32))
 }
 
-/// Convert a parsed `PsdDocument` into a rigged/structured Inochi2D `Model`.
-pub fn import_psd_to_model(
+/// Convert a parsed `PsdDocument` into a rigged/structured Inochi2D `Model`
+/// using the chosen meshing strategy (`"delaunay"`, `"contour"`, or `"grid"`).
+pub fn import_psd_to_model_with_mode(
 	psd: &PsdDocument,
 	name: &str,
-	contour_mesh: bool,
+	mesh_mode: &str,
 	auto_rig: bool,
 	grid_cols: usize,
 	grid_rows: usize,
@@ -737,10 +740,14 @@ pub fn import_psd_to_model(
 			},
 		);
 
-		let mesh = if contour_mesh {
-			generate_contour_mesh(&trimmed, tw, th, grid_cols.max(4), grid_rows.max(4), 4)
-		} else {
-			generate_grid_mesh(tw, th, grid_cols.max(2), grid_rows.max(2), vec2(0.0, 0.0))
+		let mesh = match mesh_mode {
+			"delaunay" => {
+				let target_div = grid_cols.max(grid_rows).max(4) as f32;
+				let step_px = (tw.max(th) / target_div).clamp(12.0, 44.0);
+				generate_delaunay_mesh(&trimmed, tw, th, step_px, 4)
+			}
+			"contour" => generate_contour_mesh(&trimmed, tw, th, grid_cols.max(4), grid_rows.max(4), 4),
+			_ => generate_grid_mesh(tw, th, grid_cols.max(2), grid_rows.max(2), vec2(0.0, 0.0)),
 		};
 		model.puppet.node_comps.add(id, mesh);
 	}
@@ -750,6 +757,19 @@ pub fn import_psd_to_model(
 	}
 
 	model
+}
+
+/// Convert a parsed `PsdDocument` into a rigged/structured Inochi2D `Model`.
+pub fn import_psd_to_model(
+	psd: &PsdDocument,
+	name: &str,
+	contour_mesh: bool,
+	auto_rig: bool,
+	grid_cols: usize,
+	grid_rows: usize,
+) -> Model {
+	let mode = if contour_mesh { "contour" } else { "grid" };
+	import_psd_to_model_with_mode(psd, name, mode, auto_rig, grid_cols, grid_rows)
 }
 
 /// Export all Part layers of a `Model` into a multi-layer `.psd` byte stream.

@@ -53,17 +53,20 @@ cargo run -p inox2d-mcp -- render-grid sample_vtuber.inp --param "Head:: Yaw-Pit
 # Render an 8-frame Idle animation sheet
 cargo run -p inox2d-mcp -- render-anim sample_vtuber.inp --out idle_sheet.png --anim Idle --frames 8 --wireframe
 
-# Import a layered PSD and auto-rig it into an .inp puppet
-cargo run -p inox2d-mcp -- import-psd character.psd --out character.inp
+# Import a layered PSD with Bowyer-Watson Delaunay meshing and auto-rig into an .inp puppet
+cargo run -p inox2d-mcp -- import-psd character.psd --out character.inp --delaunay
+
+# Generate a studio FigCraft Rigging Spec Card (SVG + PNG)
+cargo run -p inox2d-mcp -- exec sample_vtuber.inp craft.figcraft_card '{\"out\":\"spec_card.png\"}'
 
 # Export an .inp puppet back to a layered PSD
 cargo run -p inox2d-mcp -- export-psd sample_vtuber.inp --out character.psd
 
-# List all engine commands
+# List all 45 engine commands
 cargo run -p inox2d-mcp -- commands
 
-# Run as an MCP server (JSON-RPC 2.0 over stdio)
-cargo run -p inox2d-mcp -- mcp sample_vtuber.inp
+# Run as an MCP server (JSON-RPC 2.0 over stdio) with live .inp hot-reload watch
+cargo run -p inox2d-mcp -- mcp --sample --watch live.inp
 ```
 
 ### MCP Client Configuration
@@ -90,19 +93,20 @@ Both INP and INX files get parsed **and serialized** (`write_inp`) cleanly.
 - [x] Parsing & Serialization
   - [x] INP format (read + write round-trip)
   - [x] INX / JSON payload (read + write)
-  - [x] Layered `.psd` import & export (`inox2d-mcp`)
+  - [x] Layered `.psd` import & export with Bowyer-Watson Delaunay contour meshing (`inox2d-mcp`)
 - [x] Rendering
-  - [x] OpenGL
+  - [x] OpenGL (with `OpacityStore` expression blending + live `.inp` hot-reload in `render-opengl`)
     - [x] WASM (WebGL)
-  - [x] Headless CPU Software Renderer + 3×3 / Animation Contact Sheets (`inox2d-mcp`)
+  - [x] Headless CPU Software Renderer, X-Ray Diagnostic, Diff, GIF & FigCraft Spec Card (`inox2d-mcp`)
 - [x] Parameters
   - [x] Deforms (mesh vertex offsets)
   - [x] Values (node transform offsets)
+  - [x] Opacity (`OpacityStore` parameter blending in both CPU & OpenGL renderers)
   - [x] Z-sort
 - [x] Physics (`SimplePhysics` Rigid & Spring Pendulums)
 - [x] Animations (`PuppetAnimation`, `AnimationLane`, `Keyframe`)
 - [x] Mesh groups (`MeshGroup` barycentric deform propagation)
-- [x] Agent / MCP Server (`inox2d-mcp` CLI, JSON-lines `serve`, JSON-RPC 2.0 `mcp`)
+- [x] Agent / MCP Server (`inox2d-mcp` CLI, JSON-lines `serve --watch`, JSON-RPC 2.0 `mcp --watch`, 45 tools)
 
 ### INP and INX parsing
 
@@ -112,11 +116,15 @@ cargo run -p inox2d --features owo --example parse-inp path/to/puppet.inp
 
 ![Parsed foxgirl](https://fs.speykious.dev/inox2d/inox2d-parsed-foxgirl.png)
 
-### OpenGL renderer
+### OpenGL renderer (with live `.inp` hot-reload & interactive VTuber controls)
 
 ```sh
-cargo run -p render-opengl path/to/puppet.inp
+cargo run -p render-opengl live.inp
 ```
+
+While running side-by-side with `inox2d-mcp mcp --watch live.inp`:
+- **Auto hot-reload**: automatically detects atomic `.inp` updates every 250ms while preserving camera pan/zoom (`R` forces reload, `F` auto-fits puppet bounds).
+- **Interactive controls**: move mouse for `Head:: Yaw-Pitch` / `Head:: Roll` / eye gaze tracking, `Space` to toggle `Idle` animation playback, `B` to blink, `M` to cycle 2D `Mouth:: Viseme` presets (`Neutral/A/I/U/E/O`), and `1`–`5` to toggle animated `OpacityStore` expression overlays (`Expr:: Blush/Gloom/Tears/Angry/Shock`).
 
 ![OpenGL-rendered Arch-chan](https://fs.speykious.dev/inox2d/inox2d-opengl-arch-chan.png)
 

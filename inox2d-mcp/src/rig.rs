@@ -2044,3 +2044,379 @@ pub fn synthesize_expression_overlay(
 
 	Ok((id, param_name.to_owned()))
 }
+
+#[derive(Clone, Copy)]
+struct DelaunayPt {
+	x: f64,
+	y: f64,
+}
+
+#[inline]
+fn orient2d_f64(a: DelaunayPt, b: DelaunayPt, c: DelaunayPt) -> f64 {
+	(b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+#[inline]
+fn in_circumcircle_ccw(a: DelaunayPt, b: DelaunayPt, c: DelaunayPt, p: DelaunayPt) -> bool {
+	let ax = a.x - p.x;
+	let ay = a.y - p.y;
+	let bx = b.x - p.x;
+	let by = b.y - p.y;
+	let cx = c.x - p.x;
+	let cy = c.y - p.y;
+	let det = (ax * ax + ay * ay) * (bx * cy - by * cx)
+		- (bx * bx + by * by) * (ax * cy - ay * cx)
+		+ (cx * cx + cy * cy) * (ax * by - ay * bx);
+	det > 0.0
+}
+
+/// Generate a true contour-hugging Delaunay triangle mesh using:
+/// 1) 2px separable morphological dilation on the alpha channel,
+/// 2) Poisson-spaced boundary contour sampling (preserving silhouette extremes),
+/// 3) Staggered equilateral interior lattice sampling,
+/// 4) Bowyer-Watson Delaunay triangulation in `f64`, and
+/// 5) Concave-bay silhouette culling + unused vertex compaction.
+pub fn generate_delaunay_mesh(
+	img: &RgbaImage,
+	width: f32,
+	height: f32,
+	step_px: f32,
+	alpha_threshold: u8,
+) -> Mesh {
+	let iw = img.width() as usize;
+	let ih = img.height() as usize;
+	if iw < 3 || ih < 3 || width <= 1.0 || height <= 1.0 {
+		return generate_grid_mesh(width.max(1.0), height.max(1.0), 2, 2, Vec2::ZERO);
+	}
+
+	let mut raw = vec![false; iw * ih];
+	let mut any_opaque = false;
+	let mut min_px = iw;
+	let mut min_py = ih;
+	let mut max_px = 0usize;
+	let mut max_py = 0usize;
+
+	for y in 0..ih {
+		for x in 0..iw {
+			if img.get_pixel(x as u32, y as u32).0[3] > alpha_threshold {
+				raw[y * iw + x] = true;
+				any_opaque = true;
+				min_px = min_px.min(x);
+				min_py = min_py.min(y);
+				max_px = max_px.max(x);
+				max_py = max_py.max(y);
+			}
+		}
+	}
+
+	if !any_opaque {
+		return generate_grid_mesh(width, height, 2, 2, Vec2::ZERO);
+	}
+
+	// Separable 2px morphological dilation to protect anti-aliased fringes.
+	let dilate = 2isize;
+	let mut horiz = vec![false; iw * ih];
+	for y in 0..ih {
+		let row = y * iw;
+		for x in 0..iw {
+			let x0 = (x as isize - dilate).max(0) as usize;
+			let x1 = (x as isize + dilate).min(iw as isize - 1) as usize;
+			let mut hit = false;
+			for kx in x0..=x1 {
+				if raw[row + kx] {
+					hit = true;
+					break;
+				}
+			}
+			horiz[row + x] = hit;
+		}
+	}
+
+	let mut mask = vec![false; iw * ih];
+	for y in 0..ih {
+		let y0 = (y as isize - dilate).max(0) as usize;
+		let y1 = (y as isize + dilate).min(ih as isize - 1) as usize;
+		for x in 0..iw {
+			let mut hit = false;
+			for ky in y0..=y1 {
+				if horiz[ky * iw + x] {
+					hit = true;
+					break;
+				}
+			}
+			mask[y * iw + x] = hit;
+		}
+	}
+
+	let w64 = width as f64;
+	let h64 = height as f64;
+	let sx = (w64 / iw as f64).max(0.01);
+	let sy = (h64 / ih as f64).max(0.01);
+	let spacing = (step_px.clamp(6.0, 256.0) as f64) * ((sx + sy) * 0.5);
+	let b_min_dist = (spacing * 0.65).max(3.0);
+	let i_min_dist = spacing * 0.52;
+
+	let px_to_local = |px: usize, py: usize| -> DelaunayPt {
+		DelaunayPt {
+			x: ((px as f64 + 0.5) / iw as f64 - 0.5) * w64,
+			y: ((py as f64 + 0.5) / ih as f64 - 0.5) * h64,
+		}
+	};
+
+	let sample_mask = |lx: f64, ly: f64| -> bool {
+		let u = lx / w64 + 0.5;
+		let v = ly / h64 + 0.5;
+		let ix = (u * iw as f64).floor() as isize;
+		let iy = (v * ih as f64).floor() as isize;
+		if ix < 0 || iy < 0 || ix >= iw as isize || iy >= ih as isize {
+			return false;
+		}
+		mask[iy as usize * iw + ix as usize]
+	};
+
+	let mut pts: Vec<DelaunayPt> = Vec::new();
+	let mut buckets: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+	let cell_size = b_min_dist;
+
+	let try_insert = |pt: DelaunayPt,
+	                  min_dist: f64,
+	                  pts: &mut Vec<DelaunayPt>,
+	                  buckets: &mut HashMap<(i32, i32), Vec<usize>>| {
+		let cx = (pt.x / cell_size).floor() as i32;
+		let cy = (pt.y / cell_size).floor() as i32;
+		let r2 = min_dist * min_dist;
+		for dy in -1..=1 {
+			for dx in -1..=1 {
+				if let Some(list) = buckets.get(&(cx + dx, cy + dy)) {
+					for &idx in list {
+						let ex = pts[idx].x - pt.x;
+						let ey = pts[idx].y - pt.y;
+						if ex * ex + ey * ey < r2 {
+							return;
+						}
+					}
+				}
+			}
+		}
+		let idx = pts.len();
+		pts.push(pt);
+		buckets.entry((cx, cy)).or_default().push(idx);
+	};
+
+	// Collect boundary pixels and extreme silhouette anchors so tips/corners are never lost.
+	let mut boundary_coords: Vec<(usize, usize)> = Vec::new();
+	let mut ext_top: Option<(usize, usize)> = None;
+	let mut ext_bot: Option<(usize, usize)> = None;
+	let mut ext_left: Option<(usize, usize)> = None;
+	let mut ext_right: Option<(usize, usize)> = None;
+
+	for y in 0..ih {
+		for x in 0..iw {
+			if !mask[y * iw + x] {
+				continue;
+			}
+			let is_boundary = x == 0
+				|| x + 1 == iw
+				|| y == 0
+				|| y + 1 == ih
+				|| !mask[y * iw + x - 1]
+				|| !mask[y * iw + x + 1]
+				|| !mask[(y - 1) * iw + x]
+				|| !mask[(y + 1) * iw + x];
+			if !is_boundary {
+				continue;
+			}
+			if ext_top.map_or(true, |(_, ey)| y < ey) {
+				ext_top = Some((x, y));
+			}
+			if ext_bot.map_or(true, |(_, ey)| y > ey) {
+				ext_bot = Some((x, y));
+			}
+			if ext_left.map_or(true, |(ex, _)| x < ex) {
+				ext_left = Some((x, y));
+			}
+			if ext_right.map_or(true, |(ex, _)| x > ex) {
+				ext_right = Some((x, y));
+			}
+			boundary_coords.push((x, y));
+		}
+	}
+
+	for ext in [ext_top, ext_bot, ext_left, ext_right].into_iter().flatten() {
+		try_insert(px_to_local(ext.0, ext.1), b_min_dist, &mut pts, &mut buckets);
+	}
+	for (bx, by) in boundary_coords {
+		try_insert(px_to_local(bx, by), b_min_dist, &mut pts, &mut buckets);
+	}
+
+	// Staggered hexagonal lattice for well-shaped interior triangles.
+	let dmin_x = ((min_px.saturating_sub(2) as f64 + 0.5) / iw as f64 - 0.5) * w64;
+	let dmax_x = (((max_px + 2).min(iw - 1) as f64 + 0.5) / iw as f64 - 0.5) * w64;
+	let dmin_y = ((min_py.saturating_sub(2) as f64 + 0.5) / ih as f64 - 0.5) * h64;
+	let dmax_y = (((max_py + 2).min(ih - 1) as f64 + 0.5) / ih as f64 - 0.5) * h64;
+	let hex_dx = spacing;
+	let hex_dy = spacing * 0.8660254037844386;
+
+	let mut row_idx = 0usize;
+	let mut ly = dmin_y + hex_dy * 0.5;
+	while ly <= dmax_y - hex_dy * 0.25 {
+		let offset = if row_idx % 2 == 1 { hex_dx * 0.5 } else { 0.0 };
+		let mut lx = dmin_x + offset;
+		while lx <= dmax_x {
+			if sample_mask(lx, ly) {
+				try_insert(DelaunayPt { x: lx, y: ly }, i_min_dist, &mut pts, &mut buckets);
+			}
+			lx += hex_dx;
+		}
+		row_idx += 1;
+		ly += hex_dy;
+	}
+
+	let n = pts.len();
+	if n < 3 {
+		return generate_contour_mesh(img, width, height, 4, 4, alpha_threshold);
+	}
+
+	// Perturb predicates infinitesimally (Simulation of Simplicity) so exact circles never degenerate.
+	let mut bw_pts: Vec<DelaunayPt> = pts
+		.iter()
+		.enumerate()
+		.map(|(i, p)| {
+			let jx = (((i.wrapping_mul(2654435761) & 1023) as f64) / 1023.0 - 0.5) * 1e-4;
+			let jy = (((i.wrapping_mul(1597334677) & 1023) as f64) / 1023.0 - 0.5) * 1e-4;
+			DelaunayPt {
+				x: p.x + jx,
+				y: p.y + jy,
+			}
+		})
+		.collect();
+
+	let (mut bx0, mut bx1) = (f64::INFINITY, f64::NEG_INFINITY);
+	let (mut by0, mut by1) = (f64::INFINITY, f64::NEG_INFINITY);
+	for p in &bw_pts {
+		bx0 = bx0.min(p.x);
+		bx1 = bx1.max(p.x);
+		by0 = by0.min(p.y);
+		by1 = by1.max(p.y);
+	}
+	let dmax = (bx1 - bx0).max(by1 - by0).max(w64).max(h64).max(16.0);
+	let mid_x = (bx0 + bx1) * 0.5;
+	let mid_y = (by0 + by1) * 0.5;
+
+	let s0 = DelaunayPt {
+		x: mid_x - 20.0 * dmax,
+		y: mid_y - dmax,
+	};
+	let s1 = DelaunayPt {
+		x: mid_x + 20.0 * dmax,
+		y: mid_y - dmax,
+	};
+	let s2 = DelaunayPt {
+		x: mid_x,
+		y: mid_y + 20.0 * dmax,
+	};
+	bw_pts.push(s0);
+	bw_pts.push(s1);
+	bw_pts.push(s2);
+
+	let mut tris: Vec<[usize; 3]> = if orient2d_f64(bw_pts[n], bw_pts[n + 1], bw_pts[n + 2]) > 0.0 {
+		vec![[n, n + 1, n + 2]]
+	} else {
+		vec![[n, n + 2, n + 1]]
+	};
+
+	for pi in 0..n {
+		let p = bw_pts[pi];
+		let mut edge_counts: HashMap<(usize, usize), (usize, (usize, usize))> = HashMap::new();
+		let mut keep_tris = Vec::with_capacity(tris.len());
+
+		for tri in tris {
+			if in_circumcircle_ccw(bw_pts[tri[0]], bw_pts[tri[1]], bw_pts[tri[2]], p) {
+				let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
+				for (u, v) in edges {
+					let key = (u.min(v), u.max(v));
+					edge_counts
+						.entry(key)
+						.and_modify(|e| e.0 += 1)
+						.or_insert((1usize, (u, v)));
+				}
+			} else {
+				keep_tris.push(tri);
+			}
+		}
+
+		for (_, (count, (u, v))) in edge_counts {
+			if count == 1 {
+				let area = orient2d_f64(bw_pts[u], bw_pts[v], p);
+				if area > 1e-9 {
+					keep_tris.push([u, v, pi]);
+				} else if area < -1e-9 {
+					keep_tris.push([v, u, pi]);
+				}
+			}
+		}
+		tris = keep_tris;
+	}
+
+	// Remove super-triangle vertices & cull convex chords spanning empty alpha bays.
+	let mut clean_tris: Vec<[usize; 3]> = Vec::new();
+	for tri in tris {
+		if tri[0] >= n || tri[1] >= n || tri[2] >= n {
+			continue;
+		}
+		let pa = pts[tri[0]];
+		let pb = pts[tri[1]];
+		let pc = pts[tri[2]];
+		if orient2d_f64(pa, pb, pc).abs() <= 1e-6 {
+			continue;
+		}
+		let gx = (pa.x + pb.x + pc.x) / 3.0;
+		let gy = (pa.y + pb.y + pc.y) / 3.0;
+		if !sample_mask(gx, gy) {
+			continue;
+		}
+		let m0 = sample_mask((pa.x + pb.x) * 0.5, (pa.y + pb.y) * 0.5) as u8;
+		let m1 = sample_mask((pb.x + pc.x) * 0.5, (pb.y + pc.y) * 0.5) as u8;
+		let m2 = sample_mask((pc.x + pa.x) * 0.5, (pc.y + pa.y) * 0.5) as u8;
+		if m0 + m1 + m2 < 2 {
+			continue;
+		}
+		if orient2d_f64(pa, pb, pc) > 0.0 {
+			clean_tris.push(tri);
+		} else {
+			clean_tris.push([tri[0], tri[2], tri[1]]);
+		}
+	}
+
+	if clean_tris.is_empty() {
+		return generate_contour_mesh(img, width, height, 4, 4, alpha_threshold);
+	}
+
+	// Compact unused vertices.
+	let mut remap: HashMap<usize, u32> = HashMap::new();
+	let mut vertices: Vec<Vec2> = Vec::new();
+	let mut uvs: Vec<Vec2> = Vec::new();
+	let mut indices: Vec<u32> = Vec::with_capacity(clean_tris.len() * 3);
+
+	for tri in clean_tris {
+		for old_idx in tri {
+			let new_idx = *remap.entry(old_idx).or_insert_with(|| {
+				let idx = vertices.len() as u32;
+				let p = pts[old_idx];
+				vertices.push(vec2(p.x as f32, p.y as f32));
+				let u = (p.x / w64 + 0.5).clamp(0.0, 1.0) as f32;
+				let v = (p.y / h64 + 0.5).clamp(0.0, 1.0) as f32;
+				uvs.push(vec2(u, v));
+				idx
+			});
+			indices.push(new_idx);
+		}
+	}
+
+	Mesh {
+		vertices,
+		uvs,
+		indices,
+		origin: Vec2::ZERO,
+	}
+}

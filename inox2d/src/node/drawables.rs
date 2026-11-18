@@ -1,7 +1,7 @@
 use glam::Mat4;
 
 use crate::node::{
-	components::{Composite, Drawable, Mesh, TexturedMesh, TransformStore},
+	components::{Composite, Drawable, Mesh, OpacityStore, TexturedMesh, TransformStore},
 	InoxNodeUuid,
 };
 use crate::puppet::World;
@@ -23,6 +23,7 @@ pub struct TexturedMeshComponents<'comps> {
 	pub drawable: &'comps Drawable,
 	pub texture: &'comps TexturedMesh,
 	pub mesh: &'comps Mesh,
+	pub opacity: f32,
 }
 
 /// Pack of components for a Composite node.
@@ -31,6 +32,7 @@ pub struct CompositeComponents<'comps> {
 	pub transform: &'comps Mat4,
 	pub drawable: &'comps Drawable,
 	pub data: &'comps Composite,
+	pub opacity: f32,
 }
 
 impl<'comps> DrawableKind<'comps> {
@@ -43,6 +45,10 @@ impl<'comps> DrawableKind<'comps> {
 			Some(drawable) => drawable,
 			None => return None,
 		};
+		let opacity = comps
+			.get::<OpacityStore>(id)
+			.map(|o| o.0)
+			.unwrap_or(drawable.blending.opacity);
 		let transform = &comps
 			.get::<TransformStore>(id)
 			.expect("A drawble must have an associated transform.")
@@ -65,6 +71,7 @@ impl<'comps> DrawableKind<'comps> {
 					mesh: comps
 						.get::<Mesh>(id)
 						.expect("A TexturedMesh must have an associated Mesh."),
+					opacity,
 				}))
 			}
 			(false, false) => {
@@ -83,11 +90,13 @@ impl<'comps> DrawableKind<'comps> {
 				mesh: comps
 					.get::<Mesh>(id)
 					.expect("A TexturedMesh must have an associated Mesh."),
+				opacity,
 			})),
 			(false, true) => Some(DrawableKind::Composite(CompositeComponents {
 				transform,
 				drawable,
 				data: composite.unwrap(),
+				opacity,
 			})),
 		}
 	}
