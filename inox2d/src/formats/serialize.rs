@@ -17,10 +17,10 @@ use crate::puppet::meta::{
 };
 use crate::puppet::Puppet;
 
-fn opt_str(v: &Option<String>) -> JsonValue {
+fn opt_str_empty(v: &Option<String>) -> JsonValue {
 	match v {
 		Some(s) => JsonValue::String(s.clone()),
-		None => JsonValue::Null,
+		None => JsonValue::String(String::new()),
 	}
 }
 
@@ -34,21 +34,18 @@ fn vec3_json(v: Vec3) -> JsonValue {
 
 fn serialize_meta(meta: &PuppetMeta) -> JsonValue {
 	let mut obj = Object::new();
-	obj.insert("name", opt_str(&meta.name));
+	obj.insert("name", opt_str_empty(&meta.name));
 	obj.insert("version", JsonValue::String(meta.version.clone()));
-	obj.insert("rigger", opt_str(&meta.rigger));
-	obj.insert("artist", opt_str(&meta.artist));
+	obj.insert("rigger", opt_str_empty(&meta.rigger));
+	obj.insert("artist", opt_str_empty(&meta.artist));
 	if let Some(ref rights) = meta.rights {
 		obj.insert("rights", serialize_rights(rights));
 	}
-	obj.insert("copyright", opt_str(&meta.copyright));
-	obj.insert("licenseURL", opt_str(&meta.license_url));
-	obj.insert("contact", opt_str(&meta.contact));
-	obj.insert("reference", opt_str(&meta.reference));
-	match meta.thumbnail_id {
-		Some(id) => obj.insert("thumbnailId", JsonValue::from(id)),
-		None => obj.insert("thumbnailId", JsonValue::Null),
-	}
+	obj.insert("copyright", opt_str_empty(&meta.copyright));
+	obj.insert("licenseURL", opt_str_empty(&meta.license_url));
+	obj.insert("contact", opt_str_empty(&meta.contact));
+	obj.insert("reference", opt_str_empty(&meta.reference));
+	obj.insert("thumbnailId", JsonValue::from(meta.thumbnail_id.unwrap_or(u32::MAX)));
 	obj.insert("preservePixels", JsonValue::Boolean(meta.preserve_pixels));
 	JsonValue::Object(obj)
 }
@@ -124,7 +121,6 @@ fn blend_mode_str(mode: BlendMode) -> &'static str {
 }
 
 fn serialize_masks(masks: &Masks, obj: &mut Object) {
-	obj.insert("mask_threshold", JsonValue::from(masks.threshold));
 	let arr = masks
 		.masks
 		.iter()
@@ -154,9 +150,13 @@ fn serialize_drawable(drawable: &Drawable, obj: &mut Object) {
 	);
 	obj.insert("tint", vec3_json(drawable.blending.tint));
 	obj.insert("screenTint", vec3_json(drawable.blending.screen_tint));
+	let threshold = drawable.masks.as_ref().map_or(0.5, |m| m.threshold);
+	obj.insert("mask_threshold", JsonValue::from(threshold));
 	obj.insert("opacity", JsonValue::from(drawable.blending.opacity));
 	if let Some(ref masks) = drawable.masks {
-		serialize_masks(masks, obj);
+		if !masks.masks.is_empty() {
+			serialize_masks(masks, obj);
+		}
 	}
 }
 
@@ -401,6 +401,7 @@ fn serialize_animation(anim: &PuppetAnimation) -> JsonValue {
 	obj.insert("length", JsonValue::from(anim.length));
 	obj.insert("leadIn", JsonValue::from(anim.lead_in));
 	obj.insert("leadOut", JsonValue::from(anim.lead_out));
+	obj.insert("animationWeight", JsonValue::from(1.0f32));
 
 	let lanes = anim
 		.lanes
@@ -453,6 +454,8 @@ impl Puppet {
 			"param",
 			JsonValue::Array(params.into_iter().map(serialize_param).collect()),
 		);
+		obj.insert("automation", JsonValue::Array(Vec::new()));
+		obj.insert("groups", JsonValue::Array(Vec::new()));
 
 		if !self.animations.is_empty() {
 			let mut anim_names: Vec<&String> = self.animations.keys().collect();

@@ -523,7 +523,7 @@ fn deserialize_puppet_meta(obj: JsonObject) -> InoxParseResult<PuppetMeta> {
 		license_url: obj.get_nullable_str("licenseURL")?.map(str::to_owned),
 		contact: obj.get_nullable_str("contact")?.map(str::to_owned),
 		reference: obj.get_nullable_str("reference")?.map(str::to_owned),
-		thumbnail_id: obj.get_u32("thumbnailId").ok(),
+		thumbnail_id: obj.get_u32("thumbnailId").ok().filter(|&id| id != u32::MAX),
 		preserve_pixels: obj.get_bool("preservePixels")?,
 	})
 }
