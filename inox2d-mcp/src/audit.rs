@@ -89,7 +89,15 @@ impl FeatureRole {
 }
 
 fn eval_puppet_at(puppet: &mut Puppet, overrides: &HashMap<String, Vec2>) {
-	puppet.init_all();
+	if puppet.render_ctx.is_none()
+		|| puppet
+			.param_ctx
+			.as_ref()
+			.map(|c| c.values().len() != puppet.params.len())
+			.unwrap_or(true)
+	{
+		puppet.init_all();
+	}
 	puppet.begin_frame();
 	if let Some(pctx) = puppet.param_ctx.as_mut() {
 		for (k, v) in overrides {

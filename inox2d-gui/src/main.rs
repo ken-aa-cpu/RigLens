@@ -10,19 +10,23 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
+use eframe::egui::epaint::{Mesh as EguiMesh, Vertex as EguiVertex};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Frame, Key, Margin, Rect, Rounding, Sense, Stroke, Vec2};
-use glam::{vec2 as gvec2, vec3 as gvec3, Mat4, Vec2 as GVec2, Vec4};
+use glam::{vec2 as gvec2, vec3 as gvec3, Mat4, Vec2 as GVec2, Vec3 as GVec3, Vec4};
 use image::RgbaImage;
 use inox2d::formats::inp::{parse_inp, write_inp};
 use inox2d::math::camera::Camera;
 use inox2d::math::interp::InterpolateMode;
 use inox2d::model::Model;
-use inox2d::node::components::{Drawable, Mesh, MeshGroup, SimplePhysics, TexturedMesh, TransformStore};
+use inox2d::node::components::{
+	Drawable, MaskMode, Mesh, MeshGroup, SimplePhysics, TexturedMesh, TransformStore,
+};
 use inox2d::node::InoxNodeUuid;
-use inox2d::render::TexturedMeshRenderCtx;
+use inox2d::render::{CompositeRenderCtx, TexturedMeshRenderCtx};
+use inox2d::texture::decode_model_textures;
 use inox2d_mcp::audit::audit_rig;
 use inox2d_mcp::engine::{command_registry, ModelSnapshot, Session};
-use inox2d_mcp::headless_render::{render_diagnostic, render_frame, RenderOptions};
+use inox2d_mcp::headless_render::render_diagnostic;
 use inox2d_mcp::psd::{import_psd_to_model_with_mode, parse_psd_bytes};
 use inox2d_mcp::rig::{
 	apply_vertex_deform_delta, configure_pendulum_physics, retriangulate_points_preserving_deforms,
@@ -39,15 +43,150 @@ use theme::{
 #[derive(Parser, Debug)]
 #[command(name = "inox2d-gui", version, about = "Craft-style native Rust desktop studio for Inox2D")]
 struct Cli {
-	/// Input .inp or .psd file, or '--sample'
+	/// Input .inp or .psd file, or 'sample' (defaults to built-in VTuber puppet)
 	#[arg(default_value = "--sample")]
 	input: String,
+	/// Load the built-in rigged sample VTuber puppet
+	#[arg(long)]
+	sample: bool,
 	/// Watch/sync .inp file on disk for bidirectional hot-reload with MCP / AI agents
 	#[arg(long)]
 	watch: Option<PathBuf>,
 	/// Render several frames, capture a PNG screenshot of the studio window, and exit
 	#[arg(long)]
 	screenshot: Option<PathBuf>,
+}
+
+fn compute_alpha_convex_hull_uv(pixels: &[u8], w: u32, h: u32) -> Vec<GVec2> {
+	let fallback = vec![gvec2(0.0, 0.0), gvec2(1.0, 0.0), gvec2(1.0, 1.0), gvec2(0.0, 1.0)];
+	if w == 0 || h == 0 || pixels.len() < (w * h * 4) as usize {
+		return fallback;
+	}
+	let mut sum_x = 0.0f64;
+	let mut sum_y = 0.0f64;
+	let mut cnt = 0usize;
+	for y in 0..h {
+		for x in 0..w {
+			if pixels[((y * w + x) * 4 + 3) as usize] > 12 {
+				sum_x += x as f64 + 0.5;
+				sum_y += y as f64 + 0.5;
+				cnt += 1;
+			}
+		}
+	}
+	if cnt < 4 {
+		return fallback;
+	}
+	let cx = (sum_x / cnt as f64) as f32;
+	let cy = (sum_y / cnt as f64) as f32;
+
+	const SECTORS: usize = 24;
+	let mut best = [None::<(f32, GVec2)>; SECTORS];
+	let inv_w = 1.0 / w as f32;
+	let inv_h = 1.0 / h as f32;
+	let pad = 1.5_f32;
+
+	for y in 0..h {
+		for x in 0..w {
+			if pixels[((y * w + x) * 4 + 3) as usize] <= 12 {
+				continue;
+			}
+			let px = x as f32 + 0.5 - cx;
+			let py = y as f32 + 0.5 - cy;
+			let dist2 = px * px + py * py;
+			let mut ang = py.atan2(px);
+			if ang < 0.0 {
+				ang += std::f32::consts::TAU;
+			}
+			let bin = ((ang / std::f32::consts::TAU) * SECTORS as f32).floor() as usize % SECTORS;
+			if best[bin].map_or(true, |(d, _)| dist2 > d) {
+				let r = dist2.sqrt().max(1e-4);
+				let ux = ((cx + px + (px / r) * pad) * inv_w).clamp(0.0, 1.0);
+				let uy = ((cy + py + (py / r) * pad) * inv_h).clamp(0.0, 1.0);
+				best[bin] = Some((dist2, gvec2(ux, uy)));
+			}
+		}
+	}
+
+	let mut pts: Vec<GVec2> = best.into_iter().flatten().map(|(_, p)| p).collect();
+	if pts.len() < 3 {
+		return fallback;
+	}
+
+	// Andrew's monotone chain 2D convex hull so Sutherland-Hodgman is always convex & non-self-intersecting.
+	pts.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
+	pts.dedup_by(|a, b| (*a - *b).length_squared() < 1e-6);
+	if pts.len() < 3 {
+		return fallback;
+	}
+	let cross = |o: GVec2, a: GVec2, b: GVec2| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+	let mut hull: Vec<GVec2> = Vec::with_capacity(pts.len() * 2);
+	for &p in &pts {
+		while hull.len() >= 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+			hull.pop();
+		}
+		hull.push(p);
+	}
+	let lower_len = hull.len() + 1;
+	for &p in pts.iter().rev() {
+		while hull.len() >= lower_len && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+			hull.pop();
+		}
+		hull.push(p);
+	}
+	hull.pop();
+	if hull.len() < 3 {
+		return fallback;
+	}
+	hull
+}
+
+fn clip_poly_convex_uv(mut poly: Vec<(egui::Pos2, egui::Pos2)>, clip: &[egui::Pos2]) -> Vec<(egui::Pos2, egui::Pos2)> {
+	if clip.len() < 3 || poly.is_empty() {
+		return poly;
+	}
+	let mut area = 0.0_f32;
+	for i in 0..clip.len() {
+		let a = clip[i];
+		let b = clip[(i + 1) % clip.len()];
+		area += a.x * b.y - b.x * a.y;
+	}
+	let sign = if area >= 0.0 { 1.0_f32 } else { -1.0_f32 };
+	let is_inside = |a: egui::Pos2, b: egui::Pos2, p: egui::Pos2| -> f32 {
+		((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) * sign
+	};
+
+	for i in 0..clip.len() {
+		if poly.is_empty() {
+			break;
+		}
+		let a = clip[i];
+		let b = clip[(i + 1) % clip.len()];
+		let input = std::mem::take(&mut poly);
+		let mut s = *input.last().unwrap();
+		for e in input {
+			let se = is_inside(a, b, s.0);
+			let ee = is_inside(a, b, e.0);
+			if ee >= 0.0 {
+				if se < 0.0 {
+					let denom = se - ee;
+					let t = if denom.abs() > 1e-6 { (se / denom).clamp(0.0, 1.0) } else { 0.0 };
+					let ip = pos2(s.0.x + (e.0.x - s.0.x) * t, s.0.y + (e.0.y - s.0.y) * t);
+					let iuv = pos2(s.1.x + (e.1.x - s.1.x) * t, s.1.y + (e.1.y - s.1.y) * t);
+					poly.push((ip, iuv));
+				}
+				poly.push(e);
+			} else if se >= 0.0 {
+				let denom = se - ee;
+				let t = if denom.abs() > 1e-6 { (se / denom).clamp(0.0, 1.0) } else { 0.0 };
+				let ip = pos2(s.0.x + (e.0.x - s.0.x) * t, s.0.y + (e.0.y - s.0.y) * t);
+				let iuv = pos2(s.1.x + (e.1.x - s.1.x) * t, s.1.y + (e.1.y - s.1.y) * t);
+				poly.push((ip, iuv));
+			}
+			s = e;
+		}
+	}
+	poly
 }
 
 const VISEME_PRESETS: [(&str, f32, f32); 6] = [
@@ -199,9 +338,13 @@ struct Inox2dStudioApp {
 	selected_keyframe: Option<(String, u8, i32)>,
 	curve_drag: Option<CurveDragState>,
 
+	gpu_textures: Vec<egui::TextureHandle>,
+	tex_alpha_polys: Vec<Vec<GVec2>>,
+	gpu_tex_dirty: bool,
 	stage_tex: Option<egui::TextureHandle>,
 	cached_rev: u64,
 	cached_sig: u64,
+	eval_ms: f32,
 	render_ms: f32,
 
 	audit_cache: JsonValue,
@@ -288,9 +431,13 @@ impl Inox2dStudioApp {
 			selected_curve_lane: Some(("Head:: Yaw-Pitch".to_owned(), 0)),
 			selected_keyframe: None,
 			curve_drag: None,
+			gpu_textures: Vec::new(),
+			tex_alpha_polys: Vec::new(),
+			gpu_tex_dirty: true,
 			stage_tex: None,
 			cached_rev: u64::MAX,
 			cached_sig: u64::MAX,
+			eval_ms: 0.0,
 			render_ms: 0.0,
 			audit_cache: JsonValue::new_object(),
 			audit_rev: u64::MAX,
@@ -359,6 +506,18 @@ impl Inox2dStudioApp {
 		match self.session.exec(cmd, &params) {
 			Ok(_) => {
 				if self.session.revision != prev {
+					if matches!(
+						cmd,
+						"puppet.new_sample"
+							| "puppet.import_psd"
+							| "node.add_part"
+							| "node.synthesize_overlay"
+							| "edit.undo"
+							| "edit.redo"
+							| "session.restore"
+					) {
+						self.gpu_tex_dirty = true;
+					}
 					self.sync_watch_out();
 					self.cached_rev = u64::MAX;
 					self.audit_rev = u64::MAX;
@@ -412,6 +571,7 @@ impl Inox2dStudioApp {
 			self.session.revision += 1;
 			self.last_synced_rev = self.session.revision;
 			self.last_watch_mtime = Some(mtime);
+			self.gpu_tex_dirty = true;
 			self.cached_rev = u64::MAX;
 			self.audit_rev = u64::MAX;
 			self.set_status(true, format!("Hot-reloaded external change from {}", wpath.display()));
@@ -419,6 +579,9 @@ impl Inox2dStudioApp {
 	}
 
 	fn refresh_audit(&mut self) {
+		if self.stage_drag.is_some() || self.curve_drag.is_some() {
+			return;
+		}
 		if self.audit_rev != self.session.revision {
 			self.audit_cache = audit_rig(&mut self.session.model);
 			self.audit_rev = self.session.revision;
@@ -458,39 +621,271 @@ impl Inox2dStudioApp {
 		h.finish()
 	}
 
-	fn update_stage_texture(&mut self, ctx: &egui::Context) {
-		let sig = self.render_signature();
-		if self.stage_tex.is_some() && self.cached_rev == self.session.revision && self.cached_sig == sig {
+	fn ensure_gpu_textures(&mut self, ctx: &egui::Context) {
+		if !self.gpu_tex_dirty && self.gpu_textures.len() == self.session.model.textures.len() {
 			return;
 		}
-		let start = Instant::now();
-		let pmap = self.filtered_params();
-		let res = if self.xray_mode {
-			render_diagnostic(&mut self.session.model, &pmap, self.stage_res, self.stage_res, self.puppet_scale)
-		} else {
-			let opts = RenderOptions {
-				width: self.stage_res,
-				height: self.stage_res,
-				scale: self.puppet_scale,
-				wireframe: self.wireframe,
-				dt: if self.playing { 1.0 / 30.0 } else { 0.0 },
-				background: [0, 0, 0, 0],
-			};
-			render_frame(&mut self.session.model, &pmap, &opts)
-		};
-
-		if let Ok(img) = res {
-			self.render_ms = start.elapsed().as_secs_f32() * 1000.0;
-			let (w, h) = img.dimensions();
-			let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
-			if let Some(tex) = self.stage_tex.as_mut() {
-				tex.set(cimg, egui::TextureOptions::LINEAR);
-			} else {
-				self.stage_tex = Some(ctx.load_texture("inox2d_stage", cimg, egui::TextureOptions::LINEAR));
-			}
-			self.cached_rev = self.session.revision;
-			self.cached_sig = sig;
+		let decoded = decode_model_textures(self.session.model.textures.iter());
+		self.gpu_textures.clear();
+		self.tex_alpha_polys.clear();
+		for (idx, tex) in decoded.iter().enumerate() {
+			let w = tex.width();
+			let h = tex.height();
+			let hull = compute_alpha_convex_hull_uv(tex.pixels(), w, h);
+			self.tex_alpha_polys.push(hull);
+			let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], tex.pixels());
+			self.gpu_textures.push(ctx.load_texture(
+				format!("inox2d_part_tex_{idx}"),
+				cimg,
+				egui::TextureOptions::LINEAR,
+			));
 		}
+		self.gpu_tex_dirty = false;
+	}
+
+	fn prepare_stage_frame(&mut self, ctx: &egui::Context) {
+		self.ensure_gpu_textures(ctx);
+
+		let sig = self.render_signature();
+		if self.cached_rev == self.session.revision && self.cached_sig == sig && (!self.xray_mode || self.stage_tex.is_some()) {
+			return;
+		}
+
+		let start = Instant::now();
+		if self.xray_mode {
+			let pmap = self.filtered_params();
+			if let Ok(img) = render_diagnostic(&mut self.session.model, &pmap, self.stage_res, self.stage_res, self.puppet_scale) {
+				let (w, h) = img.dimensions();
+				let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
+				if let Some(tex) = self.stage_tex.as_mut() {
+					tex.set(cimg, egui::TextureOptions::LINEAR);
+				} else {
+					self.stage_tex = Some(ctx.load_texture("inox2d_stage", cimg, egui::TextureOptions::LINEAR));
+				}
+			}
+		} else {
+			let pmap = self.filtered_params();
+			let puppet = &mut self.session.model.puppet;
+			if puppet.render_ctx.is_none()
+				|| puppet
+					.param_ctx
+					.as_ref()
+					.map(|c| c.values().len() != puppet.params.len())
+					.unwrap_or(true)
+			{
+				puppet.init_all();
+			}
+			puppet.begin_frame();
+			if let Some(pctx) = puppet.param_ctx.as_mut() {
+				for (name, val) in &pmap {
+					let _ = pctx.set(name, *val);
+				}
+			}
+			let dt = if self.playing || self.tool == StudioTool::Physics {
+				1.0 / 60.0
+			} else {
+				0.0
+			};
+			puppet.end_frame(dt);
+		}
+		let elapsed_ms = start.elapsed().as_secs_f32() * 1000.0;
+		self.eval_ms = elapsed_ms;
+		if self.xray_mode {
+			self.render_ms = elapsed_ms;
+		}
+		self.cached_rev = self.session.revision;
+		self.cached_sig = sig;
+	}
+
+	fn node_screen_mask_poly(&self, src_id: InoxNodeUuid, canvas_rect: Rect) -> Option<Vec<egui::Pos2>> {
+		let puppet = &self.session.model.puppet;
+		let tm = puppet.node_comps.get::<TexturedMesh>(src_id)?;
+		let mesh = puppet.node_comps.get::<Mesh>(src_id)?;
+		let ts = puppet.node_comps.get::<TransformStore>(src_id)?;
+		let rctx = puppet.node_comps.get::<TexturedMeshRenderCtx>(src_id)?;
+		let prctx = puppet.render_ctx.as_ref()?;
+		let off = rctx.vert_offset as usize;
+		if off + rctx.vert_len > prctx.vertex_buffers.deforms.len() || mesh.vertices.is_empty() {
+			return None;
+		}
+		let deforms = &prctx.vertex_buffers.deforms[off..off + rctx.vert_len];
+		let uv_hull = self.tex_alpha_polys.get(tm.tex_albedo.0)?;
+
+		let mut mn = GVec2::splat(f32::INFINITY);
+		let mut mx = GVec2::splat(f32::NEG_INFINITY);
+		for &v in &mesh.vertices {
+			mn = mn.min(v);
+			mx = mx.max(v);
+		}
+		let span = (mx - mn).max(gvec2(1.0, 1.0));
+		let mvp = self.mvp_cam() * ts.absolute;
+
+		let mut out = Vec::with_capacity(uv_hull.len());
+		for &uv in uv_hull {
+			let local_rest = gvec2(mn.x + uv.x * span.x, mn.y + uv.y * span.y);
+			let deform = mesh
+				.vertices
+				.iter()
+				.zip(deforms.iter())
+				.min_by(|(va, _), (vb, _)| (**va - local_rest).length_squared().total_cmp(&(**vb - local_rest).length_squared()))
+				.map(|(_, d)| *d)
+				.unwrap_or(GVec2::ZERO);
+			let p3 = gvec3(local_rest.x - mesh.origin.x + deform.x, local_rest.y - mesh.origin.y + deform.y, 0.0);
+			let ndc = mvp * p3.extend(1.0);
+			out.push(pos2(
+				canvas_rect.left() + (ndc.x * 0.5 + 0.5) * canvas_rect.width(),
+				canvas_rect.top() + (0.5 - ndc.y * 0.5) * canvas_rect.height(),
+			));
+		}
+		Some(out)
+	}
+
+	fn draw_puppet_gpu_meshes(&mut self, painter: &egui::Painter, canvas_rect: Rect) {
+		let submit_start = Instant::now();
+		let Some(prctx) = self.session.model.puppet.render_ctx.as_ref() else {
+			return;
+		};
+		let puppet = &self.session.model.puppet;
+		let mvp_cam = self.mvp_cam();
+
+		// Flatten draw order cleanly: root drawables zsorted descending (Composite expands its zsorted children).
+		let mut ordered_parts: Vec<InoxNodeUuid> = Vec::with_capacity(prctx.root_drawables_zsorted.len() + 8);
+		for &root_id in &prctx.root_drawables_zsorted {
+			if let Some(comp_ctx) = puppet.node_comps.get::<CompositeRenderCtx>(root_id) {
+				let comp_enabled = puppet.nodes.get_node(root_id).map(|n| n.enabled).unwrap_or(true);
+				if comp_enabled {
+					ordered_parts.extend(comp_ctx.zsorted_children_list.iter().copied());
+				}
+			} else {
+				ordered_parts.push(root_id);
+			}
+		}
+
+		for id in ordered_parts {
+			let Some(node) = puppet.nodes.get_node(id) else {
+				continue;
+			};
+			if !node.enabled {
+				continue;
+			}
+			let Some(drawable) = puppet.node_comps.get::<Drawable>(id) else {
+				continue;
+			};
+			let Some(tm) = puppet.node_comps.get::<TexturedMesh>(id) else {
+				continue;
+			};
+			let Some(mesh) = puppet.node_comps.get::<Mesh>(id) else {
+				continue;
+			};
+			let Some(ts) = puppet.node_comps.get::<TransformStore>(id) else {
+				continue;
+			};
+			let Some(tm_rctx) = puppet.node_comps.get::<TexturedMeshRenderCtx>(id) else {
+				continue;
+			};
+			let Some(gpu_tex) = self.gpu_textures.get(tm.tex_albedo.0) else {
+				continue;
+			};
+
+			let opacity = puppet.node_opacity(id).unwrap_or(drawable.blending.opacity).clamp(0.0, 1.0);
+			if opacity <= 0.002 {
+				continue;
+			}
+			let tint = drawable.blending.tint.clamp(GVec3::ZERO, GVec3::ONE);
+			let vcol = Color32::from_rgba_unmultiplied(
+				(tint.x * 255.0) as u8,
+				(tint.y * 255.0) as u8,
+				(tint.z * 255.0) as u8,
+				(opacity * 255.0) as u8,
+			);
+
+			let off = tm_rctx.vert_offset as usize;
+			if off + tm_rctx.vert_len > prctx.vertex_buffers.deforms.len() {
+				continue;
+			}
+			let deforms = &prctx.vertex_buffers.deforms[off..off + tm_rctx.vert_len];
+			let mvp = mvp_cam * ts.absolute;
+
+			let screen_pts: Vec<egui::Pos2> = mesh
+				.vertices
+				.iter()
+				.zip(deforms.iter())
+				.map(|(&v, &d)| {
+					let local = gvec3(v.x - mesh.origin.x + d.x, v.y - mesh.origin.y + d.y, 0.0);
+					let ndc = mvp * local.extend(1.0);
+					pos2(
+						canvas_rect.left() + (ndc.x * 0.5 + 0.5) * canvas_rect.width(),
+						canvas_rect.top() + (0.5 - ndc.y * 0.5) * canvas_rect.height(),
+					)
+				})
+				.collect();
+
+			let clip_poly: Option<Vec<egui::Pos2>> = drawable
+				.masks
+				.as_ref()
+				.and_then(|ms| ms.masks.iter().find(|m| m.mode == MaskMode::Mask))
+				.and_then(|m| self.node_screen_mask_poly(m.source, canvas_rect));
+
+			let mut emesh = EguiMesh::with_texture(gpu_tex.id());
+			if let Some(ref cpoly) = clip_poly {
+				for tri in mesh.indices.chunks_exact(3) {
+					let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+					if i0 >= screen_pts.len() || i1 >= screen_pts.len() || i2 >= screen_pts.len() {
+						continue;
+					}
+					let tri_poly = vec![
+						(screen_pts[i0], pos2(mesh.uvs[i0].x, mesh.uvs[i0].y)),
+						(screen_pts[i1], pos2(mesh.uvs[i1].x, mesh.uvs[i1].y)),
+						(screen_pts[i2], pos2(mesh.uvs[i2].x, mesh.uvs[i2].y)),
+					];
+					let clipped = clip_poly_convex_uv(tri_poly, cpoly);
+					if clipped.len() >= 3 {
+						let base = emesh.vertices.len() as u32;
+						for (sp, uv) in &clipped {
+							emesh.vertices.push(EguiVertex {
+								pos: *sp,
+								uv: *uv,
+								color: vcol,
+							});
+						}
+						for k in 1..(clipped.len() - 1) {
+							emesh.indices.push(base);
+							emesh.indices.push(base + k as u32);
+							emesh.indices.push(base + (k as u32) + 1);
+						}
+					}
+				}
+			} else {
+				emesh.vertices.reserve(screen_pts.len());
+				for (&sp, &uv) in screen_pts.iter().zip(mesh.uvs.iter()) {
+					emesh.vertices.push(EguiVertex {
+						pos: sp,
+						uv: pos2(uv.x, uv.y),
+						color: vcol,
+					});
+				}
+				emesh.indices.extend_from_slice(&mesh.indices);
+			}
+
+			if !emesh.indices.is_empty() {
+				painter.add(egui::Shape::mesh(emesh));
+			}
+
+			if self.wireframe {
+				let wstroke = Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(110, 231, 183, 135));
+				for tri in mesh.indices.chunks_exact(3) {
+					let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+					if a < screen_pts.len() && b < screen_pts.len() && c < screen_pts.len() {
+						painter.line_segment([screen_pts[a], screen_pts[b]], wstroke);
+						painter.line_segment([screen_pts[b], screen_pts[c]], wstroke);
+						painter.line_segment([screen_pts[c], screen_pts[a]], wstroke);
+					}
+				}
+			}
+		}
+
+		// Record combined pose eval + GPU mesh submission ms (no accumulation across cached frames)
+		self.render_ms = (self.eval_ms + submit_start.elapsed().as_secs_f32() * 1000.0).max(0.01);
 	}
 
 	fn mvp_cam(&self) -> Mat4 {
@@ -807,6 +1202,7 @@ impl Inox2dStudioApp {
 					if let Ok(s) = load_initial_session("--sample") {
 						self.session = s;
 						self.selected_vertices.clear();
+						self.gpu_tex_dirty = true;
 						self.sync_watch_out();
 						self.fit_puppet_scale();
 						self.cached_rev = u64::MAX;
@@ -1151,13 +1547,17 @@ impl Inox2dStudioApp {
 		}
 		painter.rect_stroke(canvas_rect, 2.0, Stroke::new(1.0_f32, Color32::from_rgb(18, 18, 22)));
 
-		if let Some(tex) = &self.stage_tex {
-			clip_painter.image(
-				tex.id(),
-				canvas_rect,
-				Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-				Color32::WHITE,
-			);
+		if self.xray_mode {
+			if let Some(tex) = &self.stage_tex {
+				clip_painter.image(
+					tex.id(),
+					canvas_rect,
+					Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+					Color32::WHITE,
+				);
+			}
+		} else {
+			self.draw_puppet_gpu_meshes(&clip_painter, canvas_rect);
 		}
 
 		let hover_pos = resp.hover_pos();
@@ -2734,7 +3134,7 @@ impl eframe::App for Inox2dStudioApp {
 		self.last_tick = Instant::now();
 
 		self.refresh_audit();
-		self.update_stage_texture(ctx);
+		self.prepare_stage_frame(ctx);
 
 		if let Some(ref out_path) = self.screenshot_out.clone() {
 			if self.frame_counter == 4 && !self.screenshot_sent {
@@ -2955,14 +3355,15 @@ impl eframe::App for Inox2dStudioApp {
 
 fn main() -> eframe::Result<()> {
 	let cli = Cli::parse();
-	let session = load_initial_session(&cli.input).unwrap_or_else(|err| {
-		eprintln!("Error loading '{}': {err}", cli.input);
+	let input_arg = if cli.sample { "--sample" } else { cli.input.as_str() };
+	let session = load_initial_session(input_arg).unwrap_or_else(|err| {
+		eprintln!("Error loading '{input_arg}': {err}");
 		std::process::exit(1);
 	});
-	let source_path = if cli.input == "--sample" || cli.input == "sample" {
+	let source_path = if input_arg == "--sample" || input_arg == "sample" {
 		None
 	} else {
-		Some(PathBuf::from(&cli.input))
+		Some(PathBuf::from(input_arg))
 	};
 
 	if let Some(ref wpath) = cli.watch {

@@ -392,7 +392,16 @@ pub fn render_frame(
 	params: &HashMap<String, Vec2>,
 	opts: &RenderOptions,
 ) -> Result<RgbaImage, String> {
-	model.puppet.init_all();
+	if model.puppet.render_ctx.is_none()
+		|| model
+			.puppet
+			.param_ctx
+			.as_ref()
+			.map(|c| c.values().len() != model.puppet.params.len())
+			.unwrap_or(true)
+	{
+		model.puppet.init_all();
+	}
 	model.puppet.begin_frame();
 	if let Some(pctx) = model.puppet.param_ctx.as_mut() {
 		for (name, val) in params {

@@ -7,3 +7,6 @@ members = [
     "inox2d-gui",
     "examples/*",
 ]
+
+[profile.dev]
+opt-level = 2
