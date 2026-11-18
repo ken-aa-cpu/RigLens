@@ -1452,7 +1452,10 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 			actions.push(format!("Rigged nose '{raw_name}' (depth_z=1.35)"));
 		} else if lower.contains("brow") || lower.contains("眉") {
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.05, yaw_px, pitch_px);
-			actions.push(format!("Rigged brow '{raw_name}' (depth_z=1.05)"));
+			let is_right = lower.contains("_r") || lower.contains("right") || lower.contains("右");
+			let brow_param = if is_right { "Brow:: Right" } else { "Brow:: Left" };
+			let _ = apply_brow_binding(puppet, id, brow_param, is_right);
+			actions.push(format!("Rigged brow '{raw_name}' (depth_z=1.05 + {brow_param})"));
 		} else if lower.contains("ear") || lower.contains("耳") {
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", -0.55, yaw_px * 0.9, pitch_px * 0.9);
 			actions.push(format!("Rigged ear '{raw_name}' (depth_z=-0.55)"));
@@ -1680,4 +1683,364 @@ pub fn apply_opacity_binding(
 		},
 	);
 	Ok(())
+}
+
+/// Bind a 3x3 2D vowel-viseme parameter (`Mouth:: Viseme`, `x=Form [-1..1]`, `y=Open [0..1]`)
+/// producing distinct A/I/U/E/O shapes, alongside standard `Mouth:: Open` and `Mouth:: Form`.
+pub fn apply_mouth_visemes_2d(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	param_name: &str,
+	open_px: f32,
+	width_px: f32,
+) -> Result<(), String> {
+	let mesh = puppet
+		.node_comps
+		.get::<Mesh>(node_id)
+		.ok_or_else(|| format!("Node {} does not have a Mesh component", node_id.0))?
+		.clone();
+
+	ensure_param(
+		puppet,
+		param_name,
+		true,
+		vec2(-1.0, 0.0),
+		vec2(1.0, 1.0),
+		vec2(0.0, 0.0),
+		AxisPoints {
+			x: vec![0.0, 0.5, 1.0],
+			y: vec![0.0, 0.5, 1.0],
+		},
+	);
+
+	let param = puppet
+		.params
+		.get_mut(param_name)
+		.ok_or_else(|| format!("Parameter '{param_name}' missing"))?;
+
+	let x_len = param.axis_points.x.len();
+	let y_len = param.axis_points.y.len();
+	let (min_v, max_v) = mesh_bounds(&mesh);
+	let center = (min_v + max_v) * 0.5;
+	let half = ((max_v - min_v) * 0.5).max(vec2(1.0, 1.0));
+
+	let values = Matrix2d::from_grid_transposed(x_len, y_len, |ix, iy| {
+		let tx = param.axis_points.x[ix];
+		let ty = param.axis_points.y[iy];
+		let form = param.min.x + (param.max.x - param.min.x) * tx; // -1=U/pucker .. 0=A/O .. +1=I/E smile
+		let open = (param.min.y + (param.max.y - param.min.y) * ty).clamp(0.0, 1.0);
+
+		mesh.vertices
+			.iter()
+			.map(|&v| {
+				let nx = ((v.x - center.x) / half.x).clamp(-1.0, 1.0);
+				let ny = ((v.y - center.y) / half.y).clamp(-1.0, 1.0);
+
+				// Horizontal stretch for I/E (+form), narrow pucker for U/O (-form)
+				let dx = nx * width_px * (form * (1.0 - 0.25 * open) - 0.35 * open * (1.0 - form.max(0.0)));
+				// Vertical opening: O/U stay rounder in center, A drops full jaw, I stays wide/thin
+				let round_center = 1.0 - 0.35 * nx * nx * (1.0 - form.max(0.0));
+				let jaw = if ny >= 0.0 {
+					ny * open_px * open * round_center
+				} else {
+					ny * open_px * 0.35 * open
+				};
+				// Corner lift on smile (+form)
+				let smile = -(nx * nx) * (width_px * 0.55) * form * (1.0 - 0.5 * open);
+				vec2(dx, jaw + smile)
+			})
+			.collect()
+	});
+
+	let is_set = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| true);
+	upsert_binding(
+		param,
+		Binding {
+			node: node_id,
+			is_set,
+			interpolate_mode: InterpolateMode::Linear,
+			values: BindingValues::Deform(values),
+		},
+	);
+	Ok(())
+}
+
+/// Bind a 2D eyebrow expression parameter (`x=Angle [-1 angry .. +1 sad]`, `y=Height [-1..1]`).
+pub fn apply_brow_binding(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	param_name: &str,
+	is_right: bool,
+) -> Result<(), String> {
+	let mesh = puppet
+		.node_comps
+		.get::<Mesh>(node_id)
+		.ok_or_else(|| format!("Node {} does not have a Mesh component", node_id.0))?
+		.clone();
+
+	ensure_param(
+		puppet,
+		param_name,
+		true,
+		vec2(-1.0, -1.0),
+		vec2(1.0, 1.0),
+		vec2(0.0, 0.0),
+		AxisPoints {
+			x: vec![0.0, 0.5, 1.0],
+			y: vec![0.0, 0.5, 1.0],
+		},
+	);
+
+	let param = puppet
+		.params
+		.get_mut(param_name)
+		.ok_or_else(|| format!("Parameter '{param_name}' missing"))?;
+
+	let x_len = param.axis_points.x.len();
+	let y_len = param.axis_points.y.len();
+	let (min_v, max_v) = mesh_bounds(&mesh);
+	let center = (min_v + max_v) * 0.5;
+	let half = ((max_v - min_v) * 0.5).max(vec2(1.0, 1.0));
+	let inner_sign = if is_right { -1.0 } else { 1.0 };
+
+	let values = Matrix2d::from_grid_transposed(x_len, y_len, |ix, iy| {
+		let tx = param.axis_points.x[ix];
+		let ty = param.axis_points.y[iy];
+		let angle = param.min.x + (param.max.x - param.min.x) * tx;
+		let height = param.min.y + (param.max.y - param.min.y) * ty;
+
+		mesh.vertices
+			.iter()
+			.map(|&v| {
+				let nx = ((v.x - center.x) / half.x).clamp(-1.0, 1.0);
+				// inner_nx > 0 means closer to nose bridge
+				let inner_nx = nx * inner_sign;
+				// +angle (sad) raises inner end, drops outer end; -angle (angry) drops inner end, raises outer
+				let dy = -height * (half.y.max(6.0) * 0.9) - angle * inner_nx * (half.y.max(6.0) * 0.85);
+				let arch = -(1.0 - nx * nx) * height.max(0.0) * 3.0;
+				vec2(0.0, dy + arch)
+			})
+			.collect()
+	});
+
+	let is_set = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| true);
+	upsert_binding(
+		param,
+		Binding {
+			node: node_id,
+			is_set,
+			interpolate_mode: InterpolateMode::Linear,
+			values: BindingValues::Deform(values),
+		},
+	);
+	Ok(())
+}
+
+/// Procedurally paint and attach an expression overlay Part (`blush`, `gloom`, `tears`, `angry`, `shock`)
+/// positioned relative to Face bounds, and bind a 0..1 Opacity parameter (`Expr:: <Kind>`).
+pub fn synthesize_expression_overlay(
+	model: &mut Model,
+	kind: &str,
+	parent_id: Option<InoxNodeUuid>,
+) -> Result<(InoxNodeUuid, String), String> {
+	model.puppet.init_all();
+	model.puppet.begin_frame();
+	model.puppet.end_frame(0.0);
+
+	let face_id = crate::audit::find_face_node(&model.puppet);
+	let (face_w, face_h) = face_id
+		.and_then(|fid| model.puppet.node_comps.get::<Mesh>(fid))
+		.map(|m| {
+			let (mn, mx) = mesh_bounds(m);
+			((mx.x - mn.x).max(60.0), (mx.y - mn.y).max(60.0))
+		})
+		.unwrap_or((170.0, 175.0));
+
+	let target_parent = parent_id
+		.or_else(|| {
+			model
+				.puppet
+				.nodes
+				.iter()
+				.find(|n| n.name.eq_ignore_ascii_case("Head") || n.name.contains("頭"))
+				.map(|n| n.uuid)
+		})
+		.or_else(|| face_id.map(|fid| model.puppet.nodes.get_parent(fid).uuid))
+		.unwrap_or(model.puppet.nodes.root_node_id);
+
+	let lower = kind.to_lowercase();
+	let (part_name, param_name, zsort, offset, pw, ph, blend, img) = match lower.as_str() {
+		"blush" | "cheek" | "臉紅" => {
+			let w = (face_w * 0.78).round().max(48.0) as u32;
+			let h = (face_h * 0.22).round().max(24.0) as u32;
+			let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 0]));
+			for side in [0.22f32, 0.78f32] {
+				let cx = w as f32 * side;
+				let cy = h as f32 * 0.5;
+				let rx = w as f32 * 0.16;
+				let ry = h as f32 * 0.40;
+				for y in 0..h {
+					for x in 0..w {
+						let dx = (x as f32 + 0.5 - cx) / rx;
+						let dy = (y as f32 + 0.5 - cy) / ry;
+						let d2 = dx * dx + dy * dy;
+						if d2 < 1.0 {
+							let falloff = (1.0 - d2).powf(1.4);
+							let slash = if ((x as i32 + y as i32) % 9).abs() <= 1 && d2 < 0.55 {
+								45u8
+							} else {
+								0
+							};
+							let alpha = (falloff * 185.0 + slash as f32).clamp(0.0, 230.0) as u8;
+							img.put_pixel(x, y, Rgba([255, 110, 145, alpha]));
+						}
+					}
+				}
+			}
+			(
+				"Expr_Blush",
+				"Expr:: Blush",
+				-2.5,
+				vec2(0.0, face_h * 0.08),
+				w as f32,
+				h as f32,
+				BlendMode::Normal,
+				img,
+			)
+		}
+		"gloom" | "shadow" | "陰沉" | "黑臉" => {
+			let w = (face_w * 0.92).round().max(64.0) as u32;
+			let h = (face_h * 0.55).round().max(48.0) as u32;
+			let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 0]));
+			let cx = w as f32 * 0.5;
+			for y in 0..h {
+				let ty = 1.0 - (y as f32 / (h as f32 - 1.0));
+				for x in 0..w {
+					let dx = ((x as f32 + 0.5 - cx) / (w as f32 * 0.48)).abs();
+					if dx <= 1.0 {
+						let edge = (1.0 - dx * dx).max(0.0);
+						let alpha = (ty.powf(1.2) * edge * 190.0).clamp(0.0, 210.0) as u8;
+						img.put_pixel(x, y, Rgba([58, 52, 110, alpha]));
+					}
+				}
+			}
+			(
+				"Expr_Gloom",
+				"Expr:: Gloom",
+				-7.5,
+				vec2(0.0, -face_h * 0.22),
+				w as f32,
+				h as f32,
+				BlendMode::Multiply,
+				img,
+			)
+		}
+		"tears" | "cry" | "眼淚" => {
+			let w = (face_w * 0.72).round().max(48.0) as u32;
+			let h = (face_h * 0.26).round().max(24.0) as u32;
+			let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 0]));
+			for side in [0.22f32, 0.78f32] {
+				let cx = w as f32 * side;
+				let cy = h as f32 * 0.55;
+				let rx = w as f32 * 0.11;
+				let ry = h as f32 * 0.36;
+				for y in 0..h {
+					for x in 0..w {
+						let dx = (x as f32 + 0.5 - cx) / rx;
+						let dy = (y as f32 + 0.5 - cy) / ry;
+						let d2 = dx * dx + dy * dy;
+						if d2 < 1.0 {
+							let is_hl = ((dx + 0.25).powi(2) + (dy + 0.25).powi(2)) < 0.18;
+							let col = if is_hl {
+								[245, 252, 255, 240]
+							} else {
+								[115, 200, 255, ((1.0 - d2 * 0.5) * 215.0) as u8]
+							};
+							img.put_pixel(x, y, Rgba(col));
+						}
+					}
+				}
+			}
+			(
+				"Expr_Tears",
+				"Expr:: Tears",
+				-6.5,
+				vec2(0.0, face_h * 0.04),
+				w as f32,
+				h as f32,
+				BlendMode::Normal,
+				img,
+			)
+		}
+		"angry" | "angry_mark" | "青筋" | "生氣" => {
+			let sz = (face_w * 0.22).round().max(24.0) as u32;
+			let mut img = RgbaImage::from_pixel(sz, sz, Rgba([0, 0, 0, 0]));
+			let c = sz as f32 * 0.5;
+			let r = sz as f32 * 0.36;
+			for y in 0..sz {
+				for x in 0..sz {
+					let dx = x as f32 + 0.5 - c;
+					let dy = y as f32 + 0.5 - c;
+					// Four curved anime cross-vein corners
+					let corner = ((dx.abs() - r * 0.55).powi(2) + (dy.abs() - r * 0.55).powi(2)).sqrt();
+					if (corner - r * 0.32).abs() < 2.2 && dx.abs() < r && dy.abs() < r {
+						img.put_pixel(x, y, Rgba([235, 55, 70, 240]));
+					}
+				}
+			}
+			(
+				"Expr_Angry",
+				"Expr:: Angry",
+				-11.0,
+				vec2(face_w * 0.30, -face_h * 0.28),
+				sz as f32,
+				sz as f32,
+				BlendMode::Normal,
+				img,
+			)
+		}
+		"shock" | "驚嚇" => {
+			let w = (face_w * 0.72).round().max(48.0) as u32;
+			let h = (face_h * 0.30).round().max(24.0) as u32;
+			let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 0]));
+			for x in (4..w - 4).step_by(8) {
+				for y in 0..h {
+					let ty = y as f32 / h as f32;
+					let alpha = ((1.0 - ty) * 210.0) as u8;
+					img.put_pixel(x, y, Rgba([210, 225, 255, alpha]));
+					if x + 1 < w {
+						img.put_pixel(x + 1, y, Rgba([210, 225, 255, alpha / 2]));
+					}
+				}
+			}
+			(
+				"Expr_Shock",
+				"Expr:: Shock",
+				-8.0,
+				vec2(0.0, -face_h * 0.25),
+				w as f32,
+				h as f32,
+				BlendMode::Normal,
+				img,
+			)
+		}
+		other => {
+			return Err(format!(
+				"Unknown overlay kind '{other}' (expected blush, gloom, tears, angry, shock)"
+			));
+		}
+	};
+
+	let id = add_grid_part(model, target_parent, part_name, zsort, offset, pw, ph, 4, 4, img);
+	if let Some(d) = model.puppet.node_comps.get_mut::<Drawable>(id) {
+		d.blending.mode = blend;
+	}
+
+	if model.puppet.params.contains_key("Head:: Yaw-Pitch") {
+		let _ = apply_head_perspective_binding(&mut model.puppet, id, "Head:: Yaw-Pitch", 0.75, face_w * 0.14, face_h * 0.11);
+	}
+	apply_opacity_binding(&mut model.puppet, id, param_name, 0.0, 1.0)?;
+	model.puppet.reset_contexts();
+
+	Ok((id, param_name.to_owned()))
 }

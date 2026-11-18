@@ -13,6 +13,7 @@ use inox2d::render::{CompositeRenderCtx, InoxRenderer, InoxRendererExt, Textured
 use inox2d::texture::{decode_model_textures, ShallowTexture};
 
 use crate::audit::{find_face_node, FeatureRole};
+use crate::gif_encode::encode_animated_gif;
 
 #[derive(Clone, Debug)]
 pub struct RenderOptions {
@@ -566,6 +567,134 @@ pub fn render_anim_sheet(
 	}
 
 	Ok(sheet)
+}
+
+/// Render a looping animated `.gif` of `anim_name` (or synthetic VTuber physics motion if none),
+/// stepping physics continuously at `1.0 / fps` per frame.
+pub fn render_anim_gif(
+	model: &mut Model,
+	anim_name: Option<&str>,
+	frames: u32,
+	fps: u32,
+	width: u32,
+	height: u32,
+	scale: f32,
+	wireframe: bool,
+) -> Result<Vec<u8>, String> {
+	let frames = frames.clamp(2, 120);
+	let fps = fps.clamp(4, 60);
+	let dt = 1.0 / fps as f32;
+	let delay_cs = ((100.0 / fps as f32).round() as u16).max(2);
+
+	let anim = match anim_name {
+		Some(name) => Some(
+			model
+				.puppet
+				.animations
+				.get(name)
+				.cloned()
+				.ok_or_else(|| format!("Animation '{name}' not found"))?,
+		),
+		None => model.puppet.animations.values().next().cloned(),
+	};
+
+	let mut rendered = Vec::with_capacity(frames as usize);
+	for i in 0..frames {
+		let t = i as f32 / frames as f32;
+		let frame_params = if let Some(ref a) = anim {
+			let f = t * a.length.max(1) as f32;
+			a.eval_at_frame(f, &model.puppet.params)
+		} else {
+			let mut m = HashMap::new();
+			let angle = t * std::f32::consts::TAU;
+			m.insert("Head:: Yaw-Pitch".to_owned(), vec2(angle.sin() * 0.85, angle.cos() * 0.45));
+			let blink = if (t - 0.5).abs() < 0.08 { 0.0 } else { 1.0 };
+			m.insert("Eye:: Left:: Open".to_owned(), vec2(blink, 0.0));
+			m.insert("Eye:: Right:: Open".to_owned(), vec2(blink, 0.0));
+			m.insert("Mouth:: Open".to_owned(), vec2((angle * 2.0).sin().abs(), 0.0));
+			m
+		};
+
+		let opts = RenderOptions {
+			width,
+			height,
+			scale,
+			wireframe,
+			dt,
+			background: [26, 28, 36, 255],
+		};
+		rendered.push(render_frame(model, &frame_params, &opts)?);
+	}
+
+	let mut out = Vec::new();
+	encode_animated_gif(&rendered, delay_cs, &mut out).map_err(|e| format!("GIF encoding error: {e}"))?;
+	Ok(out)
+}
+
+/// Render a 3-panel visual diff (`Before | After | Pixel Diff Heatmap`) and return `(image, changed_pct)`.
+pub fn render_diff(
+	before_model: &mut Model,
+	after_model: &mut Model,
+	params: &HashMap<String, Vec2>,
+	tile_size: u32,
+	scale: f32,
+) -> Result<(RgbaImage, f32), String> {
+	let opts = RenderOptions {
+		width: tile_size,
+		height: tile_size,
+		scale,
+		wireframe: false,
+		dt: 0.0,
+		background: [26, 28, 36, 255],
+	};
+	let before_params: HashMap<String, Vec2> = params
+		.iter()
+		.filter(|(k, _)| before_model.puppet.params.contains_key(*k))
+		.map(|(k, v)| (k.clone(), *v))
+		.collect();
+	let after_params: HashMap<String, Vec2> = params
+		.iter()
+		.filter(|(k, _)| after_model.puppet.params.contains_key(*k))
+		.map(|(k, v)| (k.clone(), *v))
+		.collect();
+
+	let before_img = render_frame(before_model, &before_params, &opts)?;
+	let after_img = render_frame(after_model, &after_params, &opts)?;
+
+	let gap = 4u32;
+	let total_w = tile_size * 3 + gap * 4;
+	let total_h = tile_size + gap * 2;
+	let mut out = RgbaImage::from_pixel(total_w, total_h, Rgba([16, 18, 24, 255]));
+
+	let mut changed_pixels = 0u64;
+	let total_pixels = (tile_size * tile_size).max(1) as u64;
+
+	for y in 0..tile_size {
+		for x in 0..tile_size {
+			let bp = before_img.get_pixel(x, y).0;
+			let ap = after_img.get_pixel(x, y).0;
+			out.put_pixel(gap + x, gap + y, Rgba(bp));
+			out.put_pixel(gap * 2 + tile_size + x, gap + y, Rgba(ap));
+
+			let diff = (bp[0] as i32 - ap[0] as i32).abs()
+				+ (bp[1] as i32 - ap[1] as i32).abs()
+				+ (bp[2] as i32 - ap[2] as i32).abs();
+			if diff > 12 {
+				changed_pixels += 1;
+				let heat = (diff.min(255)) as u8;
+				out.put_pixel(gap * 3 + tile_size * 2 + x, gap + y, Rgba([255, 255 - heat / 2, 40, 255]));
+			} else {
+				out.put_pixel(
+					gap * 3 + tile_size * 2 + x,
+					gap + y,
+					Rgba([ap[0] / 3, ap[1] / 3, ap[2] / 3, 255]),
+				);
+			}
+		}
+	}
+
+	let changed_pct = (changed_pixels as f32 / total_pixels as f32) * 100.0;
+	Ok((out, changed_pct))
 }
 
 fn draw_canvas_line(img: &mut RgbaImage, p0: Vec2, p1: Vec2, color: [u8; 4]) {

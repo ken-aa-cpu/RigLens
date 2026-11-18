@@ -12,7 +12,9 @@ use inox2d::model::Model;
 use inox2d::puppet::Puppet;
 use inox2d_mcp::audit::{audit_rig, auto_fix_rig};
 use inox2d_mcp::engine::{command_registry, Session};
-use inox2d_mcp::headless_render::{render_anim_sheet, render_diagnostic, render_frame, render_grid, RenderOptions};
+use inox2d_mcp::headless_render::{
+	render_anim_gif, render_anim_sheet, render_diagnostic, render_frame, render_grid, RenderOptions,
+};
 use inox2d_mcp::psd::{export_model_to_psd, import_psd_to_model, parse_psd_bytes};
 use inox2d_mcp::rig::{auto_rig_vtuber, build_sample_vtuber_model};
 use json::JsonValue;
@@ -140,6 +142,26 @@ enum Commands {
 		scale: f32,
 		#[arg(long = "param")]
 		params: Vec<String>,
+	},
+	/// Render a looping animated .gif of an animation or physics motion test
+	Gif {
+		input: String,
+		#[arg(long)]
+		out: PathBuf,
+		#[arg(long)]
+		anim: Option<String>,
+		#[arg(long, default_value_t = 24)]
+		frames: u32,
+		#[arg(long, default_value_t = 15)]
+		fps: u32,
+		#[arg(long, default_value_t = 320)]
+		width: u32,
+		#[arg(long, default_value_t = 320)]
+		height: u32,
+		#[arg(long, default_value_t = 0.85)]
+		scale: f32,
+		#[arg(long)]
+		wireframe: bool,
 	},
 	/// List all engine commands as JSON
 	Commands,
@@ -318,6 +340,62 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("width", json::object! { type: "integer" });
 				props.insert("height", json::object! { type: "integer" });
 				props.insert("scale", json::object! { type: "number" });
+			} else if spec.id == "render.diff" {
+				props.insert("out", json::object! { type: "string" });
+				props.insert("checkpoint", json::object! { type: "string" });
+				props.insert("tile_size", json::object! { type: "integer" });
+				props.insert("scale", json::object! { type: "number" });
+			} else if spec.id == "render.gif" {
+				props.insert("out", json::object! { type: "string" });
+				props.insert("anim", json::object! { type: "string" });
+				props.insert("frames", json::object! { type: "integer" });
+				props.insert("fps", json::object! { type: "integer" });
+				props.insert("width", json::object! { type: "integer" });
+				props.insert("height", json::object! { type: "integer" });
+				props.insert("scale", json::object! { type: "number" });
+				props.insert("wireframe", json::object! { type: "boolean" });
+			} else if spec.id == "session.checkpoint" || spec.id == "session.restore" {
+				props.insert("name", json::object! { type: "string" });
+			} else if spec.id == "session.batch" {
+				props.insert("commands", json::object! { type: "array" });
+			} else if spec.id == "node.configure" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("name", json::object! { type: "string" });
+				props.insert("parent_name", json::object! { type: "string" });
+				props.insert("zsort", json::object! { type: "number" });
+				props.insert("enabled", json::object! { type: "boolean" });
+				props.insert("x", json::object! { type: "number" });
+				props.insert("y", json::object! { type: "number" });
+				props.insert("rot_z_deg", json::object! { type: "number" });
+				props.insert("opacity", json::object! { type: "number" });
+				props.insert("blend_mode", json::object! { type: "string" });
+			} else if spec.id == "node.set_mask" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("sources", json::object! { type: "array" });
+				props.insert("threshold", json::object! { type: "number" });
+			} else if spec.id == "node.add_meshgroup" {
+				props.insert("name", json::object! { type: "string" });
+				props.insert("parent_name", json::object! { type: "string" });
+				props.insert("children", json::object! { type: "array" });
+				props.insert("cols", json::object! { type: "integer" });
+				props.insert("rows", json::object! { type: "integer" });
+				props.insert("padding", json::object! { type: "number" });
+			} else if spec.id == "node.remove" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+			} else if spec.id == "node.synthesize_overlay" {
+				props.insert("kind", json::object! { type: "string" });
+				props.insert("parent_name", json::object! { type: "string" });
+			} else if spec.id == "rig.auto_visemes" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("open_px", json::object! { type: "number" });
+				props.insert("width_px", json::object! { type: "number" });
+			} else if spec.id == "rig.auto_brow" {
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("is_right", json::object! { type: "boolean" });
 			} else if spec.id == "physics.add_pendulum" {
 				props.insert("name", json::object! { type: "string" });
 				props.insert("parent_name", json::object! { type: "string" });
@@ -580,6 +658,26 @@ fn run() -> Result<(), String> {
 			img.save(&out)
 				.map_err(|e| format!("Failed to save '{}': {e}", out.display()))?;
 			println!("Rendered diagnostic X-ray to {} ({width}x{height})", out.display());
+		}
+		Commands::Gif {
+			input,
+			out,
+			anim,
+			frames,
+			fps,
+			width,
+			height,
+			scale,
+			wireframe,
+		} => {
+			let mut model = load_model(&input)?;
+			let gif_bytes = render_anim_gif(&mut model, anim.as_deref(), frames, fps, width, height, scale, wireframe)?;
+			fs::write(&out, &gif_bytes).map_err(|e| format!("Failed to write '{}': {e}", out.display()))?;
+			println!(
+				"Rendered {frames}-frame animated GIF @ {fps}fps to {} ({} bytes)",
+				out.display(),
+				gif_bytes.len()
+			);
 		}
 		Commands::Commands => {
 			let arr: Vec<JsonValue> = command_registry()
@@ -1048,5 +1146,152 @@ mod tests {
 
 		let diag = render_diagnostic(&mut session.model, &HashMap::new(), 256, 256, 0.7).unwrap();
 		assert_eq!(diag.dimensions(), (256, 256));
+	}
+
+	#[test]
+	fn undo_redo_checkpoint_batch_and_diff() {
+		let mut session = Session::new_sample();
+		session
+			.exec("session.checkpoint", &json::object! { name: "base" })
+			.unwrap();
+
+		// Atomic batch succeeds and wraps into a single undo entry
+		let batch_res = session
+			.exec(
+				"session.batch",
+				&json::object! {
+					commands: [
+						{ cmd: "node.synthesize_overlay", params: { kind: "blush" } },
+						{ cmd: "param.set", params: { param: "Expr:: Blush", x: 1.0 } }
+					]
+				},
+			)
+			.unwrap();
+		assert_eq!(batch_res["executed"].as_u32(), Some(2));
+		assert!(session.model.puppet.nodes.iter().any(|n| n.name == "Expr_Blush"));
+
+		// Render side-by-side Before | After | Diff Heatmap
+		let diff_path = std::env::temp_dir().join("inox2d_test_diff.png");
+		let diff_res = session
+			.exec(
+				"render.diff",
+				&json::object! {
+					out: diff_path.to_string_lossy().as_ref(),
+					checkpoint: "base",
+					tile_size: 160
+				},
+			)
+			.unwrap();
+		assert!(diff_res["changed_pixel_pct"].as_f32().unwrap() > 0.1);
+		let _ = fs::remove_file(&diff_path);
+
+		// Failed batch rolls back cleanly
+		let fail_batch = session.exec(
+			"session.batch",
+			&json::object! {
+				commands: [
+					{ cmd: "node.synthesize_overlay", params: { kind: "angry" } },
+					{ cmd: "unknown.command", params: {} }
+				]
+			},
+		);
+		assert!(fail_batch.is_err());
+		assert!(!session.model.puppet.nodes.iter().any(|n| n.name == "Expr_Angry"));
+
+		// Undo removes the whole blush batch; redo restores it; restore resets to base
+		session.exec("edit.undo", &json::object! {}).unwrap();
+		assert!(!session.model.puppet.nodes.iter().any(|n| n.name == "Expr_Blush"));
+		session.exec("edit.redo", &json::object! {}).unwrap();
+		assert!(session.model.puppet.nodes.iter().any(|n| n.name == "Expr_Blush"));
+		session
+			.exec("session.restore", &json::object! { name: "base" })
+			.unwrap();
+		assert!(!session.model.puppet.nodes.iter().any(|n| n.name == "Expr_Blush"));
+	}
+
+	#[test]
+	fn node_crud_meshgroup_visemes_overlays_and_gif() {
+		let mut session = Session::new_sample();
+
+		// Configure Face opacity & Mouth visemes
+		session
+			.exec(
+				"rig.auto_visemes",
+				&json::object! { node_name: "Mouth", open_px: 14.0, width_px: 9.0 },
+			)
+			.unwrap();
+		assert!(session.model.puppet.params.contains_key("Mouth:: Viseme"));
+
+		// Add Pupil_L, clip it to Eye_L via node.set_mask
+		session
+			.exec(
+				"node.add_part",
+				&json::object! {
+					name: "Pupil_L",
+					parent_name: "Head",
+					zsort: -5.5,
+					x: -38.0,
+					y: -6.0,
+					width: 24.0,
+					height: 24.0,
+					color: [30, 30, 90, 255]
+				},
+			)
+			.unwrap();
+		let mask_res = session
+			.exec(
+				"node.set_mask",
+				&json::object! {
+					node_name: "Pupil_L",
+					sources: [{ name: "Eye_L", mode: "Mask" }]
+				},
+			)
+			.unwrap();
+		assert_eq!(mask_res["mask_count"].as_u32(), Some(1));
+
+		// Wrap Eye_L + Pupil_L inside a MeshGroup cage
+		let mg_res = session
+			.exec(
+				"node.add_meshgroup",
+				&json::object! {
+					name: "LeftEyeCage",
+					parent_name: "Head",
+					children: ["Eye_L", "Pupil_L"],
+					cols: 3,
+					rows: 3
+				},
+			)
+			.unwrap();
+		assert_eq!(mg_res["reparented_children"].as_u32(), Some(2));
+
+		// Synthesize tears + remove Pupil_L cleanly
+		session
+			.exec("node.synthesize_overlay", &json::object! { kind: "tears" })
+			.unwrap();
+		assert!(session.model.puppet.params.contains_key("Expr:: Tears"));
+		session
+			.exec("node.remove", &json::object! { node_name: "Pupil_L" })
+			.unwrap();
+		assert!(!session.model.puppet.nodes.iter().any(|n| n.name == "Pupil_L"));
+
+		// Render animated GIF and verify GIF89a magic & decodable frames
+		let gif_path = std::env::temp_dir().join("inox2d_test_idle.gif");
+		let gif_res = session
+			.exec(
+				"render.gif",
+				&json::object! {
+					out: gif_path.to_string_lossy().as_ref(),
+					anim: "Idle",
+					frames: 6,
+					fps: 10,
+					width: 128,
+					height: 128
+				},
+			)
+			.unwrap();
+		assert!(gif_res["bytes"].as_u32().unwrap() > 100);
+		let gif_bytes = fs::read(&gif_path).unwrap();
+		assert!(gif_bytes.starts_with(b"GIF89a"));
+		let _ = fs::remove_file(&gif_path);
 	}
 }

@@ -1,28 +1,35 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::Path;
 
-use glam::{vec2, Vec2};
+use glam::{vec2, vec3, Vec2};
 use image::{Rgba, RgbaImage};
 use inox2d::formats::inp::write_inp;
-use inox2d::model::Model;
-use inox2d::node::components::{Composite, Mesh, MeshGroup, PhysicsModel, SimplePhysics, TexturedMesh};
-use inox2d::node::InoxNodeUuid;
+use inox2d::math::transform::TransformOffset;
+use inox2d::model::{Model, ModelTexture, VendorData};
+use inox2d::node::components::{
+	BlendMode, Composite, Drawable, Mask, MaskMode, Masks, Mesh, MeshGroup, PhysicsModel, SimplePhysics, TexturedMesh,
+};
+use inox2d::node::{InoxNode, InoxNodeUuid};
+use inox2d::puppet::Puppet;
 use inox2d::texture::decode_model_textures;
 use json::object::Object;
 use json::JsonValue;
 
 use crate::audit::{analyze_anatomy, audit_rig, auto_fix_rig};
-use crate::headless_render::{render_anim_sheet, render_diagnostic, render_frame, render_grid, RenderOptions};
+use crate::headless_render::{
+	render_anim_gif, render_anim_sheet, render_diagnostic, render_diff, render_frame, render_grid, RenderOptions,
+};
 use crate::psd::{
 	export_model_to_psd, import_psd_to_model, parse_psd_bytes, photocraft_convert, photocraft_inspect,
 };
 use crate::rig::{
 	add_grid_part, add_pendulum_physics, add_standard_vtuber_params, apply_blink_binding, apply_breath_binding,
-	apply_deform_brush, apply_head_perspective_binding, apply_head_roll_binding, apply_mouth_form_binding,
-	apply_opacity_binding, auto_rig_vtuber, build_sample_vtuber_model, create_idle_animation,
-	generate_contour_mesh, generate_grid_mesh,
+	apply_brow_binding, apply_deform_brush, apply_head_perspective_binding, apply_head_roll_binding,
+	apply_mouth_form_binding, apply_mouth_visemes_2d, apply_opacity_binding, auto_rig_vtuber,
+	build_sample_vtuber_model, create_idle_animation, generate_contour_mesh, generate_grid_mesh,
+	synthesize_expression_overlay,
 };
 
 pub struct CommandSpec {
@@ -178,13 +185,94 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			description: "Render X-ray diagnostic PNG (50px coordinate grid, foldover/stretch heatmap, Face containment contour, pivots)",
 			params_schema: r#"{"out":"diagnostic.png","width?":512,"height?":512,"scale?":1.0}"#,
 		},
+		CommandSpec {
+			id: "render.diff",
+			description: "Render side-by-side [Before | After | Pixel Heatmap] visual diff PNG against a checkpoint or previous undo state",
+			params_schema: r#"{"out":"diff.png","checkpoint?":"string","tile_size?":256,"scale?":0.75}"#,
+		},
+		CommandSpec {
+			id: "render.gif",
+			description: "Render a looping animated .gif of an animation or continuous physics motion test",
+			params_schema: r#"{"out":"preview.gif","anim?":"Idle","frames?":24,"fps?":15,"width?":320,"height?":320,"scale?":0.85,"wireframe?":false}"#,
+		},
+		CommandSpec {
+			id: "edit.undo",
+			description: "Undo the most recent mutating command",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "edit.redo",
+			description: "Redo a previously undone command",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "session.checkpoint",
+			description: "Save a named snapshot checkpoint of the current model",
+			params_schema: r#"{"name":"before_sculpt"}"#,
+		},
+		CommandSpec {
+			id: "session.restore",
+			description: "Restore the model to a previously saved named checkpoint",
+			params_schema: r#"{"name":"before_sculpt"}"#,
+		},
+		CommandSpec {
+			id: "session.batch",
+			description: "Execute multiple commands atomically in one call (rolls back all on error)",
+			params_schema: r#"{"commands":[{"cmd":"string","params":{}}]}"#,
+		},
+		CommandSpec {
+			id: "node.configure",
+			description: "Update a node's name, parent, zsort, enabled, lock_to_root, transform, blend_mode, opacity, or tint",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Face","name?":"string","parent_name?":"string","zsort?":0.0,"enabled?":true,"lock_to_root?":false,"x?":0.0,"y?":0.0,"rot_z_deg?":0.0,"scale_x?":1.0,"scale_y?":1.0,"blend_mode?":"Normal","opacity?":1.0,"tint?":[1.0,1.0,1.0]}"#,
+		},
+		CommandSpec {
+			id: "node.set_mask",
+			description: "Configure or clear clipping masks on a Drawable node",
+			params_schema: r#"{"node_name":"Pupil_L","sources":[{"name":"Eye_L","mode":"Mask"}],"threshold?":0.1}"#,
+		},
+		CommandSpec {
+			id: "node.add_meshgroup",
+			description: "Create a MeshGroup deformation cage over existing child nodes and reparent them into it",
+			params_schema: r#"{"name":"EyeCage","parent_name?":"Head","children":["Eye_L"],"cols?":4,"rows?":4,"padding?":16.0}"#,
+		},
+		CommandSpec {
+			id: "node.remove",
+			description: "Remove a node subtree and clean up any parameter bindings referencing removed nodes",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"string"}"#,
+		},
+		CommandSpec {
+			id: "node.synthesize_overlay",
+			description: "Procedurally paint & attach an expression overlay (blush, gloom, tears, angry, shock) with 0..1 Opacity parameter",
+			params_schema: r#"{"kind":"blush|gloom|tears|angry|shock","parent_name?":"Head"}"#,
+		},
+		CommandSpec {
+			id: "rig.auto_visemes",
+			description: "Bind 3x3 2D A/I/U/E/O vowel visemes (Mouth:: Viseme) onto a Mouth Part node",
+			params_schema: r#"{"node_name":"Mouth","param?":"Mouth:: Viseme","open_px?":12.0,"width_px?":8.0}"#,
+		},
+		CommandSpec {
+			id: "rig.auto_brow",
+			description: "Bind 2D eyebrow expression deformations (Angle x Height) onto a Brow Part node",
+			params_schema: r#"{"node_name":"Brow_L","param?":"Brow:: Left","is_right?":false}"#,
+		},
 	]
+}
+
+#[derive(Clone)]
+pub struct ModelSnapshot {
+	pub puppet_json: JsonValue,
+	pub textures: Vec<ModelTexture>,
+	pub vendors: Vec<VendorData>,
+	pub param_overrides: HashMap<String, Vec2>,
 }
 
 pub struct Session {
 	pub model: Model,
 	pub param_overrides: HashMap<String, Vec2>,
 	pub revision: u64,
+	pub undo_stack: Vec<ModelSnapshot>,
+	pub redo_stack: Vec<ModelSnapshot>,
+	pub checkpoints: HashMap<String, ModelSnapshot>,
 }
 
 impl Session {
@@ -193,11 +281,35 @@ impl Session {
 			model,
 			param_overrides: HashMap::new(),
 			revision: 0,
+			undo_stack: Vec::new(),
+			redo_stack: Vec::new(),
+			checkpoints: HashMap::new(),
 		}
 	}
 
 	pub fn new_sample() -> Self {
 		Self::new(build_sample_vtuber_model())
+	}
+
+	pub fn snapshot(&self) -> ModelSnapshot {
+		ModelSnapshot {
+			puppet_json: self.model.puppet.to_json(),
+			textures: self.model.textures.clone(),
+			vendors: self.model.vendors.clone(),
+			param_overrides: self.param_overrides.clone(),
+		}
+	}
+
+	pub fn restore_snapshot(&mut self, snap: &ModelSnapshot) -> Result<(), String> {
+		let puppet = Puppet::new_from_json(&snap.puppet_json)
+			.map_err(|e| format!("Failed to restore snapshot: {e}"))?;
+		self.model = Model {
+			puppet,
+			textures: snap.textures.clone(),
+			vendors: snap.vendors.clone(),
+		};
+		self.param_overrides = snap.param_overrides.clone();
+		Ok(())
 	}
 
 	pub fn resolve_node(&self, params: &JsonValue, uuid_key: &str, name_key: &str) -> Result<InoxNodeUuid, String> {
@@ -218,7 +330,158 @@ impl Session {
 		Err(format!("Provide either '{uuid_key}' or '{name_key}'"))
 	}
 
+	fn resolve_node_by_ref(&self, val: &JsonValue) -> Result<InoxNodeUuid, String> {
+		if let Some(id) = val.as_u32() {
+			if self.model.puppet.nodes.get_node(InoxNodeUuid(id)).is_some() {
+				return Ok(InoxNodeUuid(id));
+			}
+			return Err(format!("Node UUID {id} not found"));
+		}
+		if let Some(name) = val.as_str() {
+			for node in self.model.puppet.nodes.iter() {
+				if node.name == name {
+					return Ok(node.uuid);
+				}
+			}
+			return Err(format!("Node '{name}' not found"));
+		}
+		Err("Expected node name string or numeric UUID".to_owned())
+	}
+
+	fn is_mutating_cmd(cmd: &str) -> bool {
+		!matches!(
+			cmd,
+			"puppet.info"
+				| "puppet.save"
+				| "puppet.export_psd"
+				| "photocraft.inspect"
+				| "photocraft.convert"
+				| "rig.analyze_anatomy"
+				| "rig.audit"
+				| "render.frame"
+				| "render.grid"
+				| "render.anim_sheet"
+				| "render.diagnostic"
+				| "render.diff"
+				| "render.gif"
+				| "edit.undo"
+				| "edit.redo"
+				| "session.checkpoint"
+				| "session.restore"
+				| "session.batch"
+		)
+	}
+
 	pub fn exec(&mut self, cmd: &str, params: &JsonValue) -> Result<JsonValue, String> {
+		if cmd == "edit.undo" {
+			let Some(prev) = self.undo_stack.pop() else {
+				return Err("Nothing to undo".to_owned());
+			};
+			let current = self.snapshot();
+			self.restore_snapshot(&prev)?;
+			self.redo_stack.push(current);
+			self.revision += 1;
+			return Ok(json::object! {
+				undone: true,
+				revision: self.revision,
+				undo_remaining: self.undo_stack.len(),
+				redo_available: self.redo_stack.len()
+			});
+		}
+		if cmd == "edit.redo" {
+			let Some(next) = self.redo_stack.pop() else {
+				return Err("Nothing to redo".to_owned());
+			};
+			let current = self.snapshot();
+			self.restore_snapshot(&next)?;
+			self.undo_stack.push(current);
+			self.revision += 1;
+			return Ok(json::object! {
+				redone: true,
+				revision: self.revision,
+				undo_remaining: self.undo_stack.len(),
+				redo_available: self.redo_stack.len()
+			});
+		}
+		if cmd == "session.checkpoint" {
+			let name = params["name"]
+				.as_str()
+				.ok_or_else(|| "Missing 'name'".to_owned())?;
+			self.checkpoints.insert(name.to_owned(), self.snapshot());
+			return Ok(json::object! {
+				checkpoint: name,
+				revision: self.revision,
+				total_checkpoints: self.checkpoints.len()
+			});
+		}
+		if cmd == "session.restore" {
+			let name = params["name"]
+				.as_str()
+				.ok_or_else(|| "Missing 'name'".to_owned())?;
+			let snap = self
+				.checkpoints
+				.get(name)
+				.cloned()
+				.ok_or_else(|| format!("Checkpoint '{name}' not found"))?;
+			let current = self.snapshot();
+			self.restore_snapshot(&snap)?;
+			self.undo_stack.push(current);
+			self.redo_stack.clear();
+			self.revision += 1;
+			return Ok(json::object! {
+				restored: name,
+				revision: self.revision
+			});
+		}
+		if cmd == "session.batch" {
+			let items = match &params["commands"] {
+				JsonValue::Array(arr) => arr.clone(),
+				_ => return Err("Missing 'commands' array".to_owned()),
+			};
+			let pre_batch = self.snapshot();
+			let mut results = Vec::with_capacity(items.len());
+			for (idx, item) in items.iter().enumerate() {
+				let sub_cmd = item["cmd"]
+					.as_str()
+					.ok_or_else(|| format!("commands[{idx}] missing 'cmd'"))?;
+				let sub_params = &item["params"];
+				match self.exec_inner(sub_cmd, sub_params) {
+					Ok(r) => results.push(json::object! { cmd: sub_cmd, ok: true, result: r }),
+					Err(e) => {
+						let _ = self.restore_snapshot(&pre_batch);
+						return Err(format!("Batch aborted at step {idx} ({sub_cmd}): {e}"));
+					}
+				}
+			}
+			self.undo_stack.push(pre_batch);
+			if self.undo_stack.len() > 40 {
+				self.undo_stack.remove(0);
+			}
+			self.redo_stack.clear();
+			return Ok(json::object! {
+				executed: results.len(),
+				revision: self.revision,
+				results: results
+			});
+		}
+
+		let snap = if Self::is_mutating_cmd(cmd) {
+			Some(self.snapshot())
+		} else {
+			None
+		};
+		let res = self.exec_inner(cmd, params)?;
+		if let Some(s) = snap {
+			self.undo_stack.push(s);
+			if self.undo_stack.len() > 40 {
+				self.undo_stack.remove(0);
+			}
+			self.redo_stack.clear();
+		}
+		Ok(res)
+	}
+
+	fn exec_inner(&mut self, cmd: &str, params: &JsonValue) -> Result<JsonValue, String> {
 		match cmd {
 			"puppet.info" => Ok(self.cmd_info()),
 			"puppet.new_sample" => {
@@ -732,6 +995,328 @@ impl Session {
 					out: out,
 					width: width,
 					height: height
+				})
+			}
+			"render.diff" => {
+				let out = params["out"].as_str().unwrap_or("diff.png");
+				let tile_size = params["tile_size"].as_u32().unwrap_or(256);
+				let scale = params["scale"].as_f32().unwrap_or(0.75);
+				let snap = if let Some(cp_name) = params["checkpoint"].as_str() {
+					self.checkpoints
+						.get(cp_name)
+						.cloned()
+						.ok_or_else(|| format!("Checkpoint '{cp_name}' not found"))?
+				} else if let Some(prev) = self.undo_stack.last() {
+					prev.clone()
+				} else {
+					return Err("No checkpoint specified and undo history is empty".to_owned());
+				};
+				let before_puppet = Puppet::new_from_json(&snap.puppet_json)
+					.map_err(|e| format!("Failed to restore baseline: {e}"))?;
+				let mut before_model = Model {
+					puppet: before_puppet,
+					textures: snap.textures,
+					vendors: snap.vendors,
+				};
+				let (img, changed_pct) =
+					render_diff(&mut before_model, &mut self.model, &self.param_overrides, tile_size, scale)?;
+				let (w, h) = img.dimensions();
+				img.save(out).map_err(|e| format!("Failed to save '{out}': {e}"))?;
+				Ok(json::object! {
+					out: out,
+					width: w,
+					height: h,
+					changed_pixel_pct: changed_pct
+				})
+			}
+			"render.gif" => {
+				let out = params["out"].as_str().unwrap_or("preview.gif");
+				let anim = params["anim"].as_str();
+				let frames = params["frames"].as_u32().unwrap_or(24);
+				let fps = params["fps"].as_u32().unwrap_or(15);
+				let width = params["width"].as_u32().unwrap_or(320);
+				let height = params["height"].as_u32().unwrap_or(320);
+				let scale = params["scale"].as_f32().unwrap_or(0.85);
+				let wireframe = params["wireframe"].as_bool().unwrap_or(false);
+				let gif_bytes = render_anim_gif(&mut self.model, anim, frames, fps, width, height, scale, wireframe)?;
+				fs::write(out, &gif_bytes).map_err(|e| format!("Failed to write '{out}': {e}"))?;
+				Ok(json::object! {
+					out: out,
+					frames: frames,
+					fps: fps,
+					bytes: gif_bytes.len()
+				})
+			}
+			"node.configure" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				if !params["parent_uuid"].is_null() || !params["parent_name"].is_null() {
+					let new_parent = self.resolve_node(params, "parent_uuid", "parent_name")?;
+					self.model.puppet.nodes.reparent(id, new_parent)?;
+				}
+				if let Some(node) = self.model.puppet.nodes.get_node_mut(id) {
+					if let Some(new_name) = params["name"].as_str() {
+						node.name = new_name.to_owned();
+					}
+					if let Some(z) = params["zsort"].as_f32() {
+						node.zsort = z;
+					}
+					if let Some(en) = params["enabled"].as_bool() {
+						node.enabled = en;
+					}
+					if let Some(ltr) = params["lock_to_root"].as_bool() {
+						node.lock_to_root = ltr;
+					}
+					if let Some(x) = params["x"].as_f32() {
+						node.trans_offset.translation.x = x;
+					}
+					if let Some(y) = params["y"].as_f32() {
+						node.trans_offset.translation.y = y;
+					}
+					if let Some(deg) = params["rot_z_deg"].as_f32() {
+						node.trans_offset.rotation.z = deg.to_radians();
+					}
+					if let Some(sx) = params["scale_x"].as_f32() {
+						node.trans_offset.scale.x = sx;
+					}
+					if let Some(sy) = params["scale_y"].as_f32() {
+						node.trans_offset.scale.y = sy;
+					}
+				}
+				if let Some(drawable) = self.model.puppet.node_comps.get_mut::<Drawable>(id) {
+					if let Some(op) = params["opacity"].as_f32() {
+						drawable.blending.opacity = op.clamp(0.0, 1.0);
+					}
+					if let Some(bm) = params["blend_mode"].as_str() {
+						drawable.blending.mode = match bm {
+							"Multiply" => BlendMode::Multiply,
+							"ColorDodge" => BlendMode::ColorDodge,
+							"LinearDodge" => BlendMode::LinearDodge,
+							"Screen" => BlendMode::Screen,
+							"ClipToLower" => BlendMode::ClipToLower,
+							"SliceFromLower" => BlendMode::SliceFromLower,
+							_ => BlendMode::Normal,
+						};
+					}
+					if let JsonValue::Array(arr) = &params["tint"] {
+						if arr.len() >= 3 {
+							drawable.blending.tint = vec3(
+								arr[0].as_f32().unwrap_or(1.0),
+								arr[1].as_f32().unwrap_or(1.0),
+								arr[2].as_f32().unwrap_or(1.0),
+							);
+						}
+					}
+				}
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				let name = self.model.puppet.nodes.get_node(id).map(|n| n.name.clone()).unwrap_or_default();
+				Ok(json::object! {
+					uuid: id.0,
+					name: name,
+					updated: true
+				})
+			}
+			"node.set_mask" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let threshold = params["threshold"].as_f32().unwrap_or(0.1);
+				let mut masks_vec = Vec::new();
+				if let JsonValue::Array(arr) = &params["sources"] {
+					for item in arr {
+						let src_id = if item.is_object() {
+							self.resolve_node(item, "uuid", "name")?
+						} else {
+							self.resolve_node_by_ref(item)?
+						};
+						let mode = match item["mode"].as_str().unwrap_or("Mask") {
+							"Dodge" | "DodgeMask" => MaskMode::Dodge,
+							_ => MaskMode::Mask,
+						};
+						masks_vec.push(Mask { source: src_id, mode });
+					}
+				}
+				let drawable = self
+					.model
+					.puppet
+					.node_comps
+					.get_mut::<Drawable>(id)
+					.ok_or_else(|| format!("Node {} does not have a Drawable component", id.0))?;
+				let mask_count = masks_vec.len();
+				drawable.masks = if masks_vec.is_empty() {
+					None
+				} else {
+					Some(Masks {
+						threshold,
+						masks: masks_vec,
+					})
+				};
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					mask_count: mask_count
+				})
+			}
+			"node.add_meshgroup" => {
+				let name = params["name"].as_str().unwrap_or("MeshGroup");
+				let parent = if !params["parent_uuid"].is_null() || !params["parent_name"].is_null() {
+					self.resolve_node(params, "parent_uuid", "parent_name")?
+				} else {
+					self.model.puppet.nodes.root_node_id
+				};
+				let cols = params["cols"].as_usize().unwrap_or(4).max(1);
+				let rows = params["rows"].as_usize().unwrap_or(4).max(1);
+				let padding = params["padding"].as_f32().unwrap_or(16.0);
+
+				let mut child_ids = Vec::new();
+				if let JsonValue::Array(arr) = &params["children"] {
+					for item in arr {
+						child_ids.push(self.resolve_node_by_ref(item)?);
+					}
+				}
+
+				// Compute union bounding box of target children relative to parent
+				self.model.puppet.init_all();
+				self.model.puppet.begin_frame();
+				self.model.puppet.end_frame(0.0);
+				let parent_inv = self
+					.model
+					.puppet
+					.node_transform(parent)
+					.map(|t| t.absolute.inverse())
+					.unwrap_or_default();
+				let mut mn = vec2(f32::INFINITY, f32::INFINITY);
+				let mut mx = vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+				for &cid in &child_ids {
+					if let (Some(cmesh), Some(cts)) = (
+						self.model.puppet.node_comps.get::<Mesh>(cid),
+						self.model.puppet.node_transform(cid),
+					) {
+						let to_parent = parent_inv * cts.absolute;
+						for &v in &cmesh.vertices {
+							let p = to_parent
+								.transform_point3(vec3(v.x - cmesh.origin.x, v.y - cmesh.origin.y, 0.0))
+								.truncate();
+							mn = mn.min(p);
+							mx = mx.max(p);
+						}
+					}
+				}
+				let (center, w, h) = if mn.x.is_finite() {
+					((mn + mx) * 0.5, (mx.x - mn.x) + padding * 2.0, (mx.y - mn.y) + padding * 2.0)
+				} else {
+					(Vec2::ZERO, 160.0, 160.0)
+				};
+
+				let mg_id = self.model.puppet.next_node_uuid();
+				self.model.puppet.add_node(
+					parent,
+					InoxNode {
+						uuid: mg_id,
+						name: name.to_owned(),
+						enabled: true,
+						zsort: 0.0,
+						trans_offset: TransformOffset {
+							translation: vec3(center.x, center.y, 0.0),
+							..TransformOffset::default()
+						},
+						lock_to_root: false,
+					},
+				);
+				self.model.puppet.node_comps.add(
+					mg_id,
+					MeshGroup {
+						dynamic: true,
+						translate_children: true,
+					},
+				);
+				self.model
+					.puppet
+					.node_comps
+					.add(mg_id, generate_grid_mesh(w, h, cols, rows, Vec2::ZERO));
+
+				for &cid in &child_ids {
+					let same_parent = self.model.puppet.nodes.get_parent(cid).uuid == parent;
+					if same_parent {
+						if let Some(child_node) = self.model.puppet.nodes.get_node_mut(cid) {
+							child_node.trans_offset.translation.x -= center.x;
+							child_node.trans_offset.translation.y -= center.y;
+						}
+					}
+					self.model.puppet.nodes.reparent(cid, mg_id)?;
+				}
+
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					uuid: mg_id.0,
+					name: name,
+					reparented_children: child_ids.len(),
+					size: [w, h]
+				})
+			}
+			"node.remove" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let removed = self.model.puppet.nodes.remove_subtree(id)?;
+				let removed_set: HashSet<InoxNodeUuid> = removed.iter().copied().collect();
+				for p in self.model.puppet.params.values_mut() {
+					p.bindings.retain(|b| !removed_set.contains(&b.node));
+				}
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					removed_count: removed.len(),
+					removed_uuids: removed.iter().map(|u| u.0).collect::<Vec<_>>()
+				})
+			}
+			"node.synthesize_overlay" => {
+				let kind = params["kind"]
+					.as_str()
+					.ok_or_else(|| "Missing 'kind' (blush, gloom, tears, angry, shock)".to_owned())?;
+				let parent = if !params["parent_uuid"].is_null() || !params["parent_name"].is_null() {
+					Some(self.resolve_node(params, "parent_uuid", "parent_name")?)
+				} else {
+					None
+				};
+				let (uuid, param_name) = synthesize_expression_overlay(&mut self.model, kind, parent)?;
+				self.revision += 1;
+				Ok(json::object! {
+					uuid: uuid.0,
+					kind: kind,
+					param: param_name
+				})
+			}
+			"rig.auto_visemes" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let param_name = params["param"].as_str().unwrap_or("Mouth:: Viseme");
+				let open_px = params["open_px"].as_f32().unwrap_or(12.0);
+				let width_px = params["width_px"].as_f32().unwrap_or(8.0);
+				apply_mouth_visemes_2d(&mut self.model.puppet, id, param_name, open_px, width_px)?;
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name
+				})
+			}
+			"rig.auto_brow" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let is_right = params["is_right"].as_bool().unwrap_or_else(|| {
+					self.model
+						.puppet
+						.nodes
+						.get_node(id)
+						.map(|n| n.name.to_lowercase().contains("_r") || n.name.contains("右"))
+						.unwrap_or(false)
+				});
+				let default_param = if is_right { "Brow:: Right" } else { "Brow:: Left" };
+				let param_name = params["param"].as_str().unwrap_or(default_param);
+				apply_brow_binding(&mut self.model.puppet, id, param_name, is_right)?;
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name,
+					is_right: is_right
 				})
 			}
 			other => Err(format!("Unknown command: '{other}'")),

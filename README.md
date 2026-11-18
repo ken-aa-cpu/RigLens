@@ -21,15 +21,19 @@ Upstream `Inochi2D/inox2d` was a read-only runtime prototype. This fork (`ken-aa
    - Completed `MeshGroup` deformation propagation (barycentric transfer from `MeshGroup` meshes to descendant `Part` vertices), `Animations` (`PuppetAnimation` / `AnimationLane` / `Keyframe`), and dynamic `zSort` bindings.
    - Fixed `ParamCtx::apply` zero-value skipping (`Eye:: Open = 0.0` blinks now evaluate properly) and `Matrix2d::get_mut` transposition.
 2. **Headless Software Renderer & Visual Inspection (`inox2d-mcp`)**:
-   - Implements `inox2d::render::InoxRenderer` on CPU (`render_frame`) with bilinear UV sampling, blend modes, masks, and optional mesh wireframes.
-   - **`render-grid`**: Generates 3×3 parameter sweep contact sheets (e.g., `Head:: Yaw-Pitch`) so multimodal AI agents can visually inspect rigs and self-correct.
-   - **`render-anim`**: Renders multi-frame animation/physics sprite sheets (e.g., `Idle`).
-3. **Auto-Meshing & VTuber Auto-Rigger**:
-   - Subdivided grid (`mesh.auto_grid`) and alpha contour-culled meshing (`mesh.auto_contour`).
-   - High-level parametric rigging operators: 2.5D head yaw/pitch perspective warp (`rig.auto_head_perspective`), eyelid blink (`rig.auto_blink`), mouth open/form (`rig.auto_mouth_form`), head roll (`rig.auto_head_roll`), breathing (`rig.auto_breath`), pendulum hair physics (`physics.add_pendulum`), and semantic one-click auto-rigging (`rig.auto_rig_vtuber`, EN/ZH layer names).
-4. **Native Layered `.psd` Importer/Exporter & `PhotoCraft` Bridge**:
-   - Pure-Rust 8-bit RGBA `.psd` reader & writer (Raw + PackBits RLE, `luni` Unicode layer names, `lsct` folder hierarchy, clipping masks, alpha bounding-box trimming).
-   - Optional integration with `D:\app\PhotoCraft\photocraft-cli.exe` (`photocraft.inspect`, `photocraft.convert`).
+   - Implements `inox2d::render::InoxRenderer` on CPU (`render_frame`) with bilinear UV sampling, blend modes, masks, evaluated `OpacityStore`, and optional mesh wireframes.
+   - **`render-grid`**: Generates 3×3 parameter sweep contact sheets (e.g., `Head:: Yaw-Pitch`) so multimodal AI agents can visually inspect rigs.
+   - **`render-anim` & `gif`**: Renders multi-frame animation/physics sprite sheets and looping **GIF89a animations** (`render.gif`).
+   - **`diagnostic` & `render.diff`**: X-ray diagnostic overlay (50px world grid, red/orange fold-over & stretch heatmap, green Face containment contour) and side-by-side `[Before | After | Diff Heatmap]` comparison.
+3. **Zero-Guessing Rig Audit, Constraint Solver, Visemes & Auto-Rigger**:
+   - **6-Point Rig Auditor (`rig.audit`) & Auto-Fixer (`rig.auto_fix`)**: Detects facial containment leaks, triangle fold-overs, over-stretching, incomplete blink closure, yaw asymmetry, and missing clipping masks; clamps overflowing features and runs Laplacian fold-over relaxation.
+   - **Anatomical Telemetry (`rig.analyze_anatomy`)**: Expresses all parts in Face-normalized coordinates (`[-1..1]`) and pixel margins.
+   - Subdivided grid (`mesh.auto_grid`), alpha contour-culled meshing (`mesh.auto_contour`), and semantic Gaussian soft brush (`deform.brush`).
+   - High-level parametric operators: proportional 2.5D head yaw/pitch (`rig.auto_head_perspective`), eyelid blink (`rig.auto_blink`), 2D A/I/U/E/O vowel visemes (`rig.auto_visemes`), 2D brow expressions (`rig.auto_brow`), head roll (`rig.auto_head_roll`), breathing (`rig.auto_breath`), `Opacity` expression toggles (`rig.bind_opacity`), procedural expression overlay synthesis (`node.synthesize_overlay` for `blush`, `gloom`, `tears`, `angry`, `shock`), and pendulum physics (`physics.add_pendulum`).
+4. **Full Session & Node CRUD + Native `.psd` Pipeline**:
+   - Undo/redo (`edit.undo`, `edit.redo`), named checkpoints (`session.checkpoint`, `session.restore`), atomic batches (`session.batch`), and full node/mask/`MeshGroup` CRUD (`node.configure`, `node.set_mask`, `node.add_meshgroup`, `node.remove`).
+   - Pure-Rust 8-bit RGBA `.psd` reader & writer (Raw + PackBits RLE, `luni` Unicode layer names, `lsct` folder hierarchy, clipping masks, alpha bounding-box trimming) + `D:\app\PhotoCraft\photocraft-cli.exe` integration.
+   - Includes AI operator playbook at [`.agent/skills/inox2d-vtuber-rigger/SKILL.md`](.agent/skills/inox2d-vtuber-rigger/SKILL.md).
 
 ### Quick Start (`inox2d-mcp`)
 

@@ -57,12 +57,56 @@ impl InoxNodeTree {
 
 	/// order is not guaranteed. use pre_order_iter() for pre-order traversal
 	pub fn iter(&self) -> impl Iterator<Item = &InoxNode> {
-		self.arena.iter().map(|n| {
-			if n.is_removed() {
-				panic!("There is a removed node inside the indextree::Arena of the node tree.")
-			}
-			n.get()
-		})
+		self.arena.iter().filter(|n| !n.is_removed()).map(|n| n.get())
+	}
+
+	pub fn is_descendant(&self, node: InoxNodeUuid, potential_ancestor: InoxNodeUuid) -> bool {
+		let Some(&node_id) = self.node_ids.get(&node) else {
+			return false;
+		};
+		let Some(&anc_id) = self.node_ids.get(&potential_ancestor) else {
+			return false;
+		};
+		anc_id.descendants(&self.arena).any(|id| id == node_id)
+	}
+
+	pub fn reparent(&mut self, node: InoxNodeUuid, new_parent: InoxNodeUuid) -> Result<(), String> {
+		if node == self.root_node_id {
+			return Err("Cannot reparent the Root node".to_owned());
+		}
+		if node == new_parent || self.is_descendant(new_parent, node) {
+			return Err("Cannot reparent a node into itself or one of its descendants".to_owned());
+		}
+		let node_id = *self
+			.node_ids
+			.get(&node)
+			.ok_or_else(|| format!("Node {} not found", node.0))?;
+		let parent_id = *self
+			.node_ids
+			.get(&new_parent)
+			.ok_or_else(|| format!("Parent node {} not found", new_parent.0))?;
+		node_id.detach(&mut self.arena);
+		parent_id.append(node_id, &mut self.arena);
+		Ok(())
+	}
+
+	pub fn remove_subtree(&mut self, node: InoxNodeUuid) -> Result<Vec<InoxNodeUuid>, String> {
+		if node == self.root_node_id {
+			return Err("Cannot remove the Root node".to_owned());
+		}
+		let node_id = *self
+			.node_ids
+			.get(&node)
+			.ok_or_else(|| format!("Node {} not found", node.0))?;
+		let removed_uuids: Vec<InoxNodeUuid> = node_id
+			.descendants(&self.arena)
+			.map(|id| self.arena.get(id).unwrap().get().uuid)
+			.collect();
+		node_id.remove_subtree(&mut self.arena);
+		for uuid in &removed_uuids {
+			self.node_ids.remove(uuid);
+		}
+		Ok(removed_uuids)
 	}
 
 	pub fn pre_order_iter(&self) -> impl Iterator<Item = &InoxNode> {
