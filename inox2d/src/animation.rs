@@ -55,6 +55,7 @@ impl AnimationLane {
 				}
 				let t = (frame - af) / span;
 				return Some(match self.interpolation {
+					InterpolateMode::Stepped => a.value,
 					InterpolateMode::Nearest => {
 						if t < 0.5 {
 							a.value
@@ -62,7 +63,7 @@ impl AnimationLane {
 							b.value
 						}
 					}
-					InterpolateMode::Linear => {
+					InterpolateMode::Linear | InterpolateMode::Cubic | InterpolateMode::Bezier => {
 						// Smooth Hermite-like curve when tension != 0.5, or standard linear
 						let s = if (a.tension - 0.5).abs() > 1e-3 {
 							let t2 = t * t;

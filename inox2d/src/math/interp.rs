@@ -6,7 +6,37 @@ pub enum InterpolateMode {
 	Nearest,
 	/// Linear interpolation
 	Linear,
-	// there's more but I'm not adding them for now.
+	/// Hold the left keypoint value (nijilive `Stepped`).
+	Stepped,
+	/// Cubic interpolation (nijilive `Cubic`). Preserved in files; **evaluated as Linear** for now.
+	Cubic,
+	/// Bezier interpolation (nijilive `Bezier`). Preserved in files; **evaluated as Linear** for now.
+	Bezier,
+}
+
+impl InterpolateMode {
+	/// Name used in `.inp` files.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			InterpolateMode::Nearest => "Nearest",
+			InterpolateMode::Linear => "Linear",
+			InterpolateMode::Stepped => "Stepped",
+			InterpolateMode::Cubic => "Cubic",
+			InterpolateMode::Bezier => "Bezier",
+		}
+	}
+
+	/// Parse an `.inp` interpolation mode name.
+	pub fn from_name(name: &str) -> Option<Self> {
+		Some(match name {
+			"Nearest" => InterpolateMode::Nearest,
+			"Linear" => InterpolateMode::Linear,
+			"Stepped" => InterpolateMode::Stepped,
+			"Cubic" => InterpolateMode::Cubic,
+			"Bezier" => InterpolateMode::Bezier,
+			_ => return None,
+		})
+	}
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -82,7 +112,11 @@ fn interpolate_linear(t: f32, range_in: InterpRange<f32>, range_out: InterpRange
 pub fn interpolate_f32(t: f32, range_in: InterpRange<f32>, range_out: InterpRange<f32>, mode: InterpolateMode) -> f32 {
 	match mode {
 		InterpolateMode::Nearest => interpolate_nearest(t, range_in, range_out),
-		InterpolateMode::Linear => interpolate_linear(t, range_in, range_out),
+		InterpolateMode::Stepped => range_out.beg,
+		// TODO: true cubic/bezier needs neighbouring keypoints; approximate with linear for now.
+		InterpolateMode::Linear | InterpolateMode::Cubic | InterpolateMode::Bezier => {
+			interpolate_linear(t, range_in, range_out)
+		}
 	}
 }
 

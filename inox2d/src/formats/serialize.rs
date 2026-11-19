@@ -3,10 +3,9 @@ use json::object::Object;
 use json::JsonValue;
 
 use crate::animation::PuppetAnimation;
-use crate::math::interp::InterpolateMode;
 use crate::math::transform::TransformOffset;
 use crate::node::components::{
-	RawNodeData,
+	ExtraFields, MeshExtraFields, RawNodeData,
 	BlendMode, Composite, Drawable, MaskMode, Masks, Mesh, MeshGroup, PhysicsModel, PhysicsParamMapMode,
 	SimplePhysics, TexturedMesh,
 };
@@ -301,6 +300,23 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 		}
 	}
 
+	if let Some(extra) = puppet.node_comps.get::<MeshExtraFields>(id) {
+		if let Some(JsonValue::Object(mesh_obj)) = obj.get_mut("mesh") {
+			for (k, v) in extra.0.iter() {
+				if mesh_obj.get(k).is_none() {
+					mesh_obj.insert(k, v.clone());
+				}
+			}
+		}
+	}
+	if let Some(extra) = puppet.node_comps.get::<ExtraFields>(id) {
+		for (k, v) in extra.0.iter() {
+			if !obj.iter().any(|(ek, _)| ek == k) {
+				obj.insert(k, v.clone());
+			}
+		}
+	}
+
 	let children: Vec<JsonValue> = puppet
 		.nodes
 		.get_children(id)
@@ -337,11 +353,7 @@ fn serialize_binding(b: &Binding) -> JsonValue {
 	obj.insert(
 		"interpolate_mode",
 		JsonValue::String(
-			match b.interpolate_mode {
-				InterpolateMode::Linear => "Linear",
-				InterpolateMode::Nearest => "Nearest",
-			}
-			.to_owned(),
+			b.interpolate_mode.as_str().to_owned(),
 		),
 	);
 
@@ -416,11 +428,7 @@ fn serialize_animation(anim: &PuppetAnimation) -> JsonValue {
 			lobj.insert(
 				"interpolation",
 				JsonValue::String(
-					match lane.interpolation {
-						InterpolateMode::Linear => "Linear",
-						InterpolateMode::Nearest => "Nearest",
-					}
-					.to_owned(),
+					lane.interpolation.as_str().to_owned(),
 				),
 			);
 			lobj.insert("uuid", JsonValue::from(lane.param_uuid.0));
@@ -454,13 +462,39 @@ impl Puppet {
 		obj.insert("nodes", serialize_node(self, self.nodes.root_node_id));
 
 		let mut params: Vec<&Param> = self.params.values().collect();
-		params.sort_by_key(|p| p.uuid);
-		obj.insert(
-			"param",
-			JsonValue::Array(params.into_iter().map(serialize_param).collect()),
-		);
-		obj.insert("automation", JsonValue::Array(Vec::new()));
-		obj.insert("groups", JsonValue::Array(Vec::new()));
+		// Keep file order for known params; new params follow, ordered by uuid.
+		params.sort_by_key(|p| {
+			(
+				self.param_order.iter().position(|n| *n == p.name).unwrap_or(usize::MAX),
+				p.uuid,
+			)
+		});
+		let param_json: Vec<JsonValue> = params
+			.into_iter()
+			.map(|p| {
+				let mut v = serialize_param(p);
+				if let (JsonValue::Object(o), Some(extra)) = (&mut v, self.param_extras.get(&p.name)) {
+					for (k, ev) in extra.iter() {
+						if o.get(k).is_none() {
+							o.insert(k, ev.clone());
+						}
+					}
+				}
+				v
+			})
+			.collect();
+		obj.insert("param", JsonValue::Array(param_json));
+		for (k, v) in self.top_extras.iter() {
+			if obj.get(k).is_none() {
+				obj.insert(k, v.clone());
+			}
+		}
+		if obj.get("automation").is_none() {
+			obj.insert("automation", JsonValue::Array(Vec::new()));
+		}
+		if obj.get("groups").is_none() {
+			obj.insert("groups", JsonValue::Array(Vec::new()));
+		}
 
 		if !self.animations.is_empty() {
 			let mut anim_names: Vec<&String> = self.animations.keys().collect();

@@ -1251,9 +1251,12 @@ impl Session {
 					.as_f32()
 					.ok_or_else(|| "Missing 'value'".to_owned())?;
 				let tension = params["tension"].as_f32().unwrap_or(0.5);
-				let interpolation = params["interpolation"].as_str().map(|s| match s {
-					"Nearest" | "nearest" => InterpolateMode::Nearest,
-					_ => InterpolateMode::Linear,
+				let interpolation = params["interpolation"].as_str().map(|s| {
+					let mut name = s.to_owned();
+					if let Some(first) = name.get_mut(0..1) {
+						first.make_ascii_uppercase();
+					}
+					InterpolateMode::from_name(&name).unwrap_or(InterpolateMode::Linear)
 				});
 				set_animation_keyframe(
 					&mut self.model.puppet,

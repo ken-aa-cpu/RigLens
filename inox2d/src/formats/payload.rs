@@ -308,6 +308,27 @@ impl Puppet {
 			puppet.animations = deserialize_animations(anims_obj)?;
 		}
 
+		// Preserve what we do not model: parameter order/extras and top-level keys.
+		for p in obj.get_list("param")? {
+			if let Some(name) = p["name"].as_str() {
+				puppet.param_order.push(name.to_owned());
+				let mut extra = json::object::Object::new();
+				for (k, v) in p.entries() {
+					if !PARAM_MANAGED_KEYS.contains(&k) {
+						extra.insert(k, v.clone());
+					}
+				}
+				if !extra.is_empty() {
+					puppet.param_extras.insert(name.to_owned(), extra);
+				}
+			}
+		}
+		for (k, v) in obj.0.iter() {
+			if !["meta", "physics", "nodes", "param", "animations"].contains(&k) {
+				puppet.top_extras.insert(k, v.clone());
+			}
+		}
+
 		puppet.load_node_data(root_id, ty, data, load_node_data_custom)?;
 		puppet.load_children_rec(root_id, children, load_node_data_custom)?;
 
@@ -321,6 +342,28 @@ impl Puppet {
 		data: JsonObject,
 		load_node_data_custom: Option<&impl Fn(&mut Self, &str, JsonObject) -> InoxParseResult<()>>,
 	) -> InoxParseResult<()> {
+		if matches!(ty, "Node" | "Part" | "Composite" | "SimplePhysics" | "MeshGroup") {
+			let mut extra = json::object::Object::new();
+			for (k, v) in data.0.iter() {
+				if !NODE_MANAGED_KEYS.contains(&k) {
+					extra.insert(k, v.clone());
+				}
+			}
+			if !extra.is_empty() {
+				self.node_comps.add(id, ExtraFields(extra));
+			}
+			if let Ok(mesh_obj) = data.get_object("mesh") {
+				let mut mesh_extra = json::object::Object::new();
+				for (k, v) in mesh_obj.0.iter() {
+					if !["verts", "uvs", "indices", "origin"].contains(&k) {
+						mesh_extra.insert(k, v.clone());
+					}
+				}
+				if !mesh_extra.is_empty() {
+					self.node_comps.add(id, MeshExtraFields(mesh_extra));
+				}
+			}
+		}
 		match ty {
 			"Node" => (),
 			"Part" => {
@@ -406,6 +449,41 @@ impl Puppet {
 	}
 }
 
+/// Parameter keys this crate models; everything else is kept as extras.
+const PARAM_MANAGED_KEYS: &[&str] = &["uuid", "name", "is_vec2", "min", "max", "defaults", "axis_points", "bindings"];
+
+/// Node keys this crate models; everything else is kept as extras (see `ExtraFields`).
+const NODE_MANAGED_KEYS: &[&str] = &[
+	"uuid",
+	"name",
+	"type",
+	"enabled",
+	"zsort",
+	"transform",
+	"lockToRoot",
+	"children",
+	"mesh",
+	"textures",
+	"blend_mode",
+	"tint",
+	"screenTint",
+	"mask_threshold",
+	"masks",
+	"opacity",
+	"param",
+	"model_type",
+	"map_mode",
+	"gravity",
+	"length",
+	"frequency",
+	"angle_damping",
+	"length_damping",
+	"output_scale",
+	"local_only",
+	"dynamic_deformation",
+	"translate_children",
+];
+
 fn deserialize_params(vals: &[json::JsonValue]) -> InoxParseResult<HashMap<String, Param>> {
 	let mut params = HashMap::new();
 
@@ -461,10 +539,10 @@ fn deserialize_binding(obj: JsonObject) -> InoxParseResult<Binding> {
 	Ok(Binding {
 		node: InoxNodeUuid(obj.get_u32("node")?),
 		is_set: Matrix2d::from_slice_vecs(&is_set, true)?,
-		interpolate_mode: match obj.get_str("interpolate_mode")? {
-			"Linear" => InterpolateMode::Linear,
-			"Nearest" => InterpolateMode::Nearest,
-			a => return Err(InoxParseError::UnknownInterpolateMode(a.to_owned())),
+		interpolate_mode: {
+			let name = obj.get_str("interpolate_mode")?;
+			InterpolateMode::from_name(name)
+				.ok_or_else(|| InoxParseError::UnknownInterpolateMode(name.to_owned()))?
 		},
 		values: deserialize_binding_values(obj.get_str("param_name")?, obj.get_list("values")?)?,
 	})
@@ -583,10 +661,8 @@ fn deserialize_animations(obj: JsonObject) -> InoxParseResult<HashMap<String, Pu
 				let Ok(lane_obj) = as_object("lane", lane_val) else {
 					continue;
 				};
-				let interpolation = match lane_obj.get_str("interpolation").unwrap_or("Linear") {
-					"Nearest" => InterpolateMode::Nearest,
-					_ => InterpolateMode::Linear,
-				};
+				let interpolation = InterpolateMode::from_name(lane_obj.get_str("interpolation").unwrap_or("Linear"))
+					.unwrap_or(InterpolateMode::Linear);
 				let uuid = lane_obj
 					.get_u32("uuid")
 					.or_else(|_| lane_obj.get_u32("param_uuid"))

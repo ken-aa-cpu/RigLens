@@ -37,6 +37,12 @@ pub struct Puppet {
 	pub animations: HashMap<String, PuppetAnimation>,
 	/// Non-fatal problems found while loading (unknown node types, lossy conversions, ...).
 	pub diagnostics: Vec<String>,
+	/// Parameter names in file order (the `params` map itself is unordered).
+	pub param_order: Vec<String>,
+	/// Unmodelled per-parameter fields (e.g. `parentUUID`, `merge_mode`), keyed by parameter name.
+	pub param_extras: HashMap<String, json::object::Object>,
+	/// Unmodelled top-level keys (e.g. `groups`, `automation`), preserved verbatim.
+	pub top_extras: json::object::Object,
 }
 
 impl Puppet {
@@ -58,6 +64,9 @@ impl Puppet {
 			param_ctx: None,
 			animations: HashMap::new(),
 			diagnostics: Vec::new(),
+			param_order: Vec::new(),
+			param_extras: HashMap::new(),
+			top_extras: json::object::Object::new(),
 		}
 	}
 

@@ -54,7 +54,9 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 | Inochi2D v0.8-era `.inp` | Implemented; verified against the upstream `inox2d` loader. |
 | nijilive-only nodes (`GridDeformer`, `PathDeformer`, `AnimatedPart`, `DynamicComposite`, `Driver`, ...) | **Preserved, not interpreted.** Kept as opaque data and written back unchanged; not rendered or deformed. Loading reports a warning (`warnings` in `puppet.info`). Covered by synthetic regression tests. |
 | All 19 nijilive blend modes | Preserved on round trip. The software renderer implements them; the OpenGL renderer approximates some (see source). |
-| nijilive / nijigenerate parameter bindings, animations, `.inx` extension data | **Not yet verified against real files.** Bindings we cannot parse are currently dropped with a log message. |
+| Real `.inx` files (Inochi2D example models Aka and Midori, made with nijigenerate-era tools) | **Round trip verified**: node and parameter counts, parameter order, every binding and its interpolation mode, `psdLayerPath`, `emissionStrength`, `mesh.grid_axes`, parameter groups. Unmodelled fields are preserved verbatim. |
+| `Cubic` / `Bezier` interpolation | Preserved in files. **Evaluated as Linear** for now (true cubic is planned), so poses can differ slightly from nijigenerate. |
+| Animations, automation, `.inx` `EXT_SECT` from nijigenerate itself | Not yet verified against files saved by current nijigenerate builds. |
 | Live2D `.moc3` | Not supported; proprietary format. Not planned in core. |
 
 ## Quick start
@@ -97,7 +99,9 @@ cargo run -p inox2d-mcp -- commands
 ## Roadmap
 
 - [x] Lossless round trip for unknown node types and all blend modes (synthetic tests).
-- [ ] Verify `.inp` / `.inx` round-trip with real nijigenerate / nijilive files (bindings, animations, `.inx`).
+- [x] Round-trip verified on real `.inx` files (Aka, Midori).
+- [ ] True cubic / bezier interpolation, so evaluation matches nijigenerate.
+- [ ] Verify files saved by current nijigenerate builds (animations, automation, deformer nodes).
 - [ ] Format-neutral rig model and a public **`Exporter` trait** so users can bind their own library and emit any format.
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
 - [ ] Rename crates and publish documentation.

@@ -34,6 +34,16 @@ pub struct RawNodeData {
 	pub fields: json::object::Object,
 }
 
+/// Fields of a *known* node type that this crate does not model (e.g. `psdLayerPath`,
+/// `emissionStrength`, `mesh.grid_axes` parents). Kept verbatim and written back on save
+/// unless the serializer already emits a field with the same key.
+#[derive(Clone, Debug)]
+pub struct ExtraFields(pub json::object::Object);
+
+/// Unmodelled fields inside a node's `mesh` object (e.g. `grid_axes`), kept verbatim.
+#[derive(Clone, Debug)]
+pub struct MeshExtraFields(pub json::object::Object);
+
 /* --- COMPOSITE --- */
 
 /// If has this as a component, the node should composite all children
