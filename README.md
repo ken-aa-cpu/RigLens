@@ -23,7 +23,7 @@ RigLens focuses on the layer in between:
 
 - **Headless file layer** – read, modify and write puppets from scripts, CI or an AI agent.
 - **Quality layer** – automatic rig auditing and fixing, parameter-sweep renders, before/after diffs.
-- **Format-neutral by design** – a planned exporter interface lets anyone plug in their own output format (see [Roadmap](#roadmap)).
+- **Format-neutral by design** – a neutral rig IR and public `Importer` / `Exporter` traits let anyone plug in their own format (see [Exporter Plugins](docs/EXPORTER_PLUGINS.md)).
 
 It is meant to *complement* editors such as [nijigenerate](https://github.com/nijigenerate/nijigenerate) and Inochi Creator, not replace them.
 
@@ -31,11 +31,13 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 
 | Crate / Path | Role |
 | :--- | :--- |
-| [`inox2d`](inox2d/) | Core: `.inp`/`.inx` parser and serializer, mesh-group deformation, simple physics, animation, opacity store. |
+| [`riglens-format`](riglens-format/) | Format-neutral rig IR (`RigDocument`), `Importer` / `Exporter` traits, `FormatRegistry`, `.rigjson` codec, and plugin conformance kit. |
+| [`inox2d`](inox2d/) | Core: `.inp`/`.inx` parser and serializer (`InpFormat` bridge), mesh-group / grid / path deformation, simple physics, animation, opacity store. |
 | [`inox2d-opengl`](inox2d-opengl/) | OpenGL renderer with live `.inp` hot-reload and WASM/WebGL support. |
-| [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer, rig auditor / auto-fixer, pure-Rust `.psd` import/export, CLI, JSON-RPC 2.0 MCP server. |
+| [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer, rig auditor / auto-fixer, pure-Rust `.psd` import/export (`PsdFormat`), CLI, JSON-RPC 2.0 MCP server. |
 | [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): viewport, gizmos, parameter pads, timeline and curves. |
 | [`.agent/skills/inox2d-vtuber-rigger`](.agent/skills/inox2d-vtuber-rigger/SKILL.md) | Playbook for AI agents rigging VTuber puppets through the MCP server. |
+| [`docs/EXPORTER_PLUGINS.md`](docs/EXPORTER_PLUGINS.md) | Guide for writing custom Rust or `.rigjson`-based exporter plugins. |
 
 > Crate names are inherited from the fork and will be renamed in a later release.
 
@@ -64,7 +66,7 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 
 ```sh
 # Run tests
-cargo test -p inox2d -p inox2d-mcp -p inox2d-opengl -p inox2d-gui
+cargo test -p riglens-format -p inox2d -p inox2d-mcp -p inox2d-opengl -p inox2d-gui
 
 # Open the built-in sample in the desktop studio
 cargo run -p inox2d-gui -- --sample
@@ -81,6 +83,8 @@ cargo run -p inox2d-mcp -- info sample_vtuber.inp
 cargo run -p inox2d-mcp -- render-grid sample_vtuber.inp --param "Head:: Yaw-Pitch" --out head_grid.png --wireframe
 cargo run -p inox2d-mcp -- import-psd character.psd --out character.inp --delaunay
 cargo run -p inox2d-mcp -- export-psd sample_vtuber.inp --out character.psd
+cargo run -p inox2d-mcp -- formats
+cargo run -p inox2d-mcp -- export sample_vtuber.inp --out sample.rigjson --pretty
 cargo run -p inox2d-mcp -- commands
 ```
 
@@ -104,7 +108,7 @@ cargo run -p inox2d-mcp -- commands
 - [x] True Catmull-Rom `Cubic` & Hermite `Bezier` evaluation, matching nijilive.
 - [x] P1 deformers: `GridDeformer` and `PathDeformer` (`BezierDeformer`) parse/serialize, parameter bindings, and render propagation.
 - [ ] P1 remaining nodes (`AnimatedPart`, `DynamicComposite`, `Driver`, `Shapes`, `Mask`) & verify files saved by current nijigenerate builds.
-- [ ] Format-neutral rig model and a public **`Exporter` trait** so users can bind their own library and emit any format.
+- [x] Format-neutral rig model (`riglens-format`) and public **`Importer` / `Exporter` traits** + conformance kit so users can bind their own library and emit any format.
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
 - [ ] Rename crates and publish documentation.
 

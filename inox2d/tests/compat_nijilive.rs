@@ -546,3 +546,58 @@ fn nested_path_to_grid_does_not_double_deform() {
 		assert!((*d - vec2(10.0, 0.0)).length() < 1e-4, "vert {i}: got {d:?} (must be (10,0), not doubled)");
 	}
 }
+
+#[test]
+fn inp_format_passes_conformance_kit() {
+	use inox2d::formats::ir_bridge::InpFormat;
+	riglens_format::conformance::assert_roundtrip_conformance(&InpFormat, &InpFormat);
+}
+
+#[test]
+fn real_models_survive_neutral_ir_json_round_trip() {
+	use inox2d::formats::ir_bridge::{ir_to_model, model_to_ir};
+	use riglens_format::{ExportOptions, Exporter, ImportOptions, Importer, RigJsonFormat};
+
+	let Ok(dir) = std::env::var("RIGLENS_EXAMPLE_MODELS") else {
+		eprintln!("RIGLENS_EXAMPLE_MODELS not set, skipping");
+		return;
+	};
+	for name in ["Aka.inx", "Midori.inx"] {
+		let path = std::path::Path::new(&dir).join(name);
+		let Ok(bytes) = std::fs::read(&path) else {
+			eprintln!("{path:?} not found, skipping");
+			continue;
+		};
+		let model = parse_inp(&bytes[..]).expect("parse real model");
+		let ir = model_to_ir(&model);
+		ir.validate().expect("real model IR must validate");
+
+		let (json_bytes, _) = RigJsonFormat
+			.export_bytes(&ir, &ExportOptions::default())
+			.expect("export to rig-json");
+		let reimported = RigJsonFormat
+			.import_bytes(&json_bytes, &ImportOptions::default())
+			.expect("import from rig-json");
+		let round_model = ir_to_model(&reimported.document).expect("convert back to Model");
+		let mut buf = Vec::new();
+		write_inp(&round_model, &mut buf).expect("write .inp");
+
+		assert_eq!(model.textures.len(), round_model.textures.len(), "{name}: texture count");
+		let (a, b) = (payload_json(&bytes), payload_json(&buf));
+		let (mut na, mut nb) = (Vec::new(), Vec::new());
+		all_nodes(&a["nodes"], &mut na);
+		all_nodes(&b["nodes"], &mut nb);
+		assert_eq!(na.len(), nb.len(), "{name}: node count");
+
+		let names = |v: &json::JsonValue| v["param"].members().map(|p| p["name"].to_string()).collect::<Vec<_>>();
+		assert_eq!(names(&a), names(&b), "{name}: parameter order");
+		for (pa, pb) in a["param"].members().zip(b["param"].members()) {
+			assert_eq!(pa["bindings"].len(), pb["bindings"].len(), "{name}: bindings of {}", pa["name"]);
+		}
+		let count = |v: &[&json::JsonValue], key: &str| v.iter().filter(|n| !n[key].is_null()).count();
+		for key in ["psdLayerPath", "emissionStrength"] {
+			assert_eq!(count(&na, key), count(&nb, key), "{name}: {key}");
+		}
+		assert_eq!(a["groups"].len(), b["groups"].len(), "{name}: groups");
+	}
+}

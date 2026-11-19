@@ -8,16 +8,19 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use glam::{vec2, Vec2};
 use inox2d::formats::inp::{parse_inp, write_inp};
+use inox2d::formats::ir_bridge::{ir_to_model, model_to_ir};
 use inox2d::model::Model;
 use inox2d::puppet::Puppet;
 use inox2d_mcp::audit::{audit_rig, auto_fix_rig};
-use inox2d_mcp::engine::{command_registry, Session};
+use inox2d_mcp::engine::{caps_list_to_json, command_registry, Session};
+use inox2d_mcp::formats::default_registry;
 use inox2d_mcp::headless_render::{
 	render_anim_gif, render_anim_sheet, render_diagnostic, render_frame, render_grid, RenderOptions,
 };
 use inox2d_mcp::psd::{export_model_to_psd, import_psd_to_model_with_mode, parse_psd_bytes};
 use inox2d_mcp::rig::{auto_rig_vtuber, build_sample_vtuber_model};
 use json::JsonValue;
+use riglens_format::{ExportOptions, ImportOptions};
 
 #[derive(Parser)]
 #[command(name = "inox2d-mcp", version, about = "Headless Inochi2D Creator engine, CLI, and MCP server")]
@@ -167,6 +170,23 @@ enum Commands {
 	},
 	/// List all engine commands as JSON
 	Commands,
+	/// List all registered format importers, exporters, and capabilities as JSON
+	Formats,
+	/// Export a puppet via the format registry (.inp, .rigjson, .psd, or custom plugins)
+	Export {
+		/// Input path (.inp, .inx, .rigjson, .psd), or omit when passing --sample
+		input: Option<String>,
+		#[arg(long)]
+		sample: bool,
+		#[arg(long)]
+		out: PathBuf,
+		#[arg(long)]
+		format: Option<String>,
+		#[arg(long)]
+		strict: bool,
+		#[arg(long)]
+		pretty: bool,
+	},
 	/// Execute one engine command and optionally save the modified .inp
 	Exec {
 		input: String,
@@ -198,13 +218,22 @@ fn load_model(input: &str) -> Result<Model, String> {
 	if input == "--sample" || input == "sample" {
 		return Ok(build_sample_vtuber_model());
 	}
-	let file = File::open(Path::new(input)).map_err(|e| format!("Failed to open '{input}': {e}"))?;
+	let path = Path::new(input);
+	let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+	let file = File::open(path).map_err(|e| format!("Failed to open '{input}': {e}"))?;
 	let mut reader = BufReader::new(file);
-	let mut bytes = Vec::new();
-	reader
-		.read_to_end(&mut bytes)
-		.map_err(|e| format!("Failed to read '{input}': {e}"))?;
-	parse_inp(bytes.as_slice()).map_err(|e| format!("Failed to parse '{input}': {e}"))
+	if ext.is_empty() || ext.eq_ignore_ascii_case("inp") || ext.eq_ignore_ascii_case("inx") {
+		let mut bytes = Vec::new();
+		reader
+			.read_to_end(&mut bytes)
+			.map_err(|e| format!("Failed to read '{input}': {e}"))?;
+		return parse_inp(bytes.as_slice()).map_err(|e| format!("Failed to parse '{input}': {e}"));
+	}
+	let reg = default_registry();
+	let report = reg
+		.import_from_reader(ext, &mut reader, &ImportOptions::default())
+		.map_err(|e| format!("Failed to import '{input}': {e}"))?;
+	ir_to_model(&report.document).map_err(|e| format!("Failed to convert '{input}': {e}"))
 }
 
 fn parse_param_overrides(items: &[String]) -> Result<HashMap<String, Vec2>, String> {
@@ -279,6 +308,16 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("path", json::object! { type: "string", description: "Output .psd path" });
 				props.insert("width", json::object! { type: "integer" });
 				props.insert("height", json::object! { type: "integer" });
+			} else if spec.id == "puppet.export" {
+				props.insert("path", json::object! { type: "string", description: "Output file path" });
+				props.insert("format", json::object! { type: "string", description: "Format id or extension (inp, rig-json, psd, ...)" });
+				props.insert("strict", json::object! { type: "boolean", description: "Reject export if target format drops features" });
+				props.insert("pretty", json::object! { type: "boolean" });
+				props.insert("width", json::object! { type: "integer" });
+				props.insert("height", json::object! { type: "integer" });
+			} else if spec.id == "puppet.import" {
+				props.insert("path", json::object! { type: "string", description: "Input file path" });
+				props.insert("format", json::object! { type: "string", description: "Format id or extension (inp, rig-json, psd, ...)" });
 			} else if spec.id == "photocraft.inspect" {
 				props.insert("path", json::object! { type: "string" });
 			} else if spec.id == "photocraft.convert" {
@@ -773,6 +812,60 @@ fn run() -> Result<(), String> {
 				})
 				.collect();
 			println!("{}", json::stringify_pretty(JsonValue::Array(arr), 2));
+		}
+		Commands::Formats => {
+			let reg = default_registry();
+			let obj = json::object! {
+				importers: caps_list_to_json(&reg.list_importers()),
+				exporters: caps_list_to_json(&reg.list_exporters()),
+			};
+			println!("{}", json::stringify_pretty(obj, 2));
+		}
+		Commands::Export {
+			input,
+			sample,
+			out,
+			format,
+			strict,
+			pretty,
+		} => {
+			let input_key = if sample {
+				"--sample".to_owned()
+			} else {
+				input.ok_or_else(|| "Missing input path (or pass --sample)".to_owned())?
+			};
+			let model = load_model(&input_key)?;
+			let doc = model_to_ir(&model);
+			let fmt_key = format
+				.as_deref()
+				.or_else(|| out.extension().and_then(|s| s.to_str()))
+				.unwrap_or("inp");
+			let reg = default_registry();
+			let resolved_id = reg
+				.resolve_exporter(fmt_key)
+				.ok_or_else(|| format!("Unsupported export format '{fmt_key}'"))?
+				.info()
+				.id;
+			let file = File::create(&out).map_err(|e| format!("Failed to create '{}': {e}", out.display()))?;
+			let mut w = BufWriter::new(file);
+			let opts = ExportOptions {
+				pretty,
+				strict,
+				..ExportOptions::default()
+			};
+			let report = reg
+				.export_to_writer(&resolved_id, &doc, &mut w, &opts)
+				.map_err(|e| e.to_string())?;
+			for warn in &report.warnings {
+				eprintln!("[{}] {}", warn.code, warn.message);
+			}
+			println!(
+				"Exported {} via '{}' ({} bytes, {} warning(s))",
+				out.display(),
+				resolved_id,
+				report.bytes_written,
+				report.warnings.len()
+			);
 		}
 		Commands::Exec {
 			input,
@@ -1571,5 +1664,75 @@ mod tests {
 			)
 			.unwrap();
 		assert_eq!(rm_kf["removed"].as_bool(), Some(true));
+	}
+
+	#[test]
+	fn format_registry_export_import_and_strict_warnings() {
+		let mut session = Session::new(build_sample_vtuber_model());
+		session.exec("anim.create_idle", &json::object! {}).unwrap();
+
+		// 1) format.list includes inp, rig-json, and psd
+		let listed = session.exec("format.list", &json::object! {}).unwrap();
+		let exp_ids: Vec<&str> = listed["exporters"]
+			.members()
+			.filter_map(|c| c["id"].as_str())
+			.collect();
+		assert!(exp_ids.contains(&"inp"));
+		assert!(exp_ids.contains(&"rig-json"));
+		assert!(exp_ids.contains(&"psd"));
+
+		let dir = std::env::temp_dir().join("riglens_mcp_format_test");
+		let _ = fs::create_dir_all(&dir);
+		let rigjson_path = dir.join("sample.rigjson");
+		let psd_path = dir.join("sample.psd");
+
+		// 2) Export to .rigjson cleanly with zero warnings
+		let exp_json = session
+			.exec(
+				"puppet.export",
+				&json::object! { path: rigjson_path.to_str().unwrap(), pretty: true },
+			)
+			.unwrap();
+		assert_eq!(exp_json["format"].as_str(), Some("rig-json"));
+		assert!(exp_json["bytes_written"].as_usize().unwrap() > 100);
+		assert_eq!(exp_json["warnings"].len(), 0);
+
+		// 3) Non-strict export to .psd succeeds and reports structured capability warnings
+		let exp_psd = session
+			.exec(
+				"puppet.export",
+				&json::object! { path: psd_path.to_str().unwrap(), width: 256, height: 256 },
+			)
+			.unwrap();
+		assert_eq!(exp_psd["format"].as_str(), Some("psd"));
+		assert!(exp_psd["bytes_written"].as_usize().unwrap() > 0);
+		let has_anim_warn = exp_psd["warnings"]
+			.members()
+			.any(|w| w["code"].as_str() == Some("UNSUPPORTED_ANIMATIONS"));
+		assert!(has_anim_warn, "expected UNSUPPORTED_ANIMATIONS warning: {:?}", exp_psd["warnings"]);
+
+		// 4) Strict export to .psd rejects because animations are dropped
+		let strict_err = session
+			.exec(
+				"puppet.export",
+				&json::object! { path: psd_path.to_str().unwrap(), strict: true },
+			)
+			.unwrap_err();
+		assert!(strict_err.contains("strict mode"), "unexpected error: {strict_err}");
+
+		// 5) Re-import .rigjson back into a fresh session
+		let orig_nodes = session.model.puppet.nodes.iter().count();
+		let mut fresh = Session::new(Model {
+			puppet: Puppet::new_empty("Empty"),
+			textures: Vec::new(),
+			vendors: Vec::new(),
+		});
+		let imp = fresh
+			.exec("puppet.import", &json::object! { path: rigjson_path.to_str().unwrap() })
+			.unwrap();
+		assert_eq!(imp["info"]["node_count"].as_usize(), Some(orig_nodes));
+		assert!(fresh.model.puppet.animations.contains_key("Idle"));
+
+		let _ = fs::remove_dir_all(&dir);
 	}
 }

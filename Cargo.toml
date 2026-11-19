@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "riglens-format",
     "inox2d",
     "inox2d-opengl",
     "inox2d-mcp",

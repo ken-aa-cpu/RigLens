@@ -1,4 +1,5 @@
 pub mod inp;
+pub mod ir_bridge;
 mod json;
 mod payload;
 pub mod serialize;

@@ -6,7 +6,9 @@ use std::path::Path;
 use glam::{vec2, vec3, Vec2};
 use image::{Rgba, RgbaImage};
 use inox2d::formats::inp::write_inp;
+use inox2d::formats::ir_bridge::{ir_to_model, model_to_ir};
 use inox2d::math::interp::InterpolateMode;
+use riglens_format::{Diagnostic, ExportOptions, FormatCapabilities, ImportOptions, Severity};
 use inox2d::math::transform::TransformOffset;
 use inox2d::model::{Model, ModelTexture, VendorData};
 use inox2d::node::components::{
@@ -68,6 +70,21 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			id: "puppet.export_psd",
 			description: "Export the current puppet parts as a layered .psd file",
 			params_schema: r#"{"path":"string","width?":1024,"height?":1024}"#,
+		},
+		CommandSpec {
+			id: "format.list",
+			description: "List all registered format importers and exporters with their capabilities",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "puppet.export",
+			description: "Export the current puppet through the format plugin registry (.inp, .rigjson, .psd, or custom plugins)",
+			params_schema: r#"{"path":"string","format?":"inp|rig-json|psd","strict?":false,"pretty?":true}"#,
+		},
+		CommandSpec {
+			id: "puppet.import",
+			description: "Import a puppet through the format plugin registry (.inp, .inx, .rigjson, .psd, or custom plugins)",
+			params_schema: r#"{"path":"string","format?":"inp|rig-json|psd"}"#,
 		},
 		CommandSpec {
 			id: "photocraft.inspect",
@@ -393,6 +410,8 @@ impl Session {
 			"puppet.info"
 				| "puppet.save"
 				| "puppet.export_psd"
+				| "puppet.export"
+				| "format.list"
 				| "photocraft.inspect"
 				| "photocraft.convert"
 				| "rig.analyze_anatomy"
@@ -588,6 +607,74 @@ impl Session {
 					width: width,
 					height: height,
 					bytes: psd_bytes.len()
+				})
+			}
+			"format.list" => {
+				let reg = crate::formats::default_registry();
+				Ok(json::object! {
+					importers: caps_list_to_json(&reg.list_importers()),
+					exporters: caps_list_to_json(&reg.list_exporters()),
+				})
+			}
+			"puppet.export" => {
+				let path = params["path"]
+					.as_str()
+					.ok_or_else(|| "Missing 'path'".to_owned())?;
+				let fmt_key = params["format"]
+					.as_str()
+					.or_else(|| Path::new(path).extension().and_then(|s| s.to_str()))
+					.unwrap_or("inp");
+				let reg = crate::formats::default_registry();
+				let resolved_id = reg
+					.resolve_exporter(fmt_key)
+					.ok_or_else(|| format!("Unsupported export format '{fmt_key}'"))?
+					.info()
+					.id;
+				let mut options = ExportOptions {
+					pretty: params["pretty"].as_bool().unwrap_or(true),
+					strict: params["strict"].as_bool().unwrap_or(false),
+					..ExportOptions::default()
+				};
+				if let Some(w) = params["width"].as_u64() {
+					options.custom.insert("width".to_owned(), serde_json::json!(w));
+				}
+				if let Some(h) = params["height"].as_u64() {
+					options.custom.insert("height".to_owned(), serde_json::json!(h));
+				}
+				let doc = model_to_ir(&self.model);
+				let file = File::create(Path::new(path)).map_err(|e| format!("Failed to create '{path}': {e}"))?;
+				let mut writer = BufWriter::new(file);
+				let report = reg
+					.export_to_writer(&resolved_id, &doc, &mut writer, &options)
+					.map_err(|e| e.to_string())?;
+				Ok(json::object! {
+					saved: path,
+					format: resolved_id,
+					bytes_written: report.bytes_written,
+					warnings: diagnostics_to_json(&report.warnings),
+				})
+			}
+			"puppet.import" => {
+				let path = params["path"]
+					.as_str()
+					.ok_or_else(|| "Missing 'path'".to_owned())?;
+				let fmt_key = params["format"]
+					.as_str()
+					.or_else(|| Path::new(path).extension().and_then(|s| s.to_str()))
+					.unwrap_or("inp");
+				let reg = crate::formats::default_registry();
+				let file = File::open(Path::new(path)).map_err(|e| format!("Failed to open '{path}': {e}"))?;
+				let mut reader = std::io::BufReader::new(file);
+				let report = reg
+					.import_from_reader(fmt_key, &mut reader, &ImportOptions::default())
+					.map_err(|e| e.to_string())?;
+				let model = ir_to_model(&report.document).map_err(|e| e.to_string())?;
+				self.model = model;
+				self.param_overrides.clear();
+				self.revision += 1;
+				Ok(json::object! {
+					info: self.cmd_info(),
+					warnings: diagnostics_to_json(&report.warnings),
 				})
 			}
 			"photocraft.inspect" => {
@@ -1704,4 +1791,44 @@ impl Session {
 			warnings: self.model.puppet.diagnostics.clone()
 		}
 	}
+}
+
+pub fn caps_list_to_json(caps: &[FormatCapabilities]) -> JsonValue {
+	JsonValue::Array(
+		caps.iter()
+			.map(|c| {
+				json::object! {
+					id: c.id.clone(),
+					display_name: c.display_name.clone(),
+					extensions: c.extensions.clone(),
+					supports_grid_deformer: c.supports_grid_deformer,
+					supports_path_deformer: c.supports_path_deformer,
+					supports_cubic_interpolation: c.supports_cubic_interpolation,
+					supports_animations: c.supports_animations,
+					supports_opaque_passthrough: c.supports_opaque_passthrough,
+					supports_textures: c.supports_textures,
+					supports_vendor_data: c.supports_vendor_data,
+				}
+			})
+			.collect(),
+	)
+}
+
+fn diagnostics_to_json(diags: &[Diagnostic]) -> JsonValue {
+	JsonValue::Array(
+		diags
+			.iter()
+			.map(|d| {
+				json::object! {
+					severity: match d.severity {
+						Severity::Info => "info",
+						Severity::Warning => "warning",
+					},
+					code: d.code.clone(),
+					node_id: d.node_id,
+					message: d.message.clone(),
+				}
+			})
+			.collect(),
+	)
 }
