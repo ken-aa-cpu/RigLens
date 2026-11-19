@@ -191,7 +191,7 @@ pub fn command_registry() -> &'static [CommandSpec] {
 		CommandSpec {
 			id: "anim.set_keyframe",
 			description: "Insert or update a keyframe (frame, value, tension, interpolation) on an animation lane",
-			params_schema: r#"{"anim?":"Idle","param":"Head:: Roll","target?":0,"frame":30,"value":0.4,"tension?":0.5,"interpolation?":"Linear|Nearest"}"#,
+			params_schema: r#"{"anim?":"Idle","param":"Head:: Roll","target?":0,"frame":30,"value":0.4,"tension?":0.5,"interpolation?":"Linear|Nearest|Stepped|Cubic|Bezier"}"#,
 		},
 		CommandSpec {
 			id: "anim.remove_keyframe",

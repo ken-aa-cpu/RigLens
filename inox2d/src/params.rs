@@ -4,7 +4,7 @@ use glam::{vec2, Vec2};
 
 use crate::math::{
 	deform::Deform,
-	interp::{bi_interpolate_f32, bi_interpolate_vec2s_additive, InterpRange, InterpolateMode},
+	interp::{Cell, InterpRange, InterpolateMode},
 	matrix::Matrix2d,
 };
 use crate::node::{
@@ -123,12 +123,21 @@ impl Param {
 
 			let val_normed = val_normed.clamp(range_in.beg, range_in.end);
 
+			let cell = Cell {
+				t: val_normed,
+				range_in,
+				xs: (x_mindex, x_maxdex),
+				ys: (y_mindex, y_maxdex),
+				x_last: self.axis_points.x.len() - 1,
+				y_last: self.axis_points.y.len() - 1,
+			};
+
 			match binding.values {
 				BindingValues::ZSort(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
 
 					comps.get_mut::<ZSort>(binding.node).unwrap().0 +=
-						bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 				}
 				BindingValues::TransformTX(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
@@ -138,7 +147,7 @@ impl Param {
 						.unwrap()
 						.relative
 						.translation
-						.x += bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						.x += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 				}
 				BindingValues::TransformTY(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
@@ -148,19 +157,19 @@ impl Param {
 						.unwrap()
 						.relative
 						.translation
-						.y += bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						.y += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 				}
 				BindingValues::TransformSX(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
 
 					comps.get_mut::<TransformStore>(binding.node).unwrap().relative.scale.x *=
-						bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 				}
 				BindingValues::TransformSY(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
 
 					comps.get_mut::<TransformStore>(binding.node).unwrap().relative.scale.y *=
-						bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 				}
 				BindingValues::TransformRX(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
@@ -170,7 +179,7 @@ impl Param {
 						.unwrap()
 						.relative
 						.rotation
-						.x += bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						.x += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 				}
 				BindingValues::TransformRY(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
@@ -180,7 +189,7 @@ impl Param {
 						.unwrap()
 						.relative
 						.rotation
-						.y += bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						.y += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 				}
 				BindingValues::TransformRZ(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
@@ -190,7 +199,7 @@ impl Param {
 						.unwrap()
 						.relative
 						.rotation
-						.z += bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						.z += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 				}
 				BindingValues::Deform(ref matrix) => {
 					let out_top = InterpRange::new(
@@ -219,14 +228,7 @@ impl Param {
 						let mut direct_deform: Vec<Vec2> = Vec::with_capacity(vert_len);
 						direct_deform.resize(vert_len, Vec2::ZERO);
 
-						bi_interpolate_vec2s_additive(
-							val_normed,
-							range_in,
-							out_top,
-							out_bottom,
-							binding.interpolate_mode,
-							&mut direct_deform,
-						);
+						cell.vec2s_additive(matrix, out_top, out_bottom, binding.interpolate_mode, &mut direct_deform);
 
 						direct_deform
 					};
@@ -239,7 +241,7 @@ impl Param {
 				BindingValues::Opacity(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
 					if let Some(op) = comps.get_mut::<OpacityStore>(binding.node) {
-						op.0 *= bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+						op.0 *= cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 					}
 				}
 			}

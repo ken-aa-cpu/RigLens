@@ -199,3 +199,148 @@ fn real_models_round_trip_without_losing_structure() {
 		assert_eq!(a["groups"].len(), b["groups"].len(), "{name}: groups");
 	}
 }
+
+#[test]
+fn cubic_param_bindings_1d_and_2d_match_catmull_rom() {
+	use glam::Vec2;
+	use inox2d::math::interp::cubic_cell;
+	use inox2d::node::InoxNodeUuid;
+	use inox2d::render::TexturedMeshRenderCtx;
+
+	// Build a minimal puppet with one Part (4 verts) and two parameters:
+	// - 1D param "P1" with 3 axis points [0.0, 0.5, 1.0] driving TransformTX ([0, 10, 0]) and Deform (v0 += [0,0], [0,10], [0,0])
+	// - 2D param "P2" with 3x3 axis points driving TransformTX with non-collinear grid
+	let p_node = part(5, "P", "Normal");
+	let root = node(1, "Root", "Node", "", &p_node);
+	let mk_inp = |mode: &str| {
+		let zero_4 = "[[0,0],[0,0],[0,0],[0,0]]";
+		let mid_4 = "[[0,10],[0,0],[0,0],[0,0]]";
+		let json = format!(
+			r#"{{"meta":{{"name":"cubic","version":"1.0-alpha","thumbnailId":4294967295,"preservePixels":false}},
+			"physics":{{"pixelsPerMeter":1000.0,"gravity":9.8}},"nodes":{root},
+			"param":[
+			  {{"uuid":10,"name":"P1","is_vec2":false,"min":[0,0],"max":[1,0],"defaults":[0,0],
+			    "axis_points":[[0.0,0.5,1.0],[0.0]],"bindings":[
+			      {{"node":5,"param_name":"transform.t.x","isSet":[[true],[true],[true]],"interpolate_mode":"{mode}","values":[[0.0],[10.0],[0.0]]}},
+			      {{"node":5,"param_name":"deform","isSet":[[true],[true],[true]],"interpolate_mode":"{mode}","values":[[{zero_4}],[{mid_4}],[{zero_4}]]}}
+			    ]}},
+			  {{"uuid":11,"name":"P2","is_vec2":true,"min":[0,0],"max":[1,1],"defaults":[0,0],
+			    "axis_points":[[0.0,0.5,1.0],[0.0,0.5,1.0]],"bindings":[
+			      {{"node":5,"param_name":"transform.t.y","isSet":[[true,true,true],[true,true,true],[true,true,true]],
+			        "interpolate_mode":"{mode}",
+			        "values":[[0.0,0.0,0.0],[0.0,12.0,0.0],[0.0,0.0,0.0]]}}
+			    ]}}
+			],
+			"automation":[],"groups":[],"animations":{{}}}}"#
+		);
+		let mut out = b"TRNSRTS\0".to_vec();
+		out.extend((json.len() as u32).to_be_bytes());
+		out.extend(json.as_bytes());
+		out.extend(b"TEX_SECT");
+		out.extend(0u32.to_be_bytes());
+		out
+	};
+
+	let mut m_cubic = parse_inp(&mk_inp("Cubic")[..]).unwrap();
+	let mut m_linear = parse_inp(&mk_inp("Linear")[..]).unwrap();
+	m_cubic.puppet.init_all();
+	m_linear.puppet.init_all();
+
+	for m in [&mut m_cubic, &mut m_linear] {
+		m.puppet.begin_frame();
+		let pc = m.puppet.param_ctx.as_mut().unwrap();
+		// Sample at cell midpoint x = 0.25 (t = 0.5 between 0.0 and 0.5) and y = 0.25.
+		pc.set("P1", Vec2::new(0.25, 0.0)).unwrap();
+		pc.set("P2", Vec2::new(0.25, 0.25)).unwrap();
+		m.puppet.end_frame(0.0);
+	}
+
+	let pid = InoxNodeUuid(5);
+	let tc = m_cubic.puppet.node_transform(pid).unwrap().relative.translation;
+	let tl = m_linear.puppet.node_transform(pid).unwrap().relative.translation;
+
+	// Expected 1D Catmull-Rom on [0, 10, 0] in cell (0, 1) at t = 0.5:
+	let grid_1d = [0.0f32, 10.0, 0.0];
+	let exp_tx = cubic_cell(|x, _| grid_1d[x], (0, 1), (0, 0), 2, 0, Vec2::new(0.5, 0.0));
+	assert!((tc.x - exp_tx).abs() < 1e-5, "1D cubic tx={} expected={}", tc.x, exp_tx);
+	assert!((tc.x - tl.x).abs() > 0.5, "1D cubic {} must differ from linear {}", tc.x, tl.x);
+
+	// Expected 2D bicubic on [[0,0,0],[0,12,0],[0,0,0]] in cell (0,1)x(0,1) at (0.5, 0.5):
+	let grid_2d = [[0.0f32, 0.0, 0.0], [0.0, 12.0, 0.0], [0.0, 0.0, 0.0]];
+	let exp_ty = cubic_cell(|x, y| grid_2d[x][y], (0, 1), (0, 1), 2, 2, Vec2::new(0.5, 0.5));
+	assert!((tc.y - exp_ty).abs() < 1e-5, "2D cubic ty={} expected={}", tc.y, exp_ty);
+	assert!((tc.y - tl.y).abs() > 0.2, "2D cubic {} must differ from linear {}", tc.y, tl.y);
+
+	// Check 1D Deform on vertex 0:
+	let rc_c = m_cubic.puppet.render_ctx.as_ref().unwrap();
+	let tm_c = m_cubic.puppet.node_comps.get::<TexturedMeshRenderCtx>(pid).unwrap();
+	let def_c = rc_c.vertex_buffers.deforms[tm_c.vert_offset as usize];
+	let rc_l = m_linear.puppet.render_ctx.as_ref().unwrap();
+	let tm_l = m_linear.puppet.node_comps.get::<TexturedMeshRenderCtx>(pid).unwrap();
+	let def_l = rc_l.vertex_buffers.deforms[tm_l.vert_offset as usize];
+	assert!((def_c.y - exp_tx).abs() < 1e-5);
+	assert!((def_c.y - def_l.y).abs() > 0.5);
+}
+
+#[test]
+fn real_midori_cubic_vs_linear_evaluation() {
+	use glam::Vec2;
+	use inox2d::math::interp::InterpolateMode;
+	use inox2d::node::components::TransformStore;
+
+	let Ok(dir) = std::env::var("RIGLENS_EXAMPLE_MODELS") else {
+		eprintln!("RIGLENS_EXAMPLE_MODELS not set, skipping");
+		return;
+	};
+	let path = std::path::Path::new(&dir).join("Midori.inx");
+	let Ok(bytes) = std::fs::read(&path) else {
+		eprintln!("{path:?} not found, skipping");
+		return;
+	};
+
+	let mut m_cubic = parse_inp(&bytes[..]).expect("parse Midori");
+	let mut m_linear = parse_inp(&bytes[..]).expect("parse Midori");
+	for param in m_linear.puppet.params.values_mut() {
+		for b in &mut param.bindings {
+			if b.interpolate_mode == InterpolateMode::Cubic {
+				b.interpolate_mode = InterpolateMode::Linear;
+			}
+		}
+	}
+
+	m_cubic.puppet.init_all();
+	m_linear.puppet.init_all();
+
+	for m in [&mut m_cubic, &mut m_linear] {
+		m.puppet.begin_frame();
+		let pc = m.puppet.param_ctx.as_mut().unwrap();
+		pc.set("Head:: Yaw-Pitch", Vec2::new(0.35, 0.35)).unwrap();
+		pc.set("Body:: Yaw-Pitch", Vec2::new(0.35, 0.35)).unwrap();
+		m.puppet.end_frame(0.0);
+	}
+
+	let deforms_c = &m_cubic.puppet.render_ctx.as_ref().unwrap().vertex_buffers.deforms;
+	let deforms_l = &m_linear.puppet.render_ctx.as_ref().unwrap().vertex_buffers.deforms;
+	assert!(deforms_c.iter().all(|d| d.is_finite()), "no NaN/Inf in cubic deforms");
+
+	let max_deform_diff = deforms_c
+		.iter()
+		.zip(deforms_l.iter())
+		.map(|(a, b)| (*a - *b).length())
+		.fold(0.0f32, f32::max);
+	let max_trans_diff = m_cubic
+		.puppet
+		.nodes
+		.iter()
+		.filter_map(|n| {
+			let a = m_cubic.puppet.node_comps.get::<TransformStore>(n.uuid)?;
+			let b = m_linear.puppet.node_comps.get::<TransformStore>(n.uuid)?;
+			Some((a.relative.translation - b.relative.translation).length())
+		})
+		.fold(0.0f32, f32::max);
+
+	assert!(
+		max_deform_diff > 1e-3 || max_trans_diff > 1e-3,
+		"expected non-zero delta between Cubic and Linear on Midori (deform={max_deform_diff}, trans={max_trans_diff})"
+	);
+}

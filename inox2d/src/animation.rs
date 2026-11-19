@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 
-use crate::math::interp::InterpolateMode;
+use crate::math::interp::{cubic, hermite, InterpolateMode};
 use crate::params::{Param, ParamUuid};
 
 #[derive(Clone, Debug)]
@@ -43,36 +43,36 @@ impl AnimationLane {
 		if frame >= last.frame as f32 {
 			return Some(last.value);
 		}
-		for win in self.keyframes.windows(2) {
-			let a = &win[0];
-			let b = &win[1];
-			let af = a.frame as f32;
-			let bf = b.frame as f32;
+		for i in 1..self.keyframes.len() {
+			let curr = &self.keyframes[i - 1];
+			let next1 = &self.keyframes[i];
+			let af = curr.frame as f32;
+			let bf = next1.frame as f32;
 			if frame >= af && frame <= bf {
 				let span = bf - af;
 				if span.abs() < 1e-6 {
-					return Some(a.value);
+					return Some(curr.value);
 				}
 				let t = (frame - af) / span;
 				return Some(match self.interpolation {
-					InterpolateMode::Stepped => a.value,
+					InterpolateMode::Stepped => curr.value,
 					InterpolateMode::Nearest => {
-						if t < 0.5 {
-							a.value
+						if t > 0.5 {
+							next1.value
 						} else {
-							b.value
+							curr.value
 						}
 					}
-					InterpolateMode::Linear | InterpolateMode::Cubic | InterpolateMode::Bezier => {
-						// Smooth Hermite-like curve when tension != 0.5, or standard linear
-						let s = if (a.tension - 0.5).abs() > 1e-3 {
-							let t2 = t * t;
-							let t3 = t2 * t;
-							3.0 * t2 - 2.0 * t3
-						} else {
-							t
-						};
-						a.value + (b.value - a.value) * s
+					InterpolateMode::Linear => curr.value + (next1.value - curr.value) * t,
+					InterpolateMode::Cubic => {
+						let prev = self.keyframes[i.saturating_sub(2)].value;
+						let next2 = self.keyframes[(i + 1).min(self.keyframes.len() - 1)].value;
+						cubic(prev, curr.value, next1.value, next2, t)
+					}
+					InterpolateMode::Bezier => {
+						let tension = next1.tension;
+						let s = hermite(0.0, 2.0 * tension, 1.0, 2.0 * tension, t).clamp(0.0, 1.0);
+						curr.value + (next1.value - curr.value) * s
 					}
 				});
 			}
@@ -108,5 +108,65 @@ impl PuppetAnimation {
 			}
 		}
 		out
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn lane(interpolation: InterpolateMode, kfs: &[(i32, f32, f32)]) -> AnimationLane {
+		AnimationLane {
+			interpolation,
+			param_uuid: ParamUuid(1),
+			target: 0,
+			merge_mode: "Weighted".to_owned(),
+			keyframes: kfs
+				.iter()
+				.map(|&(frame, value, tension)| Keyframe { frame, value, tension })
+				.collect(),
+		}
+	}
+
+	#[test]
+	fn stepped_nearest_and_linear_eval() {
+		let s = lane(InterpolateMode::Stepped, &[(0, 1.0, 0.5), (10, 5.0, 0.5)]);
+		assert_eq!(s.eval_at(0.0), Some(1.0));
+		assert_eq!(s.eval_at(7.5), Some(1.0));
+		assert_eq!(s.eval_at(10.0), Some(5.0));
+
+		let n = lane(InterpolateMode::Nearest, &[(0, 1.0, 0.5), (10, 5.0, 0.5)]);
+		assert_eq!(n.eval_at(4.0), Some(1.0));
+		assert_eq!(n.eval_at(5.0), Some(1.0));
+		assert_eq!(n.eval_at(6.0), Some(5.0));
+
+		// Linear ignores tension (matches nijilive).
+		let l = lane(InterpolateMode::Linear, &[(0, 0.0, 0.9), (10, 10.0, 0.9)]);
+		assert!((l.eval_at(2.5).unwrap() - 2.5).abs() < 1e-6);
+	}
+
+	#[test]
+	fn cubic_animation_eval() {
+		let kfs = [(0, 0.0, 0.5), (10, 0.0, 0.5), (20, 10.0, 0.5), (30, 0.0, 0.5)];
+		let c = lane(InterpolateMode::Cubic, &kfs);
+		assert!((c.eval_at(10.0).unwrap() - 0.0).abs() < 1e-6);
+		assert!((c.eval_at(20.0).unwrap() - 10.0).abs() < 1e-6);
+		let mid = c.eval_at(15.0).unwrap();
+		assert!((mid - cubic(0.0, 0.0, 10.0, 0.0, 0.5)).abs() < 1e-6);
+		assert!((mid - 5.0).abs() > 0.5, "cubic midpoint should overshoot/curve vs linear");
+	}
+
+	#[test]
+	fn bezier_animation_eval_tension() {
+		let l0 = lane(InterpolateMode::Bezier, &[(0, 0.0, 0.0), (10, 10.0, 0.0)]);
+		let l5 = lane(InterpolateMode::Bezier, &[(0, 0.0, 0.5), (10, 10.0, 0.5)]);
+		let l1 = lane(InterpolateMode::Bezier, &[(0, 0.0, 1.0), (10, 10.0, 1.0)]);
+
+		// Tension 0.5 produces exact linear hermite(0, 1, 1, 1, t) == t.
+		assert!((l5.eval_at(2.5).unwrap() - 2.5).abs() < 1e-6);
+		// Tension 0.0 eases in/out slowly near endpoints (hermite(0,0,1,0,0.25) < 0.25).
+		assert!(l0.eval_at(2.5).unwrap() < 2.0);
+		// Tension 1.0 has steeper tangents near endpoints (hermite(0,2,1,2,0.25) > 2.5).
+		assert!(l1.eval_at(2.5).unwrap() > 3.0);
 	}
 }

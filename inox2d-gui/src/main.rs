@@ -2496,15 +2496,17 @@ impl Inox2dStudioApp {
 				InterpolateMode::Linear => "Mode: Smooth/Linear",
 				InterpolateMode::Nearest => "Mode: Nearest",
 				InterpolateMode::Stepped => "Mode: Stepped",
-				InterpolateMode::Cubic => "Mode: Cubic (shown as Linear)",
-				InterpolateMode::Bezier => "Mode: Bezier (shown as Linear)",
+				InterpolateMode::Cubic => "Mode: Cubic",
+				InterpolateMode::Bezier => "Mode: Bezier",
 			})
 			.clicked()
 		{
 			let next_mode = match cur_interp {
-				InterpolateMode::Linear => InterpolateMode::Nearest,
-				InterpolateMode::Nearest => InterpolateMode::Linear,
-				InterpolateMode::Stepped | InterpolateMode::Cubic | InterpolateMode::Bezier => InterpolateMode::Linear,
+				InterpolateMode::Linear => InterpolateMode::Cubic,
+				InterpolateMode::Cubic => InterpolateMode::Bezier,
+				InterpolateMode::Bezier => InterpolateMode::Nearest,
+				InterpolateMode::Nearest => InterpolateMode::Stepped,
+				InterpolateMode::Stepped => InterpolateMode::Linear,
 			};
 			self.begin_gesture_undo();
 			if let (Some(puuid), Some(anim)) = (sel_uuid, self.session.model.puppet.animations.get_mut("Idle")) {
