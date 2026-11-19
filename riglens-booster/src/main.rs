@@ -6,8 +6,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
+use glam::vec2;
 
-use riglens_booster::physics::{BoosterPhysicsConfig, WindField};
+use riglens_booster::gpu::ambient::AmbientTheme;
+use riglens_booster::gpu::{GpuEffectsConfig, GpuFrameProcessor};
+use riglens_booster::physics::{BoosterPhysicsConfig, MotionHint, WindField};
 use riglens_booster::pipeline::{BoosterConfig, BoosterPipeline};
 use riglens_booster::protocol::vts::{VtsClient, VtsClientConfig};
 use riglens_booster::transport::spout2::{
@@ -48,8 +51,26 @@ enum Commands {
 		frames: u32,
 		#[arg(long, default_value_t = 60.0)]
 		fps: f32,
+		/// Run frames through the M2 GPU compute pipeline (XPBD + JFA 2.5D rim light + particles)
+		#[arg(long, default_value_t = false)]
+		gpu_fx: bool,
+		#[arg(long, default_value = "cyberpunk")]
+		rim_theme: String,
+		#[arg(long, default_value_t = 384)]
+		particles: u32,
 	},
-	/// Run the live 120Hz dual-channel physics + VTS + Spout2 bridge
+	/// Benchmark the M2 wgpu compute/render pipeline on live GPU hardware
+	GpuBench {
+		#[arg(long, default_value_t = 1280)]
+		width: u32,
+		#[arg(long, default_value_t = 720)]
+		height: u32,
+		#[arg(long, default_value_t = 30)]
+		frames: u32,
+		#[arg(long, default_value_t = 512)]
+		particles: u32,
+	},
+	/// Run the live 120Hz dual-channel physics + VTS + M2 GPU FX + Spout2 bridge
 	Run {
 		#[arg(long, default_value = "ws://127.0.0.1:8001")]
 		vts_url: String,
@@ -65,7 +86,43 @@ enum Commands {
 		hz: f32,
 		#[arg(long, default_value_t = 0.55)]
 		wind: f32,
+		/// Disable M2 GPU effects and pass Spout2 frames straight through
+		#[arg(long, default_value_t = false)]
+		no_gpu: bool,
+		/// Disable XPBD soft-body warp pass while keeping rim light / particles
+		#[arg(long, default_value_t = false)]
+		no_soft_body: bool,
+		#[arg(long, default_value_t = 0.75)]
+		rim_intensity: f32,
+		/// Ambient theme: cyberpunk, warm, ocean, or screen (live Windows desktop edge sync)
+		#[arg(long, default_value = "cyberpunk")]
+		rim_theme: String,
+		#[arg(long, default_value_t = 384)]
+		particles: u32,
 	},
+}
+
+fn paint_sphere_rgba(rgba: &mut [u8], width: u32, height: u32, ox: f32, oy: f32, rad: f32) {
+	for y in 0..height {
+		for x in 0..width {
+			let dx = x as f32 - ox;
+			let dy = y as f32 - oy;
+			let dist = (dx * dx + dy * dy).sqrt();
+			let idx = ((y * width + x) * 4) as usize;
+			if dist <= rad {
+				let band = if ((x / 16 + y / 16) % 2) == 0 { 1.0 } else { 0.75 };
+				rgba[idx] = (72.0 * band) as u8;
+				rgba[idx + 1] = (140.0 * band) as u8;
+				rgba[idx + 2] = (210.0 * band) as u8;
+				rgba[idx + 3] = 240;
+			} else {
+				rgba[idx] = 0;
+				rgba[idx + 1] = 0;
+				rgba[idx + 2] = 0;
+				rgba[idx + 3] = 0;
+			}
+		}
+	}
 }
 
 #[tokio::main]
@@ -135,12 +192,84 @@ async fn main() {
 			);
 			let _ = client.close().await;
 		}
+		Commands::GpuBench {
+			width,
+			height,
+			frames,
+			particles,
+		} => {
+			let cfg = GpuEffectsConfig {
+				particle_count: particles,
+				..Default::default()
+			};
+			let mut gpu = match GpuFrameProcessor::new_async(cfg).await {
+				Ok(g) => g,
+				Err(e) => {
+					eprintln!("Failed to init wgpu GPU processor: {e}");
+					std::process::exit(1);
+				}
+			};
+			let mut rgba = vec![0u8; (width * height * 4) as usize];
+			paint_sphere_rgba(
+				&mut rgba,
+				width,
+				height,
+				width as f32 * 0.5,
+				height as f32 * 0.5,
+				width.min(height) as f32 * 0.35,
+			);
+			let fb = FrameBuffer::new(width, height, PixelFormat::Rgba8, rgba).unwrap();
+			let hint = MotionHint {
+				face_found: true,
+				head_velocity: vec2(8.0, -3.0),
+				overall_motion: 1.0,
+				wind_vec: vec2(0.7, 0.2),
+				..Default::default()
+			};
+
+			// Warmup passes (compiles target cache & dynamic JFA uniform slots)
+			for _ in 0..2 {
+				gpu.process_frame(&fb, &hint, 1.0 / 60.0).unwrap();
+			}
+
+			let n = frames.max(1);
+			let mut min_ms = f32::INFINITY;
+			let mut max_ms = 0.0f32;
+			let mut sum_ms = 0.0f32;
+			for _ in 0..n {
+				let t0 = Instant::now();
+				gpu.process_frame(&fb, &hint, 1.0 / 60.0).unwrap();
+				let ms = t0.elapsed().as_secs_f32() * 1000.0;
+				min_ms = min_ms.min(ms);
+				max_ms = max_ms.max(ms);
+				sum_ms += ms;
+			}
+			let avg_ms = sum_ms / n as f32;
+			println!(
+				"{}",
+				serde_json::to_string_pretty(&serde_json::json!({
+					"adapter": gpu.adapter_info(),
+					"width": width,
+					"height": height,
+					"frames": n,
+					"particles": particles,
+					"avg_ms": avg_ms,
+					"min_ms": min_ms,
+					"max_ms": max_ms,
+					"effective_fps": 1000.0 / avg_ms.max(0.001),
+				}))
+				.unwrap()
+			);
+		}
 		Commands::SpoutTest {
 			sender,
 			width,
 			height,
 			frames,
 			fps,
+			gpu_fx,
+			rim_theme,
+			particles,
 		} => {
 			let mut sink = match Spout2Sender::new(&sender) {
 				Ok(s) => s,
@@ -149,8 +278,31 @@ async fn main() {
 					std::process::exit(1);
 				}
 			};
-			println!("Streaming {width}x{height} transparent RGBA test over Spout2 sender '{sender}' for {frames} frames...");
-			let period = Duration::from_secs_f32(1.0 / fps.clamp(1.0, 240.0));
+			let mut gpu = if gpu_fx {
+				let cfg = GpuEffectsConfig {
+					ambient_theme: AmbientTheme::parse(&rim_theme).unwrap_or(AmbientTheme::Cyberpunk),
+					particle_count: particles,
+					..Default::default()
+				};
+				match GpuFrameProcessor::new_async(cfg).await {
+					Ok(g) => {
+						println!("M2 GPU FX enabled on '{}'", g.adapter_info());
+						Some(g)
+					}
+					Err(e) => {
+						eprintln!("Failed to init M2 GPU FX (falling back to raw): {e}");
+						None
+					}
+				}
+			} else {
+				None
+			};
+
+			println!(
+				"Streaming {width}x{height} transparent RGBA test over Spout2 sender '{sender}' for {frames} frames (gpu_fx={gpu_fx})..."
+			);
+			let dt = 1.0 / fps.clamp(1.0, 240.0);
+			let period = Duration::from_secs_f32(dt);
 			let start = Instant::now();
 			let mut rgba = vec![0u8; (width * height * 4) as usize];
 			let cx = width as f32 * 0.5;
@@ -161,28 +313,22 @@ async fn main() {
 				let t = f as f32 * 0.06;
 				let ox = cx + t.cos() * (rad * 0.18);
 				let oy = cy + (t * 1.3).sin() * (rad * 0.18);
-				for y in 0..height {
-					for x in 0..width {
-						let dx = x as f32 - ox;
-						let dy = y as f32 - oy;
-						let dist = (dx * dx + dy * dy).sqrt();
-						let idx = ((y * width + x) * 4) as usize;
-						if dist <= rad {
-							let rim = ((dist / rad).powi(3) * 255.0) as u8;
-							rgba[idx] = 80u8.saturating_add(rim / 2);
-							rgba[idx + 1] = 180;
-							rgba[idx + 2] = 255;
-							rgba[idx + 3] = 235;
-						} else {
-							rgba[idx] = 0;
-							rgba[idx + 1] = 0;
-							rgba[idx + 2] = 0;
-							rgba[idx + 3] = 0;
-						}
-					}
-				}
+				paint_sphere_rgba(&mut rgba, width, height, ox, oy, rad);
+
 				let fb = FrameBuffer::new(width, height, PixelFormat::Rgba8, rgba.clone()).unwrap();
-				if let Err(e) = sink.send_frame(&fb) {
+				let out_fb = if let Some(ref mut g) = gpu {
+					let hint = MotionHint {
+						face_found: true,
+						head_velocity: vec2(-t.sin() * 14.0, (t * 1.3).cos() * 18.0),
+						overall_motion: 1.1,
+						wind_vec: vec2(0.8, (t * 0.5).sin() * 0.3),
+						..Default::default()
+					};
+					g.process_frame(&fb, &hint, dt).unwrap_or(fb)
+				} else {
+					fb
+				};
+				if let Err(e) = sink.send_frame(&out_fb) {
 					eprintln!("Spout send error at frame {f}: {e}");
 					break;
 				}
@@ -202,6 +348,11 @@ async fn main() {
 			spout_out,
 			hz,
 			wind,
+			no_gpu,
+			no_soft_body,
+			rim_intensity,
+			rim_theme,
+			particles,
 		} => {
 			let source: Option<Box<dyn FrameSource>> = match spout_in {
 				Some(name) => match Spout2Receiver::new(&name) {
@@ -225,9 +376,19 @@ async fn main() {
 				None
 			};
 
+			let gpu_cfg = GpuEffectsConfig {
+				enable_soft_body: !no_soft_body,
+				enable_rim_light: rim_intensity > 0.0,
+				rim_intensity,
+				ambient_theme: AmbientTheme::parse(&rim_theme).unwrap_or(AmbientTheme::Cyberpunk),
+				particle_count: particles,
+				..Default::default()
+			};
+
 			let cfg = BoosterConfig {
 				tick_hz: hz,
 				enable_vts: !no_vts,
+				enable_gpu: !no_gpu && source.is_some(),
 				vts: VtsClientConfig {
 					url: vts_url,
 					token_path: token_file,
@@ -240,13 +401,22 @@ async fn main() {
 					},
 					..Default::default()
 				},
+				gpu: gpu_cfg,
 				..Default::default()
 			};
 
 			let mut pipeline = BoosterPipeline::new(cfg, source, sink);
+			let gpu_label = match pipeline.init_gpu().await {
+				Ok(Some(info)) => info,
+				Ok(None) => "disabled".to_owned(),
+				Err(e) => {
+					eprintln!("M2 GPU init failed (falling back to passthrough): {e}");
+					"fallback".to_owned()
+				}
+			};
 			let vts_ok = pipeline.init_vts().await;
 			println!(
-				"RigLens Booster running at {hz}Hz (VTS connected: {vts_ok}, Spout out: '{spout_out}'). Press Ctrl+C to stop."
+				"RigLens Booster running at {hz}Hz (VTS: {vts_ok}, GPU: {gpu_label}, Spout out: '{spout_out}'). Press Ctrl+C to stop."
 			);
 
 			let stop = Arc::new(AtomicBool::new(false));
@@ -258,8 +428,13 @@ async fn main() {
 
 			let telemetry = pipeline.run(stop, None).await;
 			println!(
-				"Booster stopped cleanly: ticks={}, vts_injects={}, vts_errors={}, frames_forwarded={}",
-				telemetry.ticks, telemetry.vts_injects, telemetry.vts_errors, telemetry.frames_forwarded
+				"Booster stopped cleanly: ticks={}, vts_injects={}, vts_errors={}, frames_forwarded={}, gpu_frames={}, avg_gpu_ms={:.3}",
+				telemetry.ticks,
+				telemetry.vts_injects,
+				telemetry.vts_errors,
+				telemetry.frames_forwarded,
+				telemetry.gpu_frames_processed,
+				telemetry.avg_gpu_ms
 			);
 		}
 	}

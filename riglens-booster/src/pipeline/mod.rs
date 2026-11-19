@@ -1,4 +1,4 @@
-//! Dual-channel orchestrator: 120Hz physics + VTS Port 8001 + Spout2 frame forwarding.
+//! Dual-channel orchestrator: 120Hz physics + VTS Port 8001 + M2 GPU compute + Spout2 frame forwarding.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
+use crate::gpu::{GpuEffectsConfig, GpuError, GpuFrameProcessor};
 use crate::physics::{BoosterPhysicsConfig, BoosterPhysicsEngine, BoosterPhysicsOutput, MotionPoseInput};
 use crate::protocol::vts::{VtsClient, VtsClientConfig};
 use crate::transport::{FrameSink, FrameSource};
@@ -15,8 +16,10 @@ pub struct BoosterConfig {
 	pub tick_hz: f32,
 	pub vts_poll_hz: f32,
 	pub enable_vts: bool,
+	pub enable_gpu: bool,
 	pub vts: VtsClientConfig,
 	pub physics: BoosterPhysicsConfig,
+	pub gpu: GpuEffectsConfig,
 }
 
 impl Default for BoosterConfig {
@@ -25,8 +28,10 @@ impl Default for BoosterConfig {
 			tick_hz: 120.0,
 			vts_poll_hz: 60.0,
 			enable_vts: true,
+			enable_gpu: true,
 			vts: VtsClientConfig::default(),
 			physics: BoosterPhysicsConfig::default(),
+			gpu: GpuEffectsConfig::default(),
 		}
 	}
 }
@@ -35,16 +40,19 @@ impl Default for BoosterConfig {
 pub struct BoosterTelemetry {
 	pub ticks: u64,
 	pub frames_forwarded: u64,
+	pub gpu_frames_processed: u64,
+	pub avg_gpu_ms: f32,
 	pub vts_injects: u64,
 	pub vts_errors: u64,
 	pub last_output: BoosterPhysicsOutput,
 }
 
-/// Coordinates Port 8001 bidirectional VTS tracking/physics with Spout2 video transport.
+/// Coordinates Port 8001 bidirectional VTS tracking/physics, M2 `wgpu` effects, and Spout2 transport.
 pub struct BoosterPipeline {
 	config: BoosterConfig,
 	physics: BoosterPhysicsEngine,
 	vts: Option<VtsClient>,
+	gpu: Option<GpuFrameProcessor>,
 	source: Option<Box<dyn FrameSource>>,
 	sink: Option<Box<dyn FrameSink>>,
 }
@@ -60,9 +68,22 @@ impl BoosterPipeline {
 			config,
 			physics,
 			vts: None,
+			gpu: None,
 			source,
 			sink,
 		}
+	}
+
+	/// Initialize the M2 `wgpu` compute/render processor asynchronously (safe inside Tokio runtime).
+	pub async fn init_gpu(&mut self) -> Result<Option<String>, GpuError> {
+		if !self.config.enable_gpu {
+			return Ok(None);
+		}
+		let proc = GpuFrameProcessor::new_async(self.config.gpu.clone()).await?;
+		let info = proc.adapter_info().to_owned();
+		info!("Initialized M2 GPU pipeline on adapter: {info}");
+		self.gpu = Some(proc);
+		Ok(Some(info))
 	}
 
 	/// Connect to VTS if enabled, authenticate, and register all `RigLens*` physics parameters.
@@ -105,6 +126,7 @@ impl BoosterPipeline {
 		let mut telemetry = BoosterTelemetry::default();
 		let mut last_pose = MotionPoseInput::default();
 		let mut prev_t = Instant::now();
+		let mut gpu_total_ms = 0.0f32;
 
 		while !stop.load(Ordering::Relaxed) {
 			if let Some(limit) = max_ticks {
@@ -142,7 +164,24 @@ impl BoosterPipeline {
 
 			if let (Some(ref mut src), Some(ref mut dst)) = (&mut self.source, &mut self.sink) {
 				if let Ok(Some(frame)) = src.recv_frame() {
-					if dst.send_frame(&frame).is_ok() {
+					let out_frame = if let Some(ref mut gpu) = self.gpu {
+						let t0 = Instant::now();
+						match gpu.process_frame(&frame, &phys_out.motion_hint, dt) {
+							Ok(processed) => {
+								gpu_total_ms += t0.elapsed().as_secs_f32() * 1000.0;
+								telemetry.gpu_frames_processed += 1;
+								telemetry.avg_gpu_ms = gpu_total_ms / telemetry.gpu_frames_processed as f32;
+								processed
+							}
+							Err(e) => {
+								warn!("GPU process_frame error (passing raw frame through): {e}");
+								frame
+							}
+						}
+					} else {
+						frame
+					};
+					if dst.send_frame(&out_frame).is_ok() {
 						telemetry.frames_forwarded += 1;
 					}
 				}
@@ -171,6 +210,7 @@ mod tests {
 		let cfg = BoosterConfig {
 			tick_hz: 240.0,
 			enable_vts: false,
+			enable_gpu: false,
 			..Default::default()
 		};
 		let mut pipeline = BoosterPipeline::new(
