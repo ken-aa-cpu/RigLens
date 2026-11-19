@@ -35,7 +35,7 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 | [`inox2d`](inox2d/) | Core: `.inp`/`.inx` parser and serializer (`InpFormat` bridge), mesh-group / grid / path deformation, simple physics, animation, opacity store. |
 | [`inox2d-opengl`](inox2d-opengl/) | OpenGL renderer with live `.inp` hot-reload and WASM/WebGL support. |
 | [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer, rig auditor / auto-fixer, pure-Rust `.psd` import/export (`PsdFormat`), CLI, JSON-RPC 2.0 MCP server. |
-| [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): viewport, gizmos, parameter pads, timeline and curves. |
+| [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): collapsible hierarchy & draw-order outliner, `GridDeformer` / `PathDeformer` / `MeshGroup` stage gizmos, clipping mask & binding keypoint grid editor, 10-point audit & load-warning diagnostics, multi-animation timeline, file browser dialogs, and crash-safe autosave recovery. |
 | [`riglens-booster`](riglens-booster/) | Dual-channel GPU co-processor & 120Hz physics booster (`WindField`, coupled spring chains, VTube Studio Port 8001 WebSocket, Windows DX11 Spout2 bridge, `wgpu` XPBD soft-body, JFA 2D SDF 2.5D rim lighting & particles, M3 2D-Native DLSS alpha-aware super-resolution & dual-tier motion-vector frame generation). |
 | [`.agent/skills/inox2d-vtuber-rigger`](.agent/skills/inox2d-vtuber-rigger/SKILL.md) | Playbook for AI agents rigging VTuber puppets through the MCP server. |
 | [`docs/EXPORTER_PLUGINS.md`](docs/EXPORTER_PLUGINS.md) | Guide for writing custom Rust or `.rigjson`-based exporter plugins. |
@@ -116,6 +116,7 @@ cargo run --release -p riglens-booster -- run --spout-in VTubeStudioSpout --spou
 - [ ] P1 remaining nodes (`AnimatedPart`, `DynamicComposite`, `Driver`, `Shapes`, `Mask`) & verify files saved by current nijigenerate builds.
 - [x] Format-neutral rig model (`riglens-format`) and public **`Importer` / `Exporter` traits** + conformance kit so users can bind their own library and emit any format.
 - [x] P3 algorithm upgrades: nijilive-parity physics initialization & NaN/panic guards, 10-point rig auditor, and constrained Delaunay meshing with adaptive joint refinement.
+- [x] P4 desktop editor (`inox2d-gui` + shared command layer): hierarchical node tree & draw-order outliner, stage editing for `GridDeformer` / `PathDeformer` / `MeshGroup`, clipping mask & binding keypoint editor (`mirror`, scalar CRUD), 10-point audit & Phase 0 load-warning diagnostics panel, multi-animation timeline, pure-Rust Open/Save/Export dialogs, and autosave crash recovery.
 - [x] Co-processor M1 (`riglens-booster`): 120Hz coupled physics/wind engine, VTube Studio Public API (Port `8001`) WebSocket bridge, and Windows DX11 Spout2 shared-texture sender/receiver.
 - [x] Co-processor M2 (`riglens-booster`): `wgpu` GPU compute/render pipeline with screen-space XPBD soft-body mesh deformation, JFA 2D SDF normals & directional 2.5D rim lighting (including Windows screen-edge ambient sync), motion-driven GPU particles, and `gpu-bench`.
 - [x] Co-processor M3 (`riglens-booster`): **2D-Native DLSS** (`upscale_alpha_aware.wgsl` premultiplied-alpha Catmull-Rom super-resolution + edge sharpening, `flow_estimate.wgsl` + `MotionVectorField` dual-tier motion-vector frame generation via `frame_gen_warp.wgsl`).

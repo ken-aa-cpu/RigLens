@@ -525,6 +525,55 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("param", json::object! { type: "string" });
 				props.insert("x", json::object! { type: "number" });
 				props.insert("y", json::object! { type: "number" });
+			} else if spec.id == "node.add_grid_deformer" {
+				props.insert("name", json::object! { type: "string" });
+				props.insert("parent_name", json::object! { type: "string" });
+				props.insert("children", json::object! { type: "array" });
+				props.insert("cols", json::object! { type: "integer" });
+				props.insert("rows", json::object! { type: "integer" });
+				props.insert("padding", json::object! { type: "number" });
+			} else if spec.id == "node.add_path_deformer" {
+				props.insert("name", json::object! { type: "string" });
+				props.insert("parent_name", json::object! { type: "string" });
+				props.insert("children", json::object! { type: "array" });
+				props.insert("points", json::object! { type: "integer" });
+				props.insert("curve_type", json::object! { type: "string" });
+				props.insert("orientation", json::object! { type: "string" });
+				props.insert("padding", json::object! { type: "number" });
+			} else if spec.id == "param.create" {
+				props.insert("name", json::object! { type: "string" });
+				props.insert("is_vec2", json::object! { type: "boolean" });
+				props.insert("min", json::object! { type: "array" });
+				props.insert("max", json::object! { type: "array" });
+				props.insert("defaults", json::object! { type: "array" });
+				props.insert("axis_x", json::object! { type: "array" });
+				props.insert("axis_y", json::object! { type: "array" });
+			} else if spec.id == "param.set_binding_keypoint" || spec.id == "param.clear_binding_keypoint" {
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("kind", json::object! { type: "string" });
+				props.insert("ix", json::object! { type: "integer" });
+				props.insert("iy", json::object! { type: "integer" });
+				props.insert("value", json::object! { type: "number" });
+			} else if spec.id == "param.remove_binding" {
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("kind", json::object! { type: "string" });
+			} else if spec.id == "deform.mirror_keypoint" {
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("node_name", json::object! { type: "string" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("src_ix", json::object! { type: "integer" });
+				props.insert("src_iy", json::object! { type: "integer" });
+				props.insert("dst_ix", json::object! { type: "integer" });
+				props.insert("dst_iy", json::object! { type: "integer" });
+				props.insert("mirror_x", json::object! { type: "boolean" });
+			} else if spec.id == "anim.create" {
+				props.insert("name", json::object! { type: "string" });
+				props.insert("length", json::object! { type: "integer" });
+				props.insert("fps", json::object! { type: "number" });
 			}
 
 			json::object! {
@@ -2029,5 +2078,156 @@ mod tests {
 		assert_eq!(res["triangulation"].as_str(), Some("bowyer_watson_delaunay"));
 		assert_eq!(res["constrained"].as_bool(), Some(true));
 		assert!(res["triangles"].as_u32().unwrap() >= 20);
+	}
+
+	#[test]
+	fn editor_command_layer_deformers_bindings_blendmodes_and_diagnostics() {
+		let mut session = Session::new_sample();
+
+		// 1) All 19 nijilive blend modes accepted by node.configure
+		for bm in inox2d::node::components::BlendMode::VALUES {
+			session
+				.exec(
+					"node.configure",
+					&json::object! { node_name: "Face", blend_mode: bm.as_str() },
+				)
+				.unwrap();
+		}
+		assert!(session
+			.exec("node.configure", &json::object! { node_name: "Face", blend_mode: "BogusMode" })
+			.is_err());
+
+		// 2) Add GridDeformer over Face and sculpt via deform.set_vertices + deform.mirror_keypoint
+		let gd = session
+			.exec(
+				"node.add_grid_deformer",
+				&json::object! {
+					name: "FaceGrid",
+					parent_name: "Head",
+					children: ["Face"],
+					cols: 2,
+					rows: 2
+				},
+			)
+			.unwrap();
+		let gd_id = gd["uuid"].as_u32().unwrap();
+		assert_eq!(gd["reparented_children"].as_u32(), Some(1));
+
+		session
+			.exec(
+				"deform.set_vertices",
+				&json::object! {
+					node_uuid: gd_id,
+					param: "Head:: Yaw-Pitch",
+					kx: -1.0,
+					ky: 0.0,
+					indices: [0, 3],
+					dx: 10.0,
+					dy: 2.0
+				},
+			)
+			.unwrap();
+		let mir = session
+			.exec(
+				"deform.mirror_keypoint",
+				&json::object! {
+					node_uuid: gd_id,
+					param: "Head:: Yaw-Pitch",
+					src_ix: 0,
+					src_iy: 1,
+					dst_ix: 2,
+					dst_iy: 1,
+					mirror_x: true
+				},
+			)
+			.unwrap();
+		assert_eq!(mir["mirrored_vertices"].as_u32(), Some(9));
+
+		// 3) Add PathDeformer and deform with brush
+		let pd = session
+			.exec(
+				"node.add_path_deformer",
+				&json::object! {
+					name: "FacePath",
+					parent_name: "Head",
+					children: ["FaceGrid"],
+					points: 4,
+					curve_type: "Spline"
+				},
+			)
+			.unwrap();
+		let pd_id = pd["uuid"].as_u32().unwrap();
+		session
+			.exec(
+				"deform.brush",
+				&json::object! {
+					node_uuid: pd_id,
+					param: "Head:: Yaw-Pitch",
+					kx: 0.0,
+					ky: 0.0,
+					anchor: "top",
+					dx: 4.0,
+					dy: 0.0
+				},
+			)
+			.unwrap();
+
+		// 4) param.create + scalar binding CRUD + anim.create + puppet.diagnostics (read-only)
+		session
+			.exec(
+				"param.create",
+				&json::object! {
+					name: "Custom:: Slide",
+					is_vec2: false,
+					min: [-1.0, 0.0],
+					max: [1.0, 0.0],
+					axis_x: [0.0, 1.0]
+				},
+			)
+			.unwrap();
+		session
+			.exec(
+				"param.set_binding_keypoint",
+				&json::object! {
+					node_name: "Face",
+					param: "Custom:: Slide",
+					kind: "TransformTX",
+					ix: 1,
+					iy: 0,
+					value: 15.0
+				},
+			)
+			.unwrap();
+		let clr = session
+			.exec(
+				"param.clear_binding_keypoint",
+				&json::object! {
+					node_name: "Face",
+					param: "Custom:: Slide",
+					kind: "TransformTX",
+					ix: 1,
+					iy: 0
+				},
+			)
+			.unwrap();
+		assert_eq!(clr["cleared"].as_bool(), Some(true));
+		let rem = session
+			.exec(
+				"param.remove_binding",
+				&json::object! { node_name: "Face", param: "Custom:: Slide" },
+			)
+			.unwrap();
+		assert_eq!(rem["removed"].as_u32(), Some(1));
+
+		session
+			.exec("anim.create", &json::object! { name: "Wave", length: 90, fps: 30 })
+			.unwrap();
+		assert!(session.model.puppet.animations.contains_key("Wave"));
+
+		let rev_before = session.revision;
+		let diag = session.exec("puppet.diagnostics", &json::object! {}).unwrap();
+		assert_eq!(session.revision, rev_before);
+		assert!(diag["warnings"].is_array());
+		assert!(diag["raw_nodes"].is_array());
 	}
 }

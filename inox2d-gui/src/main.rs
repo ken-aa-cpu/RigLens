@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod autosave;
+mod bindings;
+mod dialogs;
+mod hierarchy;
 mod icons;
 mod theme;
 
@@ -16,6 +20,7 @@ use glam::{vec2 as gvec2, vec3 as gvec3, Mat4, Vec2 as GVec2, Vec3 as GVec3, Vec
 use image::RgbaImage;
 use inox2d::formats::inp::{parse_inp, write_inp};
 use inox2d::math::camera::Camera;
+use inox2d::math::curve::evaluate_point;
 use inox2d::math::interp::InterpolateMode;
 use inox2d::model::Model;
 use inox2d::node::components::{
@@ -23,6 +28,7 @@ use inox2d::node::components::{
 	TransformStore,
 };
 use inox2d::node::InoxNodeUuid;
+use inox2d::puppet::Puppet;
 use inox2d::render::{CompositeRenderCtx, TexturedMeshRenderCtx};
 use inox2d::texture::decode_model_textures;
 use inox2d_mcp::audit::audit_rig;
@@ -34,10 +40,16 @@ use inox2d_mcp::rig::{
 };
 use json::JsonValue;
 
+use autosave::{AutosaveManager, RecoveryInfo};
+use bindings::{
+	draw_audit_tab, draw_bindings_tab, draw_properties_tab, BindingEditorState, InspectorAction, InspectorTab,
+};
+use dialogs::{draw_file_dialog, FileDialogMode, FileDialogResult, FileDialogState};
+use hierarchy::{draw_outliner_panel, OutlinerAction, OutlinerTab};
 use icons::{draw_tool_button, draw_transport_play, StudioTool};
 use theme::{
 	configure_craft_theme, section_header, ACCENT_BLUE, AUDIT_ERR_ROSE, AUDIT_OK_GREEN, AUDIT_WARN_AMBER, BG_DOCK,
-	BG_INPUT, BG_MENU, BG_STAGE, BG_WIDGET, BORDER, BTN_ACTIVE, PLAYHEAD_RED, ROW_SELECTED, TEXT_MUTED, TEXT_PRIMARY,
+	BG_INPUT, BG_MENU, BG_STAGE, BG_WIDGET, BORDER, PLAYHEAD_RED, ROW_SELECTED, TEXT_MUTED, TEXT_PRIMARY,
 	TIMELINE_EMERALD, TIMELINE_VIOLET,
 };
 
@@ -240,6 +252,74 @@ struct CurveDragState {
 	frame: i32,
 }
 
+enum StageOverlay {
+	Mesh {
+		pts: Vec<egui::Pos2>,
+		indices: Vec<u32>,
+		bbox: Rect,
+		pivot: egui::Pos2,
+	},
+	Grid {
+		pts: Vec<egui::Pos2>,
+		cols: usize,
+		rows: usize,
+		bbox: Rect,
+		pivot: egui::Pos2,
+	},
+	Path {
+		pts: Vec<egui::Pos2>,
+		curve_pts: Vec<egui::Pos2>,
+		bbox: Rect,
+		pivot: egui::Pos2,
+	},
+}
+
+impl StageOverlay {
+	fn pts(&self) -> &[egui::Pos2] {
+		match self {
+			Self::Mesh { pts, .. } | Self::Grid { pts, .. } | Self::Path { pts, .. } => pts,
+		}
+	}
+
+	fn bbox(&self) -> Rect {
+		match self {
+			Self::Mesh { bbox, .. } | Self::Grid { bbox, .. } | Self::Path { bbox, .. } => *bbox,
+		}
+	}
+
+	fn pivot(&self) -> egui::Pos2 {
+		match self {
+			Self::Mesh { pivot, .. } | Self::Grid { pivot, .. } | Self::Path { pivot, .. } => *pivot,
+		}
+	}
+}
+
+fn pick_default_selected_node(puppet: &Puppet) -> Option<InoxNodeUuid> {
+	puppet
+		.nodes
+		.iter()
+		.find(|n| {
+			puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some()
+				&& (n.name.eq_ignore_ascii_case("face") || n.name.contains("臉"))
+		})
+		.or_else(|| {
+			puppet
+				.nodes
+				.iter()
+				.find(|n| puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some())
+		})
+		.map(|n| n.uuid)
+}
+
+fn pick_default_anim(puppet: &Puppet) -> String {
+	if puppet.animations.contains_key("Idle") {
+		return "Idle".to_owned();
+	}
+	let mut keys: Vec<_> = puppet.animations.keys().cloned().collect();
+	keys.sort();
+	keys.into_iter().next().unwrap_or_else(|| "Idle".to_owned())
+}
+
 fn load_initial_session(input: &str) -> Result<Session, String> {
 	if input == "--sample" || input == "sample" {
 		let mut session = Session::new_sample();
@@ -257,6 +337,14 @@ fn load_initial_session(input: &str) -> Result<Session, String> {
 		.and_then(|s| s.to_str())
 		.map(str::to_ascii_lowercase)
 		.unwrap_or_default();
+	if ext == "rigjson" {
+		let mut session = Session::new_sample();
+		session.exec("puppet.import", &json::object! { path: input })?;
+		session.revision = 0;
+		session.undo_stack.clear();
+		session.redo_stack.clear();
+		return Ok(session);
+	}
 	let bytes = fs::read(path).map_err(|e| format!("Failed to open '{}': {e}", path.display()))?;
 	if ext == "psd" {
 		let doc = parse_psd_bytes(&bytes)?;
@@ -280,6 +368,9 @@ fn write_inp_atomic(model: &Model, path: &Path) -> Result<(), String> {
 		let mut w = BufWriter::new(file);
 		write_inp(model, &mut w).map_err(|e| format!("Failed to serialize .inp: {e}"))?;
 		w.flush().map_err(|e| format!("Failed to flush .inp: {e}"))?;
+	}
+	if path.exists() {
+		let _ = fs::remove_file(path);
 	}
 	fs::rename(&tmp_path, path).map_err(|e| format!("Failed to update '{}': {e}", path.display()))?;
 	Ok(())
@@ -309,10 +400,18 @@ struct Inox2dStudioApp {
 	last_watch_mtime: Option<SystemTime>,
 	last_watch_check: Instant,
 	last_synced_rev: u64,
+	last_saved_rev: u64,
+	autosave: AutosaveManager,
+	pending_recovery: Option<RecoveryInfo>,
+	file_dialog: Option<FileDialogState>,
 
 	selected_node: Option<InoxNodeUuid>,
 	selected_vertices: HashSet<u32>,
 	selected_physics: Option<InoxNodeUuid>,
+	collapsed_nodes: HashSet<InoxNodeUuid>,
+	outliner_tab: OutlinerTab,
+	outliner_filter: String,
+	inspector_state: BindingEditorState,
 	tool: StudioTool,
 	vertex_mode: VertexEditMode,
 
@@ -331,6 +430,8 @@ struct Inox2dStudioApp {
 	gesture_snapshot: Option<ModelSnapshot>,
 
 	bottom_tab: BottomTab,
+	active_anim: String,
+	new_anim_name: String,
 	playing: bool,
 	loop_anim: bool,
 	playhead_frame: f32,
@@ -369,24 +470,8 @@ impl Inox2dStudioApp {
 		watch_path: Option<PathBuf>,
 		screenshot_out: Option<PathBuf>,
 	) -> Self {
-		let selected_node = session
-			.model
-			.puppet
-			.nodes
-			.iter()
-			.find(|n| {
-				session.model.puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some()
-					&& (n.name.eq_ignore_ascii_case("face") || n.name.contains("臉"))
-			})
-			.or_else(|| {
-				session
-					.model
-					.puppet
-					.nodes
-					.iter()
-					.find(|n| session.model.puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some())
-			})
-			.map(|n| n.uuid);
+		let selected_node = pick_default_selected_node(&session.model.puppet);
+		let active_anim = pick_default_anim(&session.model.puppet);
 
 		let selected_physics = session
 			.model
@@ -400,6 +485,18 @@ impl Inox2dStudioApp {
 			.as_ref()
 			.and_then(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
 		let rev = session.revision;
+		let autosave = AutosaveManager::new();
+		let pending_recovery = if screenshot_out.is_none() {
+			autosave.check_pending_recovery()
+		} else {
+			None
+		};
+		let diag_count = session.model.puppet.diagnostics.len();
+		let initial_status = if diag_count > 0 {
+			format!("Loaded with {diag_count} compatibility warning(s) — check Audit tab")
+		} else {
+			"Ready. V=Move/Scale · A=Vertex Edit · D=Deform Brush · S=Physics Gizmo · P=Pose 2.5D".to_owned()
+		};
 
 		let mut app = Self {
 			session,
@@ -408,9 +505,17 @@ impl Inox2dStudioApp {
 			last_watch_mtime,
 			last_watch_check: Instant::now(),
 			last_synced_rev: rev,
+			last_saved_rev: rev,
+			autosave,
+			pending_recovery,
+			file_dialog: None,
 			selected_node,
 			selected_vertices: HashSet::new(),
 			selected_physics,
+			collapsed_nodes: HashSet::new(),
+			outliner_tab: OutlinerTab::Tree,
+			outliner_filter: String::new(),
+			inspector_state: BindingEditorState::default(),
 			tool: StudioTool::Select,
 			vertex_mode: VertexEditMode::DeformKeypoint,
 			stage_res: 512,
@@ -425,6 +530,8 @@ impl Inox2dStudioApp {
 			stage_drag: None,
 			gesture_snapshot: None,
 			bottom_tab: BottomTab::Timeline,
+			active_anim,
+			new_anim_name: String::new(),
 			playing: false,
 			loop_anim: true,
 			playhead_frame: 1.0,
@@ -442,8 +549,8 @@ impl Inox2dStudioApp {
 			render_ms: 0.0,
 			audit_cache: JsonValue::new_object(),
 			audit_rev: u64::MAX,
-			status_msg: "Ready. V=Move/Scale · A=Vertex Edit · D=Deform Brush · S=Physics Gizmo · P=Pose 2.5D".to_owned(),
-			status_ok: true,
+			status_msg: initial_status,
+			status_ok: diag_count == 0,
 			cmd_palette_open: false,
 			cmd_query: String::new(),
 			screenshot_out,
@@ -511,6 +618,7 @@ impl Inox2dStudioApp {
 						cmd,
 						"puppet.new_sample"
 							| "puppet.import_psd"
+							| "puppet.import"
 							| "node.add_part"
 							| "node.synthesize_overlay"
 							| "edit.undo"
@@ -527,6 +635,105 @@ impl Inox2dStudioApp {
 			}
 			Err(err) => {
 				self.set_status(false, format!("{cmd} error: {err}"));
+			}
+		}
+	}
+
+	fn open_file_dialog(&mut self, mode: FileDialogMode) {
+		let start_dir = self
+			.source_path
+			.as_ref()
+			.and_then(|p| p.parent())
+			.map(|p| p.to_path_buf())
+			.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+		let suggested = if mode == FileDialogMode::SaveInpAs {
+			self.source_path
+				.as_ref()
+				.and_then(|p| p.file_name())
+				.and_then(|s| s.to_str())
+		} else {
+			None
+		};
+		self.file_dialog = Some(FileDialogState::open(mode, start_dir, suggested));
+	}
+
+	fn open_model_from_path(&mut self, path: &Path) {
+		let path_str = path.to_string_lossy().to_string();
+		match load_initial_session(&path_str) {
+			Ok(session) => {
+				self.session = session;
+				self.source_path = Some(path.to_path_buf());
+				self.last_saved_rev = self.session.revision;
+				self.last_synced_rev = self.session.revision;
+				self.selected_node = pick_default_selected_node(&self.session.model.puppet);
+				self.active_anim = pick_default_anim(&self.session.model.puppet);
+				self.selected_vertices.clear();
+				self.collapsed_nodes.clear();
+				self.inspector_state.rename_node_id = None;
+				self.gpu_tex_dirty = true;
+				self.fit_puppet_scale();
+				self.cached_rev = u64::MAX;
+				self.audit_rev = u64::MAX;
+				self.refresh_audit();
+				let warns = self.session.model.puppet.diagnostics.len();
+				if warns > 0 {
+					self.set_status(false, format!("Loaded '{}' with {warns} warning(s)", path.display()));
+				} else {
+					self.set_status(true, format!("Opened '{}'", path.display()));
+				}
+			}
+			Err(err) => {
+				self.set_status(false, err);
+			}
+		}
+	}
+
+	fn save_model_to_path(&mut self, path: &Path) {
+		let path_str = path.to_string_lossy().to_string();
+		let prev_rev = self.session.revision;
+		match self.session.exec("puppet.save", &json::object! { path: path_str.as_str() }) {
+			Ok(_) => {
+				self.session.revision = prev_rev;
+				self.source_path = Some(path.to_path_buf());
+				self.last_saved_rev = self.session.revision;
+				self.autosave.clear_recovery();
+				self.pending_recovery = None;
+				self.set_status(true, format!("Saved '{}'", path.display()));
+			}
+			Err(err) => {
+				self.set_status(false, format!("Save failed: {err}"));
+			}
+		}
+	}
+
+	fn handle_file_dialog_result(&mut self, res: FileDialogResult) {
+		match res {
+			FileDialogResult::Pending => {}
+			FileDialogResult::Cancelled => {
+				self.file_dialog = None;
+			}
+			FileDialogResult::Confirmed(mode, path) => {
+				self.file_dialog = None;
+				match mode {
+					FileDialogMode::OpenModel => self.open_model_from_path(&path),
+					FileDialogMode::SaveInpAs => self.save_model_to_path(&path),
+					FileDialogMode::ExportRigJson => {
+						let p = path.to_string_lossy().to_string();
+						self.exec_cmd(
+							"puppet.export",
+							json::object! { path: p.as_str(), format: "rig-json", pretty: true },
+							&format!("Exported '{}'", path.display()),
+						);
+					}
+					FileDialogMode::ExportPsd => {
+						let p = path.to_string_lossy().to_string();
+						self.exec_cmd(
+							"puppet.export_psd",
+							json::object! { path: p.as_str() },
+							&format!("Exported PSD '{}'", path.display()),
+						);
+					}
+				}
 			}
 		}
 	}
@@ -908,18 +1115,10 @@ impl Inox2dStudioApp {
 		)
 	}
 
-	fn selected_node_screen_geometry(&self, canvas_rect: Rect) -> Option<(Vec<egui::Pos2>, Vec<u32>, Rect, egui::Pos2)> {
+	fn selected_node_stage_overlay(&self, canvas_rect: Rect) -> Option<StageOverlay> {
 		let id = self.selected_node?;
 		let puppet = &self.session.model.puppet;
-		let mesh = puppet.node_comps.get::<Mesh>(id)?;
 		let tstore = puppet.node_comps.get::<TransformStore>(id)?;
-		let rctx = puppet.node_comps.get::<TexturedMeshRenderCtx>(id)?;
-		let prctx = puppet.render_ctx.as_ref()?;
-		let off = rctx.vert_offset as usize;
-		if off + rctx.vert_len > prctx.vertex_buffers.deforms.len() {
-			return None;
-		}
-		let deforms = &prctx.vertex_buffers.deforms[off..off + rctx.vert_len];
 		let mvp = self.mvp_cam() * tstore.absolute;
 
 		let to_ui = |ndc: Vec4| -> egui::Pos2 {
@@ -930,33 +1129,118 @@ impl Inox2dStudioApp {
 				canvas_rect.top() + ny * canvas_rect.height(),
 			)
 		};
-
-		let mut pts = Vec::with_capacity(mesh.vertices.len());
-		let mut mn = pos2(f32::INFINITY, f32::INFINITY);
-		let mut mx = pos2(f32::NEG_INFINITY, f32::NEG_INFINITY);
-		for (v, d) in mesh.vertices.iter().zip(deforms.iter()) {
-			let local = gvec3(v.x - mesh.origin.x + d.x, v.y - mesh.origin.y + d.y, 0.0);
-			let sp = to_ui(mvp * local.extend(1.0));
-			mn.x = mn.x.min(sp.x);
-			mn.y = mn.y.min(sp.y);
-			mx.x = mx.x.max(sp.x);
-			mx.y = mx.y.max(sp.y);
-			pts.push(sp);
-		}
 		let pivot = to_ui(mvp * gvec3(0.0, 0.0, 0.0).extend(1.0));
-		Some((pts, mesh.indices.clone(), Rect::from_min_max(mn, mx), pivot))
+
+		let compute_pts_bbox = |verts: &[GVec2], origin: GVec2, deforms: &[GVec2]| -> (Vec<egui::Pos2>, Rect) {
+			let mut pts = Vec::with_capacity(verts.len());
+			let mut mn = pos2(f32::INFINITY, f32::INFINITY);
+			let mut mx = pos2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+			for (i, &v) in verts.iter().enumerate() {
+				let d = deforms.get(i).copied().unwrap_or(GVec2::ZERO);
+				let local = gvec3(v.x - origin.x + d.x, v.y - origin.y + d.y, 0.0);
+				let sp = to_ui(mvp * local.extend(1.0));
+				mn.x = mn.x.min(sp.x);
+				mn.y = mn.y.min(sp.y);
+				mx.x = mx.x.max(sp.x);
+				mx.y = mx.y.max(sp.y);
+				pts.push(sp);
+			}
+			(pts, Rect::from_min_max(mn, mx))
+		};
+
+		if let Some(mesh) = puppet.node_comps.get::<Mesh>(id) {
+			if mesh.vertices.is_empty() {
+				return None;
+			}
+			let render_deforms: Option<&[GVec2]> = puppet
+				.node_comps
+				.get::<TexturedMeshRenderCtx>(id)
+				.zip(puppet.render_ctx.as_ref())
+				.and_then(|(rctx, prctx)| {
+					let off = rctx.vert_offset as usize;
+					prctx.vertex_buffers.deforms.get(off..off + rctx.vert_len)
+				});
+			let eval_deforms;
+			let deforms: &[GVec2] = if let Some(d) = render_deforms {
+				d
+			} else {
+				eval_deforms = puppet
+					.node_deform_offsets(id)
+					.unwrap_or_else(|| vec![GVec2::ZERO; mesh.vertices.len()]);
+				&eval_deforms
+			};
+			let (pts, bbox) = compute_pts_bbox(&mesh.vertices, mesh.origin, deforms);
+			return Some(StageOverlay::Mesh {
+				pts,
+				indices: mesh.indices.clone(),
+				bbox,
+				pivot,
+			});
+		}
+
+		if let Some(grid) = puppet.node_comps.get::<GridDeformer>(id) {
+			if !grid.has_valid_grid() {
+				return None;
+			}
+			let rest = grid.rest_vertices();
+			let deforms = puppet
+				.node_deform_offsets(id)
+				.unwrap_or_else(|| vec![GVec2::ZERO; rest.len()]);
+			let (pts, bbox) = compute_pts_bbox(&rest, GVec2::ZERO, &deforms);
+			return Some(StageOverlay::Grid {
+				pts,
+				cols: grid.cols(),
+				rows: grid.rows(),
+				bbox,
+				pivot,
+			});
+		}
+
+		if let Some(path) = puppet.node_comps.get::<PathDeformer>(id) {
+			if path.vertices.is_empty() {
+				return None;
+			}
+			let deforms = puppet
+				.node_deform_offsets(id)
+				.unwrap_or_else(|| vec![GVec2::ZERO; path.vertices.len()]);
+			let deformed_local: Vec<GVec2> = path
+				.vertices
+				.iter()
+				.enumerate()
+				.map(|(i, &v)| v + deforms.get(i).copied().unwrap_or(GVec2::ZERO))
+				.collect();
+			let (pts, bbox) = compute_pts_bbox(&path.vertices, GVec2::ZERO, &deforms);
+			let curve_pts: Vec<egui::Pos2> = if deformed_local.len() >= 2 {
+				(0..=32)
+					.map(|s| {
+						let p = evaluate_point(path.curve_type, &deformed_local, s as f32 / 32.0);
+						to_ui(mvp * gvec3(p.x, p.y, 0.0).extend(1.0))
+					})
+					.collect()
+			} else {
+				pts.clone()
+			};
+			return Some(StageOverlay::Path {
+				pts,
+				curve_pts,
+				bbox,
+				pivot,
+			});
+		}
+
+		None
 	}
 
 	fn ui_to_local_on_node(&self, id: InoxNodeUuid, canvas_rect: Rect, p: egui::Pos2) -> Option<GVec2> {
 		let puppet = &self.session.model.puppet;
 		let tstore = puppet.node_comps.get::<TransformStore>(id)?;
-		let mesh = puppet.node_comps.get::<Mesh>(id)?;
+		let origin = puppet.node_comps.get::<Mesh>(id).map(|m| m.origin).unwrap_or(GVec2::ZERO);
 		let nx = (p.x - canvas_rect.left()) / canvas_rect.width().max(1.0);
 		let ny = (p.y - canvas_rect.top()) / canvas_rect.height().max(1.0);
 		let ndc = Vec4::new(nx * 2.0 - 1.0, (0.5 - ny) * 2.0, 0.0, 1.0);
 		let inv = (self.mvp_cam() * tstore.absolute).inverse();
 		let local = inv * ndc;
-		Some(gvec2(local.x + mesh.origin.x, local.y + mesh.origin.y))
+		Some(gvec2(local.x + origin.x, local.y + origin.y))
 	}
 
 	fn apply_anim_at_playhead(&mut self) {
@@ -965,7 +1249,7 @@ impl Inox2dStudioApp {
 			.model
 			.puppet
 			.animations
-			.get("Idle")
+			.get(self.active_anim.as_str())
 			.or_else(|| self.session.model.puppet.animations.values().next())
 			.cloned();
 		if let Some(anim) = anim_opt {
@@ -1008,7 +1292,21 @@ impl Inox2dStudioApp {
 	}
 
 	fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-		if ctx.wants_keyboard_input() {
+		if self.file_dialog.is_some() || ctx.wants_keyboard_input() {
+			return;
+		}
+		let ctrl_o = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O));
+		if ctrl_o {
+			self.open_file_dialog(FileDialogMode::OpenModel);
+			return;
+		}
+		let ctrl_s = ctx.input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(Key::S));
+		if ctrl_s {
+			if let Some(p) = self.watch_path.clone().or_else(|| self.source_path.clone()) {
+				self.save_model_to_path(&p);
+			} else {
+				self.open_file_dialog(FileDialogMode::SaveInpAs);
+			}
 			return;
 		}
 		let cmd_k = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::K));
@@ -1113,6 +1411,7 @@ impl Inox2dStudioApp {
 							self.session.model.puppet.reset_contexts();
 						}
 						VertexEditMode::BaseTopology => {
+							let has_tm = self.session.model.puppet.node_comps.get::<TexturedMesh>(id).is_some();
 							if let Some(mesh) = self.session.model.puppet.node_comps.get_mut::<Mesh>(id) {
 								for &vi in &indices {
 									if let Some(v) = mesh.vertices.get_mut(vi as usize) {
@@ -1120,7 +1419,16 @@ impl Inox2dStudioApp {
 									}
 								}
 								let verts = mesh.vertices.clone();
-								let _ = retriangulate_points_preserving_deforms(&mut self.session.model.puppet, id, verts);
+								if has_tm {
+									let _ = retriangulate_points_preserving_deforms(&mut self.session.model.puppet, id, verts);
+								}
+							} else if let Some(path) = self.session.model.puppet.node_comps.get_mut::<PathDeformer>(id) {
+								for &vi in &indices {
+									if let Some(v) = path.vertices.get_mut(vi as usize) {
+										*v += nudge;
+									}
+								}
+								self.session.model.puppet.reset_contexts();
 							}
 						}
 					}
@@ -1165,10 +1473,11 @@ impl Inox2dStudioApp {
 			.or_else(|| self.session.model.puppet.params.get(&param_name).map(|p| p.defaults))
 			.unwrap_or(GVec2::ZERO);
 		let val = if target == 1 { cur.y } else { cur.x };
+		let anim_name = self.active_anim.clone();
 		self.exec_cmd(
 			"anim.set_keyframe",
 			json::object! {
-				anim: "Idle",
+				anim: anim_name.as_str(),
 				param: param_name.as_str(),
 				target: target,
 				frame: frame,
@@ -1184,10 +1493,11 @@ impl Inox2dStudioApp {
 		let Some((pname, target, frame)) = self.selected_keyframe.take() else {
 			return;
 		};
+		let anim_name = self.active_anim.clone();
 		self.exec_cmd(
 			"anim.remove_keyframe",
 			json::object! {
-				anim: "Idle",
+				anim: anim_name.as_str(),
 				param: pname.as_str(),
 				target: target,
 				frame: frame
@@ -1199,9 +1509,17 @@ impl Inox2dStudioApp {
 	fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
 		egui::menu::bar(ui, |ui| {
 			ui.menu_button("File", |ui| {
+				if ui.button("Open / Import... (Ctrl+O)").clicked() {
+					self.open_file_dialog(FileDialogMode::OpenModel);
+					ui.close_menu();
+				}
 				if ui.button("Load Sample VTuber").clicked() {
 					if let Ok(s) = load_initial_session("--sample") {
 						self.session = s;
+						self.source_path = None;
+						self.last_saved_rev = self.session.revision;
+						self.selected_node = pick_default_selected_node(&self.session.model.puppet);
+						self.active_anim = pick_default_anim(&self.session.model.puppet);
 						self.selected_vertices.clear();
 						self.gpu_tex_dirty = true;
 						self.sync_watch_out();
@@ -1212,16 +1530,28 @@ impl Inox2dStudioApp {
 					}
 					ui.close_menu();
 				}
-				if ui.button("Save .inp (to current/watch path)").clicked() {
-					let out = self
-						.watch_path
-						.clone()
-						.or_else(|| self.source_path.clone())
-						.unwrap_or_else(|| PathBuf::from("output_studio.inp"));
-					let out_str = out.display().to_string();
-					self.exec_cmd("puppet.save", json::object! { path: out_str.as_str() }, &format!("Saved {}", out.display()));
+				ui.separator();
+				if ui.button("Save .inp (Ctrl+S)").clicked() {
+					if let Some(p) = self.watch_path.clone().or_else(|| self.source_path.clone()) {
+						self.save_model_to_path(&p);
+					} else {
+						self.open_file_dialog(FileDialogMode::SaveInpAs);
+					}
 					ui.close_menu();
 				}
+				if ui.button("Save .inp As...").clicked() {
+					self.open_file_dialog(FileDialogMode::SaveInpAs);
+					ui.close_menu();
+				}
+				if ui.button("Export .rigjson (IR)...").clicked() {
+					self.open_file_dialog(FileDialogMode::ExportRigJson);
+					ui.close_menu();
+				}
+				if ui.button("Export Layered .psd...").clicked() {
+					self.open_file_dialog(FileDialogMode::ExportPsd);
+					ui.close_menu();
+				}
+				ui.separator();
 				if ui.button("Export Spec Card PNG (FigCraft)").clicked() {
 					self.exec_cmd(
 						"craft.figcraft_card",
@@ -1231,9 +1561,10 @@ impl Inox2dStudioApp {
 					ui.close_menu();
 				}
 				if ui.button("Export Animated Idle GIF").clicked() {
+					let anim_name = self.active_anim.clone();
 					self.exec_cmd(
 						"render.gif",
-						json::object! { out: "studio_idle.gif", anim: "Idle", frames: 24, fps: 15 },
+						json::object! { out: "studio_idle.gif", anim: anim_name.as_str(), frames: 24, fps: 15 },
 						"Exported studio_idle.gif",
 					);
 					ui.close_menu();
@@ -1284,11 +1615,12 @@ impl Inox2dStudioApp {
 			});
 
 			ui.menu_button("Audit", |ui| {
-				if ui.button("Run 6-Point Rig Audit").clicked() {
+				if ui.button("Run 10-Point Rig Audit").clicked() {
 					self.audit_rev = u64::MAX;
 					self.refresh_audit();
+					self.inspector_state.tab = InspectorTab::Audit;
 					let s = self.audit_cache["score"].as_u32().unwrap_or(0);
-					self.set_status(s >= 80, format!("Rig audit score: {s}/100"));
+					self.set_status(s >= 80, format!("10-point audit score: {s}/100"));
 					ui.close_menu();
 				}
 				if ui.button("1-Click Constraint Auto-Fix").clicked() {
@@ -1316,14 +1648,14 @@ impl Inox2dStudioApp {
 			}
 
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-				ui.label(egui::RichText::new("Inox2D Studio · Craft Shell").color(TEXT_MUTED).size(11.0));
+				ui.label(egui::RichText::new("RigLens Studio · Phase 4").color(TEXT_MUTED).size(11.0));
 			});
 		});
 	}
 
 	fn draw_context_bar(&mut self, ui: &mut egui::Ui) {
 		ui.horizontal(|ui| {
-			let pname = self
+			let base_name = self
 				.session
 				.model
 				.puppet
@@ -1331,6 +1663,12 @@ impl Inox2dStudioApp {
 				.name
 				.as_deref()
 				.unwrap_or("InochiSampleVTuber");
+			let dirty = self.session.revision != self.last_saved_rev;
+			let pname = if dirty {
+				format!("{base_name}*")
+			} else {
+				base_name.to_owned()
+			};
 			egui::Frame::none()
 				.fill(BG_WIDGET)
 				.stroke(Stroke::new(1.0_f32, BORDER))
@@ -1497,8 +1835,24 @@ impl Inox2dStudioApp {
 					.rounding(Rounding::same(4.0))
 					.inner_margin(Margin::symmetric(8.0, 2.0))
 					.show(ui, |ui| {
-						ui.label(egui::RichText::new(label).color(fg).monospace().strong().size(11.0));
+						if ui
+							.add(egui::Label::new(egui::RichText::new(label).color(fg).monospace().strong().size(11.0)).sense(Sense::click()))
+							.on_hover_text("Open 10-Point Audit & Diagnostics")
+							.clicked()
+						{
+							self.inspector_state.tab = InspectorTab::Audit;
+						}
 					});
+
+				let warn_n = self.session.model.puppet.diagnostics.len();
+				if warn_n > 0
+					&& ui
+						.small_button(egui::RichText::new(format!("! {warn_n} warn")).color(AUDIT_WARN_AMBER).monospace())
+						.on_hover_text("View Phase 0 load & compatibility warnings")
+						.clicked()
+				{
+					self.inspector_state.tab = InspectorTab::Audit;
+				}
 
 				ui.checkbox(&mut self.xray_mode, "X-Ray");
 				ui.checkbox(&mut self.wireframe, "Wireframe");
@@ -1565,21 +1919,53 @@ impl Inox2dStudioApp {
 		let shift_held = ui.ctx().input(|i| i.modifiers.shift);
 		let middle_down = ui.ctx().input(|i| i.pointer.middle_down());
 
-		let sel_geom = self.selected_node_screen_geometry(canvas_rect);
+		let sel_overlay = self.selected_node_stage_overlay(canvas_rect);
 
-		// Selected node vector bbox, wireframe, vertices & handles
+		// Selected node vector bbox, wireframe, deformer lattice/spline, vertices & handles
 		if self.show_sel_overlay {
-			if let Some((ref pts, ref indices, bbox, pivot)) = sel_geom {
+			if let Some(ref ov) = sel_overlay {
+				let bbox = ov.bbox();
+				let pivot = ov.pivot();
 				let expanded = bbox.expand(2.0);
-				if !self.wireframe || self.tool == StudioTool::VertexSubselect {
-					let alpha = if self.tool == StudioTool::VertexSubselect { 135 } else { 90 };
-					let wire_stroke = Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(59, 130, 246, alpha));
-					for tri in indices.chunks_exact(3) {
-						let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-						if a < pts.len() && b < pts.len() && c < pts.len() {
-							clip_painter.line_segment([pts[a], pts[b]], wire_stroke);
-							clip_painter.line_segment([pts[b], pts[c]], wire_stroke);
-							clip_painter.line_segment([pts[c], pts[a]], wire_stroke);
+				match ov {
+					StageOverlay::Mesh { pts, indices, .. } => {
+						if !self.wireframe || self.tool == StudioTool::VertexSubselect {
+							let alpha = if self.tool == StudioTool::VertexSubselect { 135 } else { 90 };
+							let wire_stroke = Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(59, 130, 246, alpha));
+							for tri in indices.chunks_exact(3) {
+								let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+								if a < pts.len() && b < pts.len() && c < pts.len() {
+									clip_painter.line_segment([pts[a], pts[b]], wire_stroke);
+									clip_painter.line_segment([pts[b], pts[c]], wire_stroke);
+									clip_painter.line_segment([pts[c], pts[a]], wire_stroke);
+								}
+							}
+						}
+					}
+					StageOverlay::Grid { pts, cols, rows, .. } => {
+						let grid_stroke = Stroke::new(1.5_f32, TIMELINE_VIOLET);
+						for r in 0..*rows {
+							for c in 0..*cols {
+								let i = r * *cols + c;
+								if c + 1 < *cols {
+									clip_painter.line_segment([pts[i], pts[i + 1]], grid_stroke);
+								}
+								if r + 1 < *rows {
+									clip_painter.line_segment([pts[i], pts[i + *cols]], grid_stroke);
+								}
+							}
+						}
+					}
+					StageOverlay::Path { pts, curve_pts, .. } => {
+						let ctrl_stroke = Stroke::new(1.1_f32, Color32::from_rgba_unmultiplied(52, 211, 153, 120));
+						for win in pts.windows(2) {
+							clip_painter.line_segment([win[0], win[1]], ctrl_stroke);
+						}
+						if curve_pts.len() >= 2 {
+							clip_painter.add(egui::Shape::line(
+								curve_pts.clone(),
+								Stroke::new(2.0_f32, TIMELINE_EMERALD),
+							));
 						}
 					}
 				}
@@ -1599,8 +1985,9 @@ impl Inox2dStudioApp {
 				}
 				clip_painter.circle_stroke(pivot, 5.0, Stroke::new(1.3_f32, Color32::from_rgb(250, 204, 21)));
 
-				// Vertex Subselect handles (A tool)
+				// Vertex Subselect handles (A tool) — supports Mesh, MeshGroup, GridDeformer & PathDeformer
 				if self.tool == StudioTool::VertexSubselect {
+					let pts = ov.pts();
 					let hover_vi = hover_pos.and_then(|hp| {
 						pts.iter()
 							.enumerate()
@@ -1613,14 +2000,14 @@ impl Inox2dStudioApp {
 						let is_sel = self.selected_vertices.contains(&vi32);
 						let is_hov = hover_vi == Some(vi32);
 						if is_sel {
-							clip_painter.circle_filled(sp, 4.2, Color32::from_rgb(56, 189, 248));
-							clip_painter.circle_stroke(sp, 4.2, Stroke::new(1.3_f32, Color32::WHITE));
+							clip_painter.circle_filled(sp, 4.4, Color32::from_rgb(56, 189, 248));
+							clip_painter.circle_stroke(sp, 4.4, Stroke::new(1.3_f32, Color32::WHITE));
 						} else if is_hov {
 							clip_painter.circle_filled(sp, 3.8, AUDIT_WARN_AMBER);
 							clip_painter.circle_stroke(sp, 3.8, Stroke::new(1.0_f32, Color32::WHITE));
 						} else {
-							clip_painter.circle_filled(sp, 2.7, Color32::from_rgb(30, 41, 59));
-							clip_painter.circle_stroke(sp, 2.7, Stroke::new(1.0_f32, Color32::from_rgb(148, 163, 184)));
+							clip_painter.circle_filled(sp, 3.0, Color32::from_rgb(30, 41, 59));
+							clip_painter.circle_stroke(sp, 3.0, Stroke::new(1.0_f32, Color32::from_rgb(148, 163, 184)));
 						}
 					}
 				}
@@ -1721,9 +2108,9 @@ impl Inox2dStudioApp {
 								continue;
 							}
 							self.selected_node = Some(node.uuid);
-							if let Some((_pts, _idx, bbox, _)) = self.selected_node_screen_geometry(canvas_rect) {
+							if let Some(ov) = self.selected_node_stage_overlay(canvas_rect) {
 								let z = self.session.model.puppet.node_zsort(node.uuid).unwrap_or(node.zsort);
-								if bbox.expand(4.0).contains(pos) && z < best_z {
+								if ov.bbox().expand(4.0).contains(pos) && z < best_z {
 									best_z = z;
 									picked = Some((node.uuid, z));
 								}
@@ -1738,7 +2125,8 @@ impl Inox2dStudioApp {
 						}
 					}
 					StudioTool::VertexSubselect => {
-						if let Some((ref pts, _, _, _)) = sel_geom {
+						if let Some(ref ov) = sel_overlay {
+							let pts = ov.pts();
 							let hit = pts
 								.iter()
 								.enumerate()
@@ -1779,8 +2167,8 @@ impl Inox2dStudioApp {
 				} else {
 					match self.tool {
 						StudioTool::Select => {
-							if let (Some(id), Some((_, _, bbox, _))) = (self.selected_node, sel_geom.as_ref()) {
-								let exp = bbox.expand(2.0);
+							if let (Some(id), Some(ref ov)) = (self.selected_node, sel_overlay.as_ref()) {
+								let exp = ov.bbox().expand(2.0);
 								let corners = [exp.left_top(), exp.right_top(), exp.right_bottom(), exp.left_bottom()];
 								let hit_corner = corners.iter().any(|c| c.distance(pos) <= 9.0);
 								if hit_corner {
@@ -1804,7 +2192,8 @@ impl Inox2dStudioApp {
 							}
 						}
 						StudioTool::VertexSubselect => {
-							if let Some((ref pts, _, _, _)) = sel_geom {
+							if let Some(ref ov) = sel_overlay {
+								let pts = ov.pts();
 								let hit = pts
 									.iter()
 									.enumerate()
@@ -1871,8 +2260,8 @@ impl Inox2dStudioApp {
 					}
 				}
 				Some(StageDrag::ScaleCorner { orig_scale, orig_dist }) => {
-					if let (Some(id), Some(p), Some((_, _, bbox, _))) = (self.selected_node, pos, sel_geom.as_ref()) {
-						let ratio = (p.distance(bbox.center()) / orig_dist).clamp(0.15, 5.0);
+					if let (Some(id), Some(p), Some(ref ov)) = (self.selected_node, pos, sel_overlay.as_ref()) {
+						let ratio = (p.distance(ov.bbox().center()) / orig_dist).clamp(0.15, 5.0);
 						if let Some(n) = self.session.model.puppet.nodes.get_node_mut(id) {
 							n.trans_offset.scale = orig_scale * ratio;
 							self.session.revision += 1;
@@ -1908,6 +2297,12 @@ impl Inox2dStudioApp {
 									if let Some(mesh) = self.session.model.puppet.node_comps.get_mut::<Mesh>(id) {
 										for &vi in &indices {
 											if let Some(v) = mesh.vertices.get_mut(vi as usize) {
+												*v += local_delta;
+											}
+										}
+									} else if let Some(path) = self.session.model.puppet.node_comps.get_mut::<PathDeformer>(id) {
+										for &vi in &indices {
+											if let Some(v) = path.vertices.get_mut(vi as usize) {
 												*v += local_delta;
 											}
 										}
@@ -1999,11 +2394,11 @@ impl Inox2dStudioApp {
 			match self.stage_drag.take() {
 				Some(StageDrag::VertexMarquee { start, end }) => {
 					let mrect = Rect::from_two_pos(start, end);
-					if let Some((ref pts, _, _, _)) = sel_geom {
+					if let Some(ref ov) = sel_overlay {
 						if !shift_held {
 							self.selected_vertices.clear();
 						}
-						for (vi, &sp) in pts.iter().enumerate() {
+						for (vi, &sp) in ov.pts().iter().enumerate() {
 							if mrect.contains(sp) {
 								self.selected_vertices.insert(vi as u32);
 							}
@@ -2014,12 +2409,15 @@ impl Inox2dStudioApp {
 				Some(StageDrag::VertexMove) => {
 					if self.vertex_mode == VertexEditMode::BaseTopology {
 						if let Some(id) = self.selected_node {
-							if let Some(mesh) = self.session.model.puppet.node_comps.get::<Mesh>(id).cloned() {
-								let _ = retriangulate_points_preserving_deforms(
-									&mut self.session.model.puppet,
-									id,
-									mesh.vertices,
-								);
+							let has_tm = self.session.model.puppet.node_comps.get::<TexturedMesh>(id).is_some();
+							if has_tm {
+								if let Some(mesh) = self.session.model.puppet.node_comps.get::<Mesh>(id).cloned() {
+									let _ = retriangulate_points_preserving_deforms(
+										&mut self.session.model.puppet,
+										id,
+										mesh.vertices,
+									);
+								}
 							}
 						}
 					}
@@ -2154,212 +2552,259 @@ impl Inox2dStudioApp {
 		});
 	}
 
-	fn draw_right_inspector(&mut self, ui: &mut egui::Ui) {
-		egui::ScrollArea::vertical().show(ui, |ui| {
-			section_header(ui, "Properties", None);
-			ui.add_space(4.0);
-
-			if let Some(id) = self.selected_node {
-				if let Some(node) = self.session.model.puppet.nodes.get_node(id).cloned() {
-					let comps = &self.session.model.puppet.node_comps;
-					let is_mesh = comps.get::<TexturedMesh>(id).is_some();
-					let is_mg = comps.get::<MeshGroup>(id).is_some();
-					let kind_tag: String = if let Some(raw) = comps.get::<RawNodeData>(id) {
-						raw.type_name.clone()
-					} else if is_mg {
-						"MeshGroup".to_owned()
-					} else if comps.get::<GridDeformer>(id).is_some() {
-						"GridDeformer".to_owned()
-					} else if comps.get::<PathDeformer>(id).is_some() {
-						"PathDeformer".to_owned()
-					} else if is_mesh {
-						"Part".to_owned()
-					} else {
-						"Node".to_owned()
-					};
-
-					egui::Grid::new("prop_grid").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
-						ui.label(egui::RichText::new("Name").color(TEXT_MUTED).size(11.0));
-						ui.label(egui::RichText::new(format!("{}  ({} #{})", node.name, kind_tag, id.0)).strong().size(11.5));
-						ui.end_row();
-
-						let mut enabled = node.enabled;
-						ui.label(egui::RichText::new("Visible").color(TEXT_MUTED).size(11.0));
-						if ui.checkbox(&mut enabled, "Enabled").changed() {
-							self.exec_cmd("node.configure", json::object! { node_uuid: id.0, enabled: enabled }, "Updated visibility");
-						}
-						ui.end_row();
-
-						let mut tx = node.trans_offset.translation.x;
-						let mut ty = node.trans_offset.translation.y;
-						ui.label(egui::RichText::new("Offset").color(TEXT_MUTED).size(11.0));
-						ui.horizontal(|ui| {
-							let rx = ui.add(egui::DragValue::new(&mut tx).speed(0.5).prefix("X "));
-							let ry = ui.add(egui::DragValue::new(&mut ty).speed(0.5).prefix("Y "));
-							if rx.changed() || ry.changed() {
-								self.exec_cmd("node.configure", json::object! { node_uuid: id.0, x: tx, y: ty }, "Moved node");
-							}
-						});
-						ui.end_row();
-
-						let mut z = node.zsort;
-						ui.label(egui::RichText::new("Z-Sort").color(TEXT_MUTED).size(11.0));
-						if ui.add(egui::DragValue::new(&mut z).speed(0.25)).changed() {
-							self.exec_cmd("node.configure", json::object! { node_uuid: id.0, zsort: z }, "Updated Z-sort");
-						}
-						ui.end_row();
-
-						if let Some(drw) = self.session.model.puppet.node_comps.get::<Drawable>(id).cloned() {
-							let mut op = drw.blending.opacity;
-							ui.label(egui::RichText::new("Opacity").color(TEXT_MUTED).size(11.0));
-							if ui.add(egui::Slider::new(&mut op, 0.0..=1.0)).changed() {
-								self.exec_cmd("node.configure", json::object! { node_uuid: id.0, opacity: op }, "Updated opacity");
-							}
-							ui.end_row();
-						}
-					});
-
-					if let Some(m) = self.session.model.puppet.node_comps.get::<Mesh>(id) {
-						let vc = m.vertices.len();
-						let tc = m.indices.len() / 3;
-						ui.horizontal(|ui| {
-							ui.label(egui::RichText::new(format!("Mesh: {vc}v / {tc}t")).monospace().size(10.5).color(TEXT_MUTED));
-							if is_mesh && ui.small_button("Delaunay").clicked() {
-								self.exec_cmd(
-									"mesh.auto_delaunay",
-									json::object! { node_uuid: id.0, step_px: 20.0 },
-									"Rebuilt Delaunay mesh",
-								);
-							}
-							if is_mesh && ui.small_button("Contour").clicked() {
-								self.exec_cmd(
-									"mesh.auto_contour",
-									json::object! { node_uuid: id.0, cols: 8, rows: 8 },
-									"Rebuilt contour mesh",
-								);
-							}
-							if is_mesh && ui.small_button("Grid").clicked() {
-								self.exec_cmd(
-									"mesh.auto_grid",
-									json::object! { node_uuid: id.0, cols: 6, rows: 6 },
-									"Rebuilt grid mesh",
-								);
-							}
-						});
-					}
+	fn apply_inspector_actions(&mut self, actions: Vec<InspectorAction>) {
+		for act in actions {
+			match act {
+				InspectorAction::ExecCmd { cmd, params, ok_label } => {
+					self.exec_cmd(cmd, params, &ok_label);
 				}
-			} else {
-				ui.label(egui::RichText::new("Select a node in the hierarchy or stage.").color(TEXT_MUTED).size(11.0));
-			}
-
-			ui.add_space(6.0);
-			section_header(ui, "2D Parameter Pads", Some(("snap · dbl-click reset", TEXT_MUTED)));
-			ui.add_space(4.0);
-			ui.horizontal(|ui| {
-				self.draw_xy_pad(ui, "Head:: Yaw-Pitch", 132.0, ACCENT_BLUE);
-				ui.add_space(10.0);
-				self.draw_xy_pad(ui, "Mouth:: Viseme", 132.0, TIMELINE_VIOLET);
-			});
-			ui.horizontal_wrapped(|ui| {
-				for (label, vx, vy) in VISEME_PRESETS {
-					if ui.small_button(label).clicked() {
-						self.session.param_overrides.insert("Mouth:: Viseme".to_owned(), gvec2(vx, vy));
-						self.session.param_overrides.insert("Mouth:: Form".to_owned(), gvec2(vx, 0.0));
-						self.session.param_overrides.insert("Mouth:: Open".to_owned(), gvec2(vy, 0.0));
-					}
+				InspectorAction::TouchRevision => {
+					self.session.model.puppet.reset_contexts();
+					self.session.revision += 1;
+					self.cached_rev = u64::MAX;
+					self.audit_rev = u64::MAX;
 				}
-			});
-
-			ui.add_space(6.0);
-			section_header(ui, "Parameters & Overlays", None);
-			ui.add_space(4.0);
-
-			let mut pnames: Vec<(String, bool, GVec2, GVec2, GVec2)> = self
-				.session
-				.model
-				.puppet
-				.params
-				.iter()
-				.map(|(k, p)| (k.clone(), p.is_vec2, p.min, p.max, p.defaults))
-				.collect();
-			pnames.sort_by(|a, b| a.0.cmp(&b.0));
-
-			for (pname, is_vec2, pmin, pmax, pdef) in pnames {
-				if pname == "Head:: Yaw-Pitch" || pname == "Mouth:: Viseme" {
-					continue;
+				InspectorAction::FinishGestureUndo => {
+					self.finish_gesture_undo();
 				}
-				let cur = self.session.param_overrides.get(&pname).copied().unwrap_or(pdef);
-				let mut x = cur.x;
-				let mut y = cur.y;
-				let short = pname.as_str();
-				if !is_vec2 {
-					ui.horizontal(|ui| {
-						ui.add_sized([116.0, 16.0], egui::Label::new(egui::RichText::new(short).monospace().size(10.5).color(TEXT_MUTED)));
-						if ui.add(egui::Slider::new(&mut x, pmin.x..=pmax.x).show_value(true)).changed() {
-							self.session.param_overrides.insert(pname.clone(), gvec2(x, 0.0));
-						}
-					});
-				} else {
-					ui.horizontal(|ui| {
-						ui.add_sized([116.0, 16.0], egui::Label::new(egui::RichText::new(short).monospace().size(10.0).color(TEXT_MUTED)));
-						let rx = ui.add(egui::DragValue::new(&mut x).speed(0.02).range(pmin.x..=pmax.x).prefix("X:"));
-						let ry = ui.add(egui::DragValue::new(&mut y).speed(0.02).range(pmin.y..=pmax.y).prefix("Y:"));
-						if rx.changed() || ry.changed() {
-							self.session.param_overrides.insert(pname.clone(), gvec2(x, y));
-						}
-					});
-				}
-			}
-
-			if ui.small_button("Reset All Parameters").clicked() {
-				self.session.param_overrides.clear();
-			}
-
-			ui.add_space(6.0);
-			let score = self.audit_cache["score"].as_u32().unwrap_or(0);
-			let passed = self.audit_cache["passed"].as_bool().unwrap_or(false);
-			let badge_col = if passed { AUDIT_OK_GREEN } else { AUDIT_WARN_AMBER };
-			let badge_str = format!("{score}/100");
-			section_header(ui, "6-Point Rig Audit", Some((&badge_str, badge_col)));
-			ui.add_space(4.0);
-
-			let checks = [
-				("Containment Leaks", self.audit_cache["summary"]["containment_leaks"].as_usize().unwrap_or(0)),
-				("Mesh Foldovers", self.audit_cache["summary"]["mesh_foldovers"].as_usize().unwrap_or(0)),
-				("Extreme Stretch", self.audit_cache["summary"]["mesh_stretch"].as_usize().unwrap_or(0)),
-				("Blink Symmetry", self.audit_cache["summary"]["blink_issues"].as_usize().unwrap_or(0)),
-				("Yaw Symmetry", self.audit_cache["summary"]["symmetry_defects"].as_usize().unwrap_or(0)),
-				("Clipping Masks", self.audit_cache["summary"]["unmasked_parts"].as_usize().unwrap_or(0)),
-			];
-			for (lbl, cnt) in checks {
-				ui.horizontal(|ui| {
-					let dot_col = if cnt == 0 { AUDIT_OK_GREEN } else { AUDIT_ERR_ROSE };
-					let (txt, col) = if cnt == 0 {
-						("OK".to_owned(), AUDIT_OK_GREEN)
-					} else {
-						(format!("{cnt} ISSUE"), AUDIT_ERR_ROSE)
-					};
-					let (dr, _) = ui.allocate_exact_size(vec2(10.0, 14.0), Sense::hover());
-					ui.painter().circle_filled(dr.center(), 3.2, dot_col);
-					ui.label(egui::RichText::new(lbl).size(11.0).color(TEXT_PRIMARY));
-					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-						ui.label(egui::RichText::new(txt).monospace().size(10.5).color(col));
-					});
-				});
-			}
-
-			ui.add_space(4.0);
-			ui.horizontal(|ui| {
-				if ui.button("Run Audit").clicked() {
+				InspectorAction::RefreshAudit => {
 					self.audit_rev = u64::MAX;
 					self.refresh_audit();
 				}
-				let fix_btn = egui::Button::new(egui::RichText::new("1-Click Auto-Fix").color(Color32::WHITE).strong())
-					.fill(BTN_ACTIVE);
-				if ui.add(fix_btn).clicked() {
-					self.exec_cmd("rig.auto_fix", json::object! {}, "Ran 1-click Auto-Fix");
+				InspectorAction::SelectNode(uid) => {
+					self.selected_node = Some(uid);
+					self.selected_vertices.clear();
+					if self.session.model.puppet.node_comps.get::<SimplePhysics>(uid).is_some() {
+						self.selected_physics = Some(uid);
+					}
 				}
-			});
+				InspectorAction::ArmDeformBrush(param_name) => {
+					self.brush_param = param_name;
+					self.tool = StudioTool::DeformBrush;
+					self.set_status(true, format!("Armed Deform Brush on '{}'", self.brush_param));
+				}
+				InspectorAction::ArmVertexDeform(param_name) => {
+					self.brush_param = param_name;
+					self.tool = StudioTool::VertexSubselect;
+					self.vertex_mode = VertexEditMode::DeformKeypoint;
+					self.set_status(true, format!("Armed Vertex Sculpt on '{}'", self.brush_param));
+				}
+			}
+		}
+	}
+
+	fn apply_outliner_actions(&mut self, actions: Vec<OutlinerAction>) {
+		for act in actions {
+			match act {
+				OutlinerAction::Select(uid) => {
+					self.selected_node = Some(uid);
+					self.selected_vertices.clear();
+					if self.session.model.puppet.node_comps.get::<SimplePhysics>(uid).is_some() {
+						self.selected_physics = Some(uid);
+					}
+				}
+				OutlinerAction::ToggleCollapse(uid) => {
+					if !self.collapsed_nodes.insert(uid) {
+						self.collapsed_nodes.remove(&uid);
+					}
+				}
+				OutlinerAction::ToggleEnabled(uid, en) => {
+					self.exec_cmd(
+						"node.configure",
+						json::object! { node_uuid: uid.0, enabled: en },
+						"Toggled node visibility",
+					);
+				}
+				OutlinerAction::SetZSort(uid, z) => {
+					self.exec_cmd(
+						"node.configure",
+						json::object! { node_uuid: uid.0, zsort: z },
+						&format!("Updated draw order z={z:.1}"),
+					);
+				}
+				OutlinerAction::AddPart => {
+					let pname = format!("Part_{}", self.session.model.puppet.nodes.iter().count());
+					self.exec_cmd(
+						"node.add_part",
+						json::object! { name: pname.as_str(), width: 80.0, height: 80.0, color: [160, 200, 255, 255] },
+						"Added new Part node",
+					);
+				}
+				OutlinerAction::AddGridDeformer => {
+					if let Some(id) = self.selected_node {
+						if let Some(n) = self.session.model.puppet.nodes.get_node(id).cloned() {
+							self.exec_cmd(
+								"node.add_grid_deformer",
+								json::object! {
+									name: format!("{}_Grid", n.name),
+									children: [id.0],
+									cols: 3,
+									rows: 3
+								},
+								"Wrapped selected node inside GridDeformer",
+							);
+						}
+					} else {
+						self.set_status(false, "Select a child node first to wrap in GridDeformer");
+					}
+				}
+				OutlinerAction::AddPathDeformer => {
+					if let Some(id) = self.selected_node {
+						if let Some(n) = self.session.model.puppet.nodes.get_node(id).cloned() {
+							self.exec_cmd(
+								"node.add_path_deformer",
+								json::object! {
+									name: format!("{}_Spline", n.name),
+									children: [id.0],
+									points: 4,
+									curve_type: "Spline"
+								},
+								"Wrapped selected node inside PathDeformer",
+							);
+						}
+					} else {
+						self.set_status(false, "Select a child node first to wrap in PathDeformer");
+					}
+				}
+				OutlinerAction::AddMeshGroup => {
+					if let Some(id) = self.selected_node {
+						if let Some(n) = self.session.model.puppet.nodes.get_node(id).cloned() {
+							self.exec_cmd(
+								"node.add_meshgroup",
+								json::object! {
+									name: format!("{}_Cage", n.name),
+									children: [id.0],
+									cols: 4,
+									rows: 4
+								},
+								"Wrapped selected node inside MeshGroup",
+							);
+						}
+					} else {
+						self.set_status(false, "Select a child node first to wrap in MeshGroup");
+					}
+				}
+				OutlinerAction::DeleteNode(id) => {
+					self.exec_cmd("node.remove", json::object! { node_uuid: id.0 }, "Removed selected node");
+					if self.selected_node == Some(id) {
+						self.selected_node = None;
+					}
+					self.selected_vertices.clear();
+				}
+			}
+		}
+	}
+
+	fn draw_right_inspector(&mut self, ui: &mut egui::Ui) {
+		ui.horizontal(|ui| {
+			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Properties, "Properties");
+			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Bindings, "Bindings");
+			let score = self.audit_cache["score"].as_u32().unwrap_or(0);
+			let warns = self.session.model.puppet.diagnostics.len();
+			let audit_lbl = if warns > 0 {
+				format!("Audit ({score}) !{warns}")
+			} else {
+				format!("Audit ({score})")
+			};
+			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Audit, audit_lbl);
+		});
+		ui.separator();
+
+		egui::ScrollArea::vertical().id_source("right_insp_scroll").show(ui, |ui| {
+			match self.inspector_state.tab {
+				InspectorTab::Properties => {
+					let actions = draw_properties_tab(
+						ui,
+						&mut self.session,
+						self.selected_node,
+						&mut self.inspector_state,
+						&mut self.gesture_snapshot,
+					);
+					self.apply_inspector_actions(actions);
+
+					ui.add_space(6.0);
+					section_header(ui, "2D Parameter Pads", Some(("snap · dbl-click reset", TEXT_MUTED)));
+					ui.add_space(4.0);
+					ui.horizontal(|ui| {
+						self.draw_xy_pad(ui, "Head:: Yaw-Pitch", 124.0, ACCENT_BLUE);
+						ui.add_space(8.0);
+						self.draw_xy_pad(ui, "Mouth:: Viseme", 124.0, TIMELINE_VIOLET);
+					});
+					ui.horizontal_wrapped(|ui| {
+						for (label, vx, vy) in VISEME_PRESETS {
+							if ui.small_button(label).clicked() {
+								self.session.param_overrides.insert("Mouth:: Viseme".to_owned(), gvec2(vx, vy));
+								self.session.param_overrides.insert("Mouth:: Form".to_owned(), gvec2(vx, 0.0));
+								self.session.param_overrides.insert("Mouth:: Open".to_owned(), gvec2(vy, 0.0));
+							}
+						}
+					});
+
+					ui.add_space(6.0);
+					section_header(ui, "Parameters & Overlays", None);
+					ui.add_space(4.0);
+
+					let mut pnames: Vec<(String, bool, GVec2, GVec2, GVec2)> = self
+						.session
+						.model
+						.puppet
+						.params
+						.iter()
+						.map(|(k, p)| (k.clone(), p.is_vec2, p.min, p.max, p.defaults))
+						.collect();
+					pnames.sort_by(|a, b| a.0.cmp(&b.0));
+
+					for (pname, is_vec2, pmin, pmax, pdef) in pnames {
+						if pname == "Head:: Yaw-Pitch" || pname == "Mouth:: Viseme" {
+							continue;
+						}
+						let cur = self.session.param_overrides.get(&pname).copied().unwrap_or(pdef);
+						let mut x = cur.x;
+						let mut y = cur.y;
+						let short = pname.as_str();
+						if !is_vec2 {
+							ui.horizontal(|ui| {
+								ui.add_sized(
+									[110.0, 16.0],
+									egui::Label::new(egui::RichText::new(short).monospace().size(10.5).color(TEXT_MUTED)),
+								);
+								if ui.add(egui::Slider::new(&mut x, pmin.x..=pmax.x).show_value(true)).changed() {
+									self.session.param_overrides.insert(pname.clone(), gvec2(x, 0.0));
+								}
+							});
+						} else {
+							ui.horizontal(|ui| {
+								ui.add_sized(
+									[110.0, 16.0],
+									egui::Label::new(egui::RichText::new(short).monospace().size(10.0).color(TEXT_MUTED)),
+								);
+								let rx = ui.add(egui::DragValue::new(&mut x).speed(0.02).range(pmin.x..=pmax.x).prefix("X:"));
+								let ry = ui.add(egui::DragValue::new(&mut y).speed(0.02).range(pmin.y..=pmax.y).prefix("Y:"));
+								if rx.changed() || ry.changed() {
+									self.session.param_overrides.insert(pname.clone(), gvec2(x, y));
+								}
+							});
+						}
+					}
+
+					if ui.small_button("Reset All Parameters").clicked() {
+						self.session.param_overrides.clear();
+					}
+				}
+				InspectorTab::Bindings => {
+					let actions = draw_bindings_tab(
+						ui,
+						&mut self.session,
+						self.selected_node,
+						&mut self.inspector_state,
+					);
+					self.apply_inspector_actions(actions);
+				}
+				InspectorTab::Audit => {
+					let actions = draw_audit_tab(ui, &self.session, &self.audit_cache);
+					self.apply_inspector_actions(actions);
+				}
+			}
 		});
 	}
 
@@ -2377,7 +2822,7 @@ impl Inox2dStudioApp {
 			.collect();
 
 		let mut lane_entries: Vec<(String, u8, usize)> = Vec::new();
-		if let Some(anim) = self.session.model.puppet.animations.get("Idle") {
+		if let Some(anim) = self.session.model.puppet.animations.get(self.active_anim.as_str()) {
 			for lane in &anim.lanes {
 				if let Some(pname) = uuid_to_name.get(&lane.param_uuid) {
 					lane_entries.push((pname.clone(), lane.target, lane.keyframes.len()));
@@ -2443,7 +2888,7 @@ impl Inox2dStudioApp {
 			.model
 			.puppet
 			.animations
-			.get("Idle")
+			.get(self.active_anim.as_str())
 			.map(|a| a.length.max(30))
 			.unwrap_or(120);
 
@@ -2471,7 +2916,10 @@ impl Inox2dStudioApp {
 		let sel_uuid = self.session.model.puppet.params.get(&sel_pname).map(|p| p.uuid);
 		let mut cur_tension = 0.5_f32;
 		let mut cur_interp = InterpolateMode::Linear;
-		if let (Some(puuid), Some(anim)) = (sel_uuid, self.session.model.puppet.animations.get("Idle")) {
+		if let (Some(puuid), Some(anim)) = (
+			sel_uuid,
+			self.session.model.puppet.animations.get(self.active_anim.as_str()),
+		) {
 			if let Some(lane) = anim.lanes.iter().find(|l| l.param_uuid == puuid && l.target == sel_target) {
 				cur_interp = lane.interpolation.clone();
 				if let Some((_, _, kf_f)) = self.selected_keyframe {
@@ -2488,7 +2936,10 @@ impl Inox2dStudioApp {
 			if kp_name == &sel_pname && kp_t == sel_target {
 				let mut t_val = cur_tension;
 				if ctrl_ui.add(egui::Slider::new(&mut t_val, 0.0..=1.0).text("Tension")).changed() {
-					if let (Some(puuid), Some(anim)) = (sel_uuid, self.session.model.puppet.animations.get_mut("Idle")) {
+					if let (Some(puuid), Some(anim)) = (
+						sel_uuid,
+						self.session.model.puppet.animations.get_mut(self.active_anim.as_str()),
+					) {
 						if let Some(lane) = anim.lanes.iter_mut().find(|l| l.param_uuid == puuid && l.target == sel_target) {
 							if let Some(k) = lane.keyframes.iter_mut().find(|k| k.frame == kp_f) {
 								k.tension = t_val;
@@ -2517,7 +2968,10 @@ impl Inox2dStudioApp {
 				InterpolateMode::Stepped => InterpolateMode::Linear,
 			};
 			self.begin_gesture_undo();
-			if let (Some(puuid), Some(anim)) = (sel_uuid, self.session.model.puppet.animations.get_mut("Idle")) {
+			if let (Some(puuid), Some(anim)) = (
+				sel_uuid,
+				self.session.model.puppet.animations.get_mut(self.active_anim.as_str()),
+			) {
 				if let Some(lane) = anim.lanes.iter_mut().find(|l| l.param_uuid == puuid && l.target == sel_target) {
 					lane.interpolation = next_mode;
 				}
@@ -2562,7 +3016,7 @@ impl Inox2dStudioApp {
 			.model
 			.puppet
 			.animations
-			.get("Idle")
+			.get(self.active_anim.as_str())
 			.and_then(|a| {
 				let puuid = sel_uuid?;
 				a.lanes
@@ -2597,9 +3051,10 @@ impl Inox2dStudioApp {
 			if let Some(ptr) = g_resp.interact_pointer_pos() {
 				let nf = x_to_f(ptr.x);
 				let nv = y_to_val(ptr.y);
+				let anim_name = self.active_anim.clone();
 				self.exec_cmd(
 					"anim.set_keyframe",
-					json::object! { anim: "Idle", param: sel_pname.as_str(), target: sel_target, frame: nf, value: nv, tension: 0.5 },
+					json::object! { anim: anim_name.as_str(), param: sel_pname.as_str(), target: sel_target, frame: nf, value: nv, tension: 0.5 },
 					&format!("Added keyframe ({nf}, {nv:.2})"),
 				);
 				self.selected_keyframe = Some((sel_pname.clone(), sel_target, nf));
@@ -2628,7 +3083,7 @@ impl Inox2dStudioApp {
 				let nv = y_to_val(ptr.y);
 				if let (Some(puuid), Some(anim)) = (
 					self.session.model.puppet.params.get(&cd.param_name).map(|p| p.uuid),
-					self.session.model.puppet.animations.get_mut("Idle"),
+					self.session.model.puppet.animations.get_mut(self.active_anim.as_str()),
 				) {
 					if let Some(lane) = anim
 						.lanes
@@ -2661,9 +3116,44 @@ impl Inox2dStudioApp {
 			if ui.add(t_btn).clicked() {
 				self.bottom_tab = BottomTab::Timeline;
 			}
-			let m_btn = egui::SelectableLabel::new(self.bottom_tab == BottomTab::MotionCurves, "Motion Curves");
+			let m_btn = egui::SelectableLabel::new(self.bottom_tab == BottomTab::MotionCurves, "Curves");
 			if ui.add(m_btn).clicked() {
 				self.bottom_tab = BottomTab::MotionCurves;
+			}
+
+			ui.separator();
+			let mut anim_keys: Vec<String> = self.session.model.puppet.animations.keys().cloned().collect();
+			anim_keys.sort();
+			if !anim_keys.is_empty() && !self.session.model.puppet.animations.contains_key(&self.active_anim) {
+				self.active_anim = anim_keys[0].clone();
+			}
+			egui::ComboBox::from_id_source("timeline_anim_combo")
+				.selected_text(self.active_anim.as_str())
+				.width(74.0)
+				.show_ui(ui, |ui| {
+					for ak in &anim_keys {
+						if ui.selectable_label(&self.active_anim == ak, ak).clicked() {
+							self.active_anim = ak.clone();
+							self.playhead_frame = 1.0;
+							self.selected_keyframe = None;
+							self.apply_anim_at_playhead();
+						}
+					}
+				});
+			ui.add_sized([54.0, 18.0], egui::TextEdit::singleline(&mut self.new_anim_name).hint_text("Clip"));
+			if ui.small_button("+").on_hover_text("Create new animation clip").clicked() {
+				let aname = if self.new_anim_name.trim().is_empty() {
+					format!("Clip_{}", anim_keys.len() + 1)
+				} else {
+					self.new_anim_name.trim().to_owned()
+				};
+				self.exec_cmd(
+					"anim.create",
+					json::object! { name: aname.as_str(), length: 120, fps: 30 },
+					&format!("Created animation '{aname}'"),
+				);
+				self.active_anim = aname;
+				self.new_anim_name.clear();
 			}
 
 			ui.separator();
@@ -2677,7 +3167,7 @@ impl Inox2dStudioApp {
 				self.playhead_frame = (self.playhead_frame - 1.0).max(1.0);
 				self.apply_anim_at_playhead();
 			}
-			let (play_rect, play_resp) = ui.allocate_exact_size(vec2(24.0, 20.0), Sense::click());
+			let (play_rect, play_resp) = ui.allocate_exact_size(vec2(22.0, 20.0), Sense::click());
 			if play_resp.hovered() {
 				ui.painter().rect_filled(play_rect, 3.0, BG_WIDGET);
 			}
@@ -2694,66 +3184,30 @@ impl Inox2dStudioApp {
 
 			ui.label(
 				egui::RichText::new(format!(
-					"Frame {:>3}  30 fps  {:.2} s",
+					"F{} {:.2}s",
 					self.playhead_frame.round() as i32,
 					(self.playhead_frame - 1.0) / 30.0
 				))
 				.monospace()
-				.size(11.0)
+				.size(10.5)
 				.color(TEXT_MUTED),
 			);
-			if ui.small_button("+ Key (F6)").clicked() {
+			if ui
+				.small_button("+Key")
+				.on_hover_text("Insert keyframe at playhead (F6)")
+				.clicked()
+			{
 				self.insert_keyframe_at_playhead();
 			}
-			if self.selected_keyframe.is_some() && ui.small_button("Del Key").clicked() {
+			if self.selected_keyframe.is_some() && ui.small_button("Del").on_hover_text("Remove selected keyframe").clicked() {
 				self.remove_selected_keyframe();
 			}
-
-			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-				if let Some(id) = self.selected_node {
-					if ui.small_button("Delete Node").clicked() {
-						self.exec_cmd("node.remove", json::object! { node_uuid: id.0 }, "Removed selected node");
-						self.selected_node = None;
-						self.selected_vertices.clear();
-					}
-				}
-				if ui.small_button("+ MeshGroup").clicked() {
-					if let Some(id) = self.selected_node {
-						let n = self
-							.session
-							.model
-							.puppet
-							.nodes
-							.get_node(id)
-							.map(|n| n.name.clone())
-							.unwrap_or_else(|| "Part".to_owned());
-						self.exec_cmd(
-							"node.add_meshgroup",
-							json::object! {
-								name: format!("{n}_Cage"),
-								children: [n.as_str()],
-								cols: 4,
-								rows: 4
-							},
-							"Created MeshGroup deform cage",
-						);
-					}
-				}
-				if ui.small_button("+ Part").clicked() {
-					let pname = format!("Part_{}", self.session.model.puppet.nodes.iter().count());
-					self.exec_cmd(
-						"node.add_part",
-						json::object! { name: pname.as_str(), width: 80.0, height: 80.0, color: [160, 200, 255, 255] },
-						"Added new Part node",
-					);
-				}
-			});
 		});
 
 		ui.separator();
 
 		let dock_rect = ui.available_rect_before_wrap();
-		let left_w = 236.0;
+		let left_w = 220.0;
 		let left_rect = Rect::from_min_max(dock_rect.min, pos2((dock_rect.left() + left_w).min(dock_rect.right()), dock_rect.bottom()));
 		let right_rect = Rect::from_min_max(pos2(left_rect.right() + 1.0, dock_rect.top()), dock_rect.max);
 
@@ -2772,7 +3226,7 @@ impl Inox2dStudioApp {
 			.model
 			.puppet
 			.nodes
-			.iter()
+			.pre_order_iter()
 			.filter(|n| n.uuid != self.session.model.puppet.nodes.root_node_id)
 			.map(|n| {
 				let comps = &self.session.model.puppet.node_comps;
@@ -2808,7 +3262,7 @@ impl Inox2dStudioApp {
 			.model
 			.puppet
 			.animations
-			.get("Idle")
+			.get(self.active_anim.as_str())
 			.map(|a| a.length.max(30))
 			.unwrap_or(120);
 
@@ -2944,7 +3398,7 @@ impl Inox2dStudioApp {
 				.iter()
 				.map(|(n, p)| (p.uuid, n.clone()))
 				.collect();
-			let anim_opt = self.session.model.puppet.animations.get("Idle").cloned();
+			let anim_opt = self.session.model.puppet.animations.get(self.active_anim.as_str()).cloned();
 			let span_w = (anim_len as f32 * px_per_frame).min(right_rect.width() - 24.0).max(40.0);
 			let mut kf_hits: Vec<(egui::Pos2, String, u8, i32)> = Vec::new();
 
@@ -3029,7 +3483,7 @@ impl Inox2dStudioApp {
 						.clamp(1.0, anim_len as f32) as i32;
 					if let (Some(puuid), Some(anim)) = (
 						self.session.model.puppet.params.get(&cd.param_name).map(|p| p.uuid),
-						self.session.model.puppet.animations.get_mut("Idle"),
+						self.session.model.puppet.animations.get_mut(self.active_anim.as_str()),
 					) {
 						if let Some(lane) = anim
 							.lanes
@@ -3111,6 +3565,7 @@ impl Inox2dStudioApp {
 								"rig.auto_rig_vtuber"
 								| "rig.auto_fix"
 								| "rig.audit"
+								| "puppet.diagnostics"
 								| "anim.create_idle"
 								| "edit.undo"
 								| "edit.redo"
@@ -3138,10 +3593,25 @@ impl Inox2dStudioApp {
 }
 
 impl eframe::App for Inox2dStudioApp {
+	fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+		if self.session.revision == self.last_saved_rev {
+			self.autosave.clear_recovery();
+		}
+	}
+
 	fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 		self.frame_counter += 1;
 		self.poll_watch_in();
 		self.handle_shortcuts(ctx);
+
+		if self.screenshot_out.is_none() {
+			let _ = self.autosave.maybe_autosave(
+				&self.session.model,
+				self.session.revision,
+				self.last_saved_rev,
+				self.source_path.as_deref(),
+			);
+		}
 
 		if self.playing {
 			let dt = self.last_tick.elapsed().as_secs_f32().min(0.1);
@@ -3150,7 +3620,7 @@ impl eframe::App for Inox2dStudioApp {
 				.model
 				.puppet
 				.animations
-				.get("Idle")
+				.get(self.active_anim.as_str())
 				.map(|a| a.length.max(1) as f32)
 				.unwrap_or(120.0);
 			self.playhead_frame += dt * 30.0;
@@ -3259,7 +3729,7 @@ impl eframe::App for Inox2dStudioApp {
 
 		// 4. Right Inspector Dock
 		egui::SidePanel::right("right_inspector")
-			.exact_width(328.0)
+			.exact_width(320.0)
 			.resizable(false)
 			.frame(
 				Frame::none()
@@ -3367,6 +3837,32 @@ impl eframe::App for Inox2dStudioApp {
 				});
 			});
 
+		// 5b. Left Hierarchical Outliner & Draw-Order Panel
+		let mut outliner_actions = Vec::new();
+		egui::SidePanel::left("left_outliner")
+			.resizable(true)
+			.default_width(220.0)
+			.width_range(175.0..=320.0)
+			.frame(
+				Frame::none()
+					.fill(BG_DOCK)
+					.stroke(Stroke::new(1.0_f32, BORDER))
+					.inner_margin(Margin::symmetric(6.0, 4.0)),
+			)
+			.show(ctx, |ui| {
+				outliner_actions = draw_outliner_panel(
+					ui,
+					&self.session.model.puppet,
+					self.selected_node,
+					&self.collapsed_nodes,
+					&mut self.outliner_tab,
+					&mut self.outliner_filter,
+				);
+			});
+		if !outliner_actions.is_empty() {
+			self.apply_outliner_actions(outliner_actions);
+		}
+
 		// 6. Bottom Timeline & Motion Curves Dock
 		egui::TopBottomPanel::bottom("bottom_timeline_dock")
 			.exact_height(215.0)
@@ -3378,12 +3874,51 @@ impl eframe::App for Inox2dStudioApp {
 			)
 			.show(ctx, |ui| self.draw_bottom_dock(ui));
 
-		// 7. Center Stage
+		// 7. Center Stage (+ optional autosave crash-recovery banner)
 		egui::CentralPanel::default()
 			.frame(Frame::none().fill(BG_STAGE))
-			.show(ctx, |ui| self.draw_stage(ui));
+			.show(ctx, |ui| {
+				if let Some(rec) = self.pending_recovery.clone() {
+					egui::Frame::none()
+						.fill(Color32::from_rgb(66, 42, 12))
+						.stroke(Stroke::new(1.0_f32, AUDIT_WARN_AMBER))
+						.inner_margin(Margin::symmetric(10.0, 4.0))
+						.show(ui, |ui| {
+							ui.horizontal(|ui| {
+								let src_txt = rec.original_path.as_deref().unwrap_or("unsaved project");
+								ui.label(
+									egui::RichText::new(format!("Autosave recovery available for {src_txt}"))
+										.color(AUDIT_WARN_AMBER)
+										.size(11.0),
+								);
+								if ui.small_button("Recover").clicked() {
+									let orig = rec.original_path.as_ref().map(PathBuf::from);
+									self.open_model_from_path(&rec.recovery_inp);
+									self.source_path = orig;
+									self.last_saved_rev = u64::MAX;
+									self.pending_recovery = None;
+									self.autosave.clear_recovery();
+									self.set_status(true, "Recovered autosaved session");
+								}
+								if ui.small_button("Dismiss").clicked() {
+									self.pending_recovery = None;
+									self.autosave.clear_recovery();
+								}
+							});
+						});
+				}
+				self.draw_stage(ui);
+			});
 
 		self.draw_command_palette(ctx);
+		if let Some(mut dlg) = self.file_dialog.take() {
+			let res = draw_file_dialog(ctx, &mut dlg);
+			if res == FileDialogResult::Pending {
+				self.file_dialog = Some(dlg);
+			} else {
+				self.handle_file_dialog_result(res);
+			}
+		}
 	}
 }
 
@@ -3439,5 +3974,107 @@ mod tests {
 		assert!(s.model.puppet.params.contains_key("Mouth:: Viseme"));
 		let rep = audit_rig(&mut s.model);
 		assert!(rep["score"].as_u32().unwrap_or(0) >= 80);
+	}
+
+	#[test]
+	fn studio_app_10pt_audit_deformers_and_real_inx_diagnostics() {
+		let mut app = Inox2dStudioApp::new(
+			load_initial_session("--sample").unwrap(),
+			None,
+			None,
+			None,
+		);
+		for key in [
+			"containment_leaks",
+			"mesh_foldovers",
+			"mesh_stretch",
+			"blink_issues",
+			"symmetry_defects",
+			"unmasked_parts",
+			"deformer_issues",
+			"binding_coverage",
+			"draw_order_conflicts",
+			"mask_cycles",
+		] {
+			assert!(app.audit_cache["summary"][key].as_usize().is_some(), "missing 10pt key {key}");
+		}
+
+		// Wrap Face in GridDeformer + PathDeformer and verify runtime deform offsets + stage overlays
+		app.exec_cmd(
+			"node.add_grid_deformer",
+			json::object! { name: "HeadGrid", parent_name: "Head", children: ["Face"], cols: 2, rows: 2 },
+			"Added GridDeformer",
+		);
+		let gd_id = app
+			.session
+			.model
+			.puppet
+			.nodes
+			.iter()
+			.find(|n| n.name == "HeadGrid")
+			.unwrap()
+			.uuid;
+		app.exec_cmd(
+			"deform.set_vertices",
+			json::object! {
+				node_uuid: gd_id.0,
+				param: "Head:: Yaw-Pitch",
+				kx: -1.0,
+				ky: 0.0,
+				indices: [0],
+				dx: 8.0,
+				dy: 0.0
+			},
+			"Deformed grid vertex",
+		);
+		app.session
+			.param_overrides
+			.insert("Head:: Yaw-Pitch".to_owned(), gvec2(-1.0, 0.0));
+		app.session.model.puppet.init_all();
+		app.session.model.puppet.begin_frame();
+		if let Some(pctx) = app.session.model.puppet.param_ctx.as_mut() {
+			let _ = pctx.set("Head:: Yaw-Pitch", gvec2(-1.0, 0.0));
+		}
+		app.session.model.puppet.end_frame(0.0);
+
+		let offsets = app.session.model.puppet.node_deform_offsets(gd_id).unwrap();
+		assert!((offsets[0].x - 8.0).abs() < 1e-3);
+
+		app.selected_node = Some(gd_id);
+		let canvas = Rect::from_min_max(pos2(0.0, 0.0), pos2(512.0, 512.0));
+		assert!(matches!(app.selected_node_stage_overlay(canvas), Some(StageOverlay::Grid { .. })));
+
+		// Verify Phase 0 diagnostics surface for opaque RawNodeData nodes
+		let opaque_id = app.session.model.puppet.next_node_uuid();
+		app.session.model.puppet.add_node(
+			app.session.model.puppet.nodes.root_node_id,
+			inox2d::node::InoxNode {
+				uuid: opaque_id,
+				name: "OpaquePlugin".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: Default::default(),
+				lock_to_root: false,
+			},
+		);
+		app.session.model.puppet.node_comps.add(
+			opaque_id,
+			RawNodeData {
+				type_name: "AnimatedPart".to_owned(),
+				fields: json::object::Object::new(),
+			},
+		);
+		let diag_res = app.session.exec("puppet.diagnostics", &json::object! {}).unwrap();
+		assert_eq!(diag_res["raw_nodes"].len(), 1);
+		assert_eq!(diag_res["raw_nodes"][0]["type_name"].as_str(), Some("AnimatedPart"));
+
+		// Check real nijigenerate model loads cleanly in studio when present
+		if let Ok(dir) = std::env::var("RIGLENS_EXAMPLE_MODELS") {
+			let midori = Path::new(&dir).join("Midori.inx");
+			if midori.is_file() {
+				app.open_model_from_path(&midori);
+				assert!(app.session.model.puppet.nodes.iter().count() >= 10);
+			}
+		}
 	}
 }

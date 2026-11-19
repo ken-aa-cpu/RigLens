@@ -5,9 +5,11 @@ mod world;
 
 use std::collections::HashMap;
 
+use glam::Vec2;
+
 use crate::animation::PuppetAnimation;
 use crate::math::transform::TransformOffset;
-use crate::node::components::{OpacityStore, TransformStore, ZSort};
+use crate::node::components::{DeformStack, OpacityStore, TransformStore, ZSort};
 use crate::node::{InoxNode, InoxNodeUuid};
 use crate::params::{Param, ParamCtx, ParamUuid};
 use crate::physics::{PhysicsCtx, PuppetPhysics};
@@ -156,6 +158,15 @@ impl Puppet {
 	/// Get evaluated OpacityStore for a node after `end_frame()`.
 	pub fn node_opacity(&self, id: InoxNodeUuid) -> Option<f32> {
 		self.node_comps.get::<OpacityStore>(id).map(|o| o.0)
+	}
+
+	/// Evaluate the current combined deform offsets for a node (`Mesh`, `MeshGroup`, `GridDeformer`, or `PathDeformer`)
+	/// after `end_frame()`.
+	pub fn node_deform_offsets(&self, id: InoxNodeUuid) -> Option<Vec<Vec2>> {
+		let stack = self.node_comps.get::<DeformStack>(id)?;
+		let mut out = vec![Vec2::ZERO; stack.deform_len];
+		stack.combine(&self.nodes, &self.node_comps, &mut out);
+		Some(out)
 	}
 
 	/// Create a copy of node transform/zsort for modification. Panicks on second call.

@@ -5,17 +5,20 @@ use std::path::Path;
 
 use glam::{vec2, vec3, Vec2};
 use image::{Rgba, RgbaImage};
+use inox2d::animation::PuppetAnimation;
 use inox2d::formats::inp::write_inp;
 use inox2d::formats::ir_bridge::{ir_to_model, model_to_ir};
+use inox2d::math::curve::CurveType;
 use inox2d::math::interp::InterpolateMode;
 use riglens_format::{Diagnostic, ExportOptions, FormatCapabilities, ImportOptions, Severity};
 use inox2d::math::transform::TransformOffset;
 use inox2d::model::{Model, ModelTexture, VendorData};
 use inox2d::node::components::{
-	BlendMode, Composite, Drawable, GridDeformer, Mask, MaskMode, Masks, Mesh, MeshGroup, PathDeformer,
-	PhysicsModel, RawNodeData, SimplePhysics, TexturedMesh,
+	BlendMode, Composite, Drawable, GridDeformer, GridFormation, Mask, MaskMode, Masks, Mesh, MeshGroup,
+	PathDeformer, PhysicsModel, RawNodeData, SimplePhysics, TexturedMesh,
 };
 use inox2d::node::{InoxNode, InoxNodeUuid};
+use inox2d::params::AxisPoints;
 use inox2d::puppet::Puppet;
 use inox2d::texture::decode_model_textures;
 use json::object::Object;
@@ -33,10 +36,11 @@ use crate::rig::{
 	add_grid_part, add_pendulum_physics, add_standard_vtuber_params, apply_blink_binding, apply_breath_binding,
 	apply_brow_binding, apply_deform_brush, apply_head_perspective_binding, apply_head_roll_binding,
 	apply_mouth_form_binding, apply_mouth_visemes_2d, apply_opacity_binding, apply_vertex_deform_delta,
-	auto_rig_vtuber, build_sample_vtuber_model, configure_pendulum_physics, create_idle_animation,
-	generate_contour_mesh, generate_delaunay_mesh_with_options, generate_grid_mesh, remove_animation_keyframe,
-	retriangulate_points_preserving_deforms, set_animation_keyframe, synthesize_expression_overlay,
-	DelaunayMeshOptions, RefinementZone,
+	auto_rig_vtuber, build_sample_vtuber_model, clear_binding_keypoint, configure_pendulum_physics,
+	create_idle_animation, ensure_param, generate_contour_mesh, generate_delaunay_mesh_with_options,
+	generate_grid_mesh, mirror_deform_keypoint, remove_animation_keyframe, remove_param_binding,
+	retriangulate_points_preserving_deforms, set_animation_keyframe, set_scalar_binding_keypoint,
+	synthesize_expression_overlay, DelaunayMeshOptions, RefinementZone,
 };
 
 pub struct CommandSpec {
@@ -312,6 +316,51 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			description: "Bind 2D eyebrow expression deformations (Angle x Height) onto a Brow Part node",
 			params_schema: r#"{"node_name":"Brow_L","param?":"Brow:: Left","is_right?":false}"#,
 		},
+		CommandSpec {
+			id: "puppet.diagnostics",
+			description: "Report Phase 0 load warnings, preserved opaque nijilive nodes, and passthrough metadata",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "node.add_grid_deformer",
+			description: "Create a GridDeformer lattice over target children and reparent them into it",
+			params_schema: r#"{"name":"HeadGrid","parent_name?":"Head","children":["Face"],"cols?":3,"rows?":3,"padding?":16.0}"#,
+		},
+		CommandSpec {
+			id: "node.add_path_deformer",
+			description: "Create a PathDeformer spline/bezier spine over target children and reparent them into it",
+			params_schema: r#"{"name":"HairSpline","parent_name?":"Head","children":["Hair"],"points?":4,"curve_type?":"Spline|Bezier","orientation?":"vertical|horizontal","padding?":16.0}"#,
+		},
+		CommandSpec {
+			id: "param.create",
+			description: "Create a new 1D or 2D animation/rigging parameter with custom range and axis keypoints",
+			params_schema: r#"{"name":"Expr:: Custom","is_vec2?":false,"min?":[0.0,0.0],"max?":[1.0,1.0],"defaults?":[0.0,0.0],"axis_x?":[0.0,1.0],"axis_y?":[0.0,1.0]}"#,
+		},
+		CommandSpec {
+			id: "param.set_binding_keypoint",
+			description: "Create or update a scalar binding keypoint (TransformTX/TY/SX/SY/RX/RY/RZ, ZSort, Opacity)",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Face","param":"Head:: Yaw-Pitch","kind":"TransformTX","ix":0,"iy":1,"value":12.0}"#,
+		},
+		CommandSpec {
+			id: "param.clear_binding_keypoint",
+			description: "Clear (unset & reset to neutral) a binding keypoint cell for Deform or a scalar binding",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Face","param":"Head:: Yaw-Pitch","kind":"Deform|TransformTX|...","ix":0,"iy":0}"#,
+		},
+		CommandSpec {
+			id: "param.remove_binding",
+			description: "Remove parameter bindings targeting a node (optionally filtered by kind)",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Face","param":"Head:: Yaw-Pitch","kind?":"Deform"}"#,
+		},
+		CommandSpec {
+			id: "deform.mirror_keypoint",
+			description: "Copy or X-mirror a Deform keypoint across the node's local center X",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Face","param":"Head:: Yaw-Pitch","src_ix":0,"src_iy":1,"dst_ix":2,"dst_iy":1,"mirror_x?":true}"#,
+		},
+		CommandSpec {
+			id: "anim.create",
+			description: "Create an empty named animation timeline container",
+			params_schema: r#"{"name":"Wave","length?":120,"fps?":30}"#,
+		},
 	]
 }
 
@@ -409,6 +458,7 @@ impl Session {
 		!matches!(
 			cmd,
 			"puppet.info"
+				| "puppet.diagnostics"
 				| "puppet.save"
 				| "puppet.export_psd"
 				| "puppet.export"
@@ -1513,15 +1563,11 @@ impl Session {
 						drawable.blending.opacity = op.clamp(0.0, 1.0);
 					}
 					if let Some(bm) = params["blend_mode"].as_str() {
-						drawable.blending.mode = match bm {
-							"Multiply" => BlendMode::Multiply,
-							"ColorDodge" => BlendMode::ColorDodge,
-							"LinearDodge" => BlendMode::LinearDodge,
-							"Screen" => BlendMode::Screen,
-							"ClipToLower" => BlendMode::ClipToLower,
-							"SliceFromLower" => BlendMode::SliceFromLower,
-							_ => BlendMode::Normal,
-						};
+						if let Some(parsed) = BlendMode::from_name(bm) {
+							drawable.blending.mode = parsed;
+						} else {
+							return Err(format!("Unknown blend_mode '{bm}'"));
+						}
 					}
 					if let JsonValue::Array(arr) = &params["tint"] {
 						if arr.len() >= 3 {
@@ -1584,54 +1630,12 @@ impl Session {
 			}
 			"node.add_meshgroup" => {
 				let name = params["name"].as_str().unwrap_or("MeshGroup");
-				let parent = if !params["parent_uuid"].is_null() || !params["parent_name"].is_null() {
-					self.resolve_node(params, "parent_uuid", "parent_name")?
-				} else {
-					self.model.puppet.nodes.root_node_id
-				};
+				let parent = self.resolve_optional_parent(params)?;
 				let cols = params["cols"].as_usize().unwrap_or(4).max(1);
 				let rows = params["rows"].as_usize().unwrap_or(4).max(1);
 				let padding = params["padding"].as_f32().unwrap_or(16.0);
-
-				let mut child_ids = Vec::new();
-				if let JsonValue::Array(arr) = &params["children"] {
-					for item in arr {
-						child_ids.push(self.resolve_node_by_ref(item)?);
-					}
-				}
-
-				// Compute union bounding box of target children relative to parent
-				self.model.puppet.init_all();
-				self.model.puppet.begin_frame();
-				self.model.puppet.end_frame(0.0);
-				let parent_inv = self
-					.model
-					.puppet
-					.node_transform(parent)
-					.map(|t| t.absolute.inverse())
-					.unwrap_or_default();
-				let mut mn = vec2(f32::INFINITY, f32::INFINITY);
-				let mut mx = vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
-				for &cid in &child_ids {
-					if let (Some(cmesh), Some(cts)) = (
-						self.model.puppet.node_comps.get::<Mesh>(cid),
-						self.model.puppet.node_transform(cid),
-					) {
-						let to_parent = parent_inv * cts.absolute;
-						for &v in &cmesh.vertices {
-							let p = to_parent
-								.transform_point3(vec3(v.x - cmesh.origin.x, v.y - cmesh.origin.y, 0.0))
-								.truncate();
-							mn = mn.min(p);
-							mx = mx.max(p);
-						}
-					}
-				}
-				let (center, w, h) = if mn.x.is_finite() {
-					((mn + mx) * 0.5, (mx.x - mn.x) + padding * 2.0, (mx.y - mn.y) + padding * 2.0)
-				} else {
-					(Vec2::ZERO, 160.0, 160.0)
-				};
+				let child_ids = self.resolve_child_list(params)?;
+				let (center, w, h) = self.compute_children_bounds_in_parent(parent, &child_ids, padding);
 
 				let mg_id = self.model.puppet.next_node_uuid();
 				self.model.puppet.add_node(
@@ -1660,24 +1664,122 @@ impl Session {
 					.node_comps
 					.add(mg_id, generate_grid_mesh(w, h, cols, rows, Vec2::ZERO));
 
-				for &cid in &child_ids {
-					let same_parent = self.model.puppet.nodes.get_parent(cid).uuid == parent;
-					if same_parent {
-						if let Some(child_node) = self.model.puppet.nodes.get_node_mut(cid) {
-							child_node.trans_offset.translation.x -= center.x;
-							child_node.trans_offset.translation.y -= center.y;
-						}
-					}
-					self.model.puppet.nodes.reparent(cid, mg_id)?;
-				}
-
-				self.model.puppet.reset_contexts();
-				self.revision += 1;
+				self.reparent_into_deformer(mg_id, parent, &child_ids, center)?;
 				Ok(json::object! {
 					uuid: mg_id.0,
 					name: name,
 					reparented_children: child_ids.len(),
 					size: [w, h]
+				})
+			}
+			"node.add_grid_deformer" => {
+				let name = params["name"].as_str().unwrap_or("GridDeformer");
+				let parent = self.resolve_optional_parent(params)?;
+				let cols = params["cols"].as_usize().unwrap_or(3).clamp(1, 32);
+				let rows = params["rows"].as_usize().unwrap_or(3).clamp(1, 32);
+				let padding = params["padding"].as_f32().unwrap_or(16.0);
+				let child_ids = self.resolve_child_list(params)?;
+				let (center, w, h) = self.compute_children_bounds_in_parent(parent, &child_ids, padding);
+
+				let axis_x: Vec<f32> = (0..=cols)
+					.map(|i| ((i as f32 / cols as f32) - 0.5) * w)
+					.collect();
+				let axis_y: Vec<f32> = (0..=rows)
+					.map(|i| ((i as f32 / rows as f32) - 0.5) * h)
+					.collect();
+
+				let gd_id = self.model.puppet.next_node_uuid();
+				self.model.puppet.add_node(
+					parent,
+					InoxNode {
+						uuid: gd_id,
+						name: name.to_owned(),
+						enabled: true,
+						zsort: 0.0,
+						trans_offset: TransformOffset {
+							translation: vec3(center.x, center.y, 0.0),
+							..TransformOffset::default()
+						},
+						lock_to_root: false,
+					},
+				);
+				self.model.puppet.node_comps.add(
+					gd_id,
+					GridDeformer {
+						axis_x,
+						axis_y,
+						formation: GridFormation::Bilinear,
+						dynamic: true,
+						translate_children: true,
+					},
+				);
+
+				self.reparent_into_deformer(gd_id, parent, &child_ids, center)?;
+				Ok(json::object! {
+					uuid: gd_id.0,
+					name: name,
+					reparented_children: child_ids.len(),
+					cols: cols,
+					rows: rows,
+					size: [w, h]
+				})
+			}
+			"node.add_path_deformer" => {
+				let name = params["name"].as_str().unwrap_or("PathDeformer");
+				let parent = self.resolve_optional_parent(params)?;
+				let points = params["points"].as_usize().unwrap_or(4).clamp(2, 16);
+				let curve_type = match params["curve_type"].as_str().unwrap_or("Spline") {
+					"Bezier" => CurveType::Bezier,
+					_ => CurveType::Spline,
+				};
+				let horizontal = params["orientation"].as_str().unwrap_or("vertical").eq_ignore_ascii_case("horizontal");
+				let padding = params["padding"].as_f32().unwrap_or(16.0);
+				let child_ids = self.resolve_child_list(params)?;
+				let (center, w, h) = self.compute_children_bounds_in_parent(parent, &child_ids, padding);
+
+				let vertices: Vec<Vec2> = (0..points)
+					.map(|i| {
+						let t = (i as f32 / (points - 1) as f32) - 0.5;
+						if horizontal {
+							vec2(t * w, 0.0)
+						} else {
+							vec2(0.0, t * h)
+						}
+					})
+					.collect();
+
+				let pd_id = self.model.puppet.next_node_uuid();
+				self.model.puppet.add_node(
+					parent,
+					InoxNode {
+						uuid: pd_id,
+						name: name.to_owned(),
+						enabled: true,
+						zsort: 0.0,
+						trans_offset: TransformOffset {
+							translation: vec3(center.x, center.y, 0.0),
+							..TransformOffset::default()
+						},
+						lock_to_root: false,
+					},
+				);
+				self.model.puppet.node_comps.add(
+					pd_id,
+					PathDeformer {
+						curve_type,
+						vertices,
+						dynamic: true,
+						physics_only: false,
+					},
+				);
+
+				self.reparent_into_deformer(pd_id, parent, &child_ids, center)?;
+				Ok(json::object! {
+					uuid: pd_id.0,
+					name: name,
+					curve_type: curve_type.as_str(),
+					points: points,
+					reparented_children: child_ids.len()
 				})
 			}
 			"node.remove" => {
@@ -1745,8 +1847,309 @@ impl Session {
 					is_right: is_right
 				})
 			}
+			"puppet.diagnostics" => {
+				let raw_nodes: Vec<JsonValue> = self
+					.model
+					.puppet
+					.nodes
+					.pre_order_iter()
+					.filter_map(|n| {
+						self.model.puppet.node_comps.get::<RawNodeData>(n.uuid).map(|raw| {
+							json::object! {
+								uuid: n.uuid.0,
+								name: n.name.clone(),
+								type_name: raw.type_name.clone(),
+								field_count: raw.fields.len(),
+							}
+						})
+					})
+					.collect();
+				let top_keys: Vec<String> = self
+					.model
+					.puppet
+					.top_extras
+					.iter()
+					.map(|(k, _)| k.to_owned())
+					.collect();
+				Ok(json::object! {
+					warnings: self.model.puppet.diagnostics.clone(),
+					raw_nodes: raw_nodes,
+					param_extra_count: self.model.puppet.param_extras.len(),
+					top_extra_keys: top_keys,
+				})
+			}
+			"param.create" => {
+				let name = params["name"]
+					.as_str()
+					.map(str::trim)
+					.filter(|s| !s.is_empty())
+					.ok_or_else(|| "Missing non-empty 'name'".to_owned())?;
+				if self.model.puppet.params.contains_key(name) {
+					return Err(format!("Parameter '{name}' already exists"));
+				}
+				let is_vec2 = params["is_vec2"].as_bool().unwrap_or(false);
+				let parse_v2 = |val: &JsonValue, def: Vec2| -> Vec2 {
+					if let JsonValue::Array(arr) = val {
+						vec2(
+							arr.first().and_then(JsonValue::as_f32).unwrap_or(def.x),
+							arr.get(1).and_then(JsonValue::as_f32).unwrap_or(def.y),
+						)
+					} else {
+						def
+					}
+				};
+				let min = parse_v2(&params["min"], Vec2::ZERO);
+				let max = parse_v2(&params["max"], if is_vec2 { vec2(1.0, 1.0) } else { vec2(1.0, 0.0) });
+				let defaults = parse_v2(&params["defaults"], Vec2::ZERO).clamp(min.min(max), min.max(max));
+				let normalize_axis = |val: &JsonValue, fallback: Vec<f32>| -> Vec<f32> {
+					let mut pts: Vec<f32> = if let JsonValue::Array(arr) = val {
+						arr.iter()
+							.filter_map(JsonValue::as_f32)
+							.filter(|v| v.is_finite())
+							.map(|v| v.clamp(0.0, 1.0))
+							.collect()
+					} else {
+						fallback
+					};
+					pts.sort_by(f32::total_cmp);
+					pts.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+					if pts.is_empty() {
+						vec![0.0]
+					} else {
+						pts
+					}
+				};
+				let axis_x = normalize_axis(&params["axis_x"], vec![0.0, 1.0]);
+				let axis_y = if is_vec2 {
+					normalize_axis(&params["axis_y"], vec![0.0, 1.0])
+				} else {
+					normalize_axis(&params["axis_y"], vec![0.0])
+				};
+				let uuid = ensure_param(
+					&mut self.model.puppet,
+					name,
+					is_vec2,
+					min,
+					max,
+					defaults,
+					AxisPoints { x: axis_x, y: axis_y },
+				);
+				if !self.model.puppet.param_order.iter().any(|p| p == name) {
+					self.model.puppet.param_order.push(name.to_owned());
+				}
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					uuid: uuid.0,
+					name: name,
+					is_vec2: is_vec2
+				})
+			}
+			"param.set_binding_keypoint" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let param_name = params["param"]
+					.as_str()
+					.ok_or_else(|| "Missing 'param'".to_owned())?;
+				let kind = params["kind"]
+					.as_str()
+					.ok_or_else(|| "Missing 'kind'".to_owned())?;
+				let ix = params["ix"].as_usize().unwrap_or(0);
+				let iy = params["iy"].as_usize().unwrap_or(0);
+				let value = params["value"]
+					.as_f32()
+					.ok_or_else(|| "Missing numeric 'value'".to_owned())?;
+				set_scalar_binding_keypoint(&mut self.model.puppet, id, param_name, ix, iy, kind, value)?;
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name,
+					kind: kind,
+					ix: ix,
+					iy: iy,
+					value: value
+				})
+			}
+			"param.clear_binding_keypoint" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let param_name = params["param"]
+					.as_str()
+					.ok_or_else(|| "Missing 'param'".to_owned())?;
+				let kind = params["kind"]
+					.as_str()
+					.ok_or_else(|| "Missing 'kind'".to_owned())?;
+				let ix = params["ix"].as_usize().unwrap_or(0);
+				let iy = params["iy"].as_usize().unwrap_or(0);
+				let cleared = clear_binding_keypoint(&mut self.model.puppet, id, param_name, ix, iy, kind)?;
+				self.model.puppet.reset_contexts();
+				if cleared {
+					self.revision += 1;
+				}
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name,
+					kind: kind,
+					ix: ix,
+					iy: iy,
+					cleared: cleared
+				})
+			}
+			"param.remove_binding" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let param_name = params["param"]
+					.as_str()
+					.ok_or_else(|| "Missing 'param'".to_owned())?;
+				let kind = params["kind"].as_str();
+				let removed = remove_param_binding(&mut self.model.puppet, id, param_name, kind)?;
+				self.model.puppet.reset_contexts();
+				if removed > 0 {
+					self.revision += 1;
+				}
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name,
+					removed: removed
+				})
+			}
+			"deform.mirror_keypoint" => {
+				let id = self.resolve_node(params, "node_uuid", "node_name")?;
+				let param_name = params["param"]
+					.as_str()
+					.ok_or_else(|| "Missing 'param'".to_owned())?;
+				let src_ix = params["src_ix"].as_usize().unwrap_or(0);
+				let src_iy = params["src_iy"].as_usize().unwrap_or(0);
+				let dst_ix = params["dst_ix"].as_usize().unwrap_or(0);
+				let dst_iy = params["dst_iy"].as_usize().unwrap_or(0);
+				let mirror_x = params["mirror_x"].as_bool().unwrap_or(true);
+				let verts = mirror_deform_keypoint(
+					&mut self.model.puppet,
+					id,
+					param_name,
+					src_ix,
+					src_iy,
+					dst_ix,
+					dst_iy,
+					mirror_x,
+				)?;
+				self.model.puppet.reset_contexts();
+				self.revision += 1;
+				Ok(json::object! {
+					node_uuid: id.0,
+					param: param_name,
+					mirrored_vertices: verts,
+					mirror_x: mirror_x
+				})
+			}
+			"anim.create" => {
+				let name = params["name"]
+					.as_str()
+					.map(str::trim)
+					.filter(|s| !s.is_empty())
+					.ok_or_else(|| "Missing non-empty 'name'".to_owned())?;
+				if self.model.puppet.animations.contains_key(name) {
+					return Err(format!("Animation '{name}' already exists"));
+				}
+				let length = params["length"].as_i32().unwrap_or(120).clamp(1, 36000);
+				let fps = params["fps"].as_f32().unwrap_or(30.0).clamp(1.0, 240.0);
+				self.model.puppet.animations.insert(
+					name.to_owned(),
+					PuppetAnimation {
+						timestep: 1.0 / fps,
+						additive: false,
+						length,
+						lead_in: 0,
+						lead_out: 0,
+						lanes: Vec::new(),
+					},
+				);
+				self.revision += 1;
+				Ok(json::object! {
+					name: name,
+					length: length,
+					fps: fps
+				})
+			}
 			other => Err(format!("Unknown command: '{other}'")),
 		}
+	}
+
+	fn resolve_optional_parent(&self, params: &JsonValue) -> Result<InoxNodeUuid, String> {
+		if !params["parent_uuid"].is_null() || !params["parent_name"].is_null() {
+			self.resolve_node(params, "parent_uuid", "parent_name")
+		} else {
+			Ok(self.model.puppet.nodes.root_node_id)
+		}
+	}
+
+	fn resolve_child_list(&self, params: &JsonValue) -> Result<Vec<InoxNodeUuid>, String> {
+		let mut child_ids = Vec::new();
+		if let JsonValue::Array(arr) = &params["children"] {
+			for item in arr {
+				child_ids.push(self.resolve_node_by_ref(item)?);
+			}
+		}
+		Ok(child_ids)
+	}
+
+	fn compute_children_bounds_in_parent(
+		&mut self,
+		parent: InoxNodeUuid,
+		child_ids: &[InoxNodeUuid],
+		padding: f32,
+	) -> (Vec2, f32, f32) {
+		self.model.puppet.init_all();
+		self.model.puppet.begin_frame();
+		self.model.puppet.end_frame(0.0);
+		let parent_inv = self
+			.model
+			.puppet
+			.node_transform(parent)
+			.map(|t| t.absolute.inverse())
+			.unwrap_or_default();
+		let mut mn = vec2(f32::INFINITY, f32::INFINITY);
+		let mut mx = vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+		for &cid in child_ids {
+			if let (Some(cmesh), Some(cts)) = (
+				self.model.puppet.node_comps.get::<Mesh>(cid),
+				self.model.puppet.node_transform(cid),
+			) {
+				let to_parent = parent_inv * cts.absolute;
+				for &v in &cmesh.vertices {
+					let p = to_parent
+						.transform_point3(vec3(v.x - cmesh.origin.x, v.y - cmesh.origin.y, 0.0))
+						.truncate();
+					mn = mn.min(p);
+					mx = mx.max(p);
+				}
+			}
+		}
+		if mn.x.is_finite() {
+			((mn + mx) * 0.5, (mx.x - mn.x) + padding * 2.0, (mx.y - mn.y) + padding * 2.0)
+		} else {
+			(Vec2::ZERO, 160.0, 160.0)
+		}
+	}
+
+	fn reparent_into_deformer(
+		&mut self,
+		deformer_id: InoxNodeUuid,
+		parent: InoxNodeUuid,
+		child_ids: &[InoxNodeUuid],
+		center: Vec2,
+	) -> Result<(), String> {
+		for &cid in child_ids {
+			let same_parent = self.model.puppet.nodes.get_parent(cid).uuid == parent;
+			if same_parent {
+				if let Some(child_node) = self.model.puppet.nodes.get_node_mut(cid) {
+					child_node.trans_offset.translation.x -= center.x;
+					child_node.trans_offset.translation.y -= center.y;
+				}
+			}
+			self.model.puppet.nodes.reparent(cid, deformer_id)?;
+		}
+		self.model.puppet.reset_contexts();
+		self.revision += 1;
+		Ok(())
 	}
 
 	pub fn cmd_info(&self) -> JsonValue {
