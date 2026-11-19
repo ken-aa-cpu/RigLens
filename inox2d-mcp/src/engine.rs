@@ -34,8 +34,9 @@ use crate::rig::{
 	apply_brow_binding, apply_deform_brush, apply_head_perspective_binding, apply_head_roll_binding,
 	apply_mouth_form_binding, apply_mouth_visemes_2d, apply_opacity_binding, apply_vertex_deform_delta,
 	auto_rig_vtuber, build_sample_vtuber_model, configure_pendulum_physics, create_idle_animation,
-	generate_contour_mesh, generate_delaunay_mesh, generate_grid_mesh, remove_animation_keyframe,
+	generate_contour_mesh, generate_delaunay_mesh_with_options, generate_grid_mesh, remove_animation_keyframe,
 	retriangulate_points_preserving_deforms, set_animation_keyframe, synthesize_expression_overlay,
+	DelaunayMeshOptions, RefinementZone,
 };
 
 pub struct CommandSpec {
@@ -113,8 +114,8 @@ pub fn command_registry() -> &'static [CommandSpec] {
 		},
 		CommandSpec {
 			id: "mesh.auto_delaunay",
-			description: "Rebuild a Part node's mesh using Bowyer-Watson Delaunay contour triangulation and staggered interior hex lattice",
-			params_schema: r#"{"node_uuid?":1,"node_name?":"string","step_px?":22.0,"alpha_threshold?":4}"#,
+			description: "Rebuild a Part node's mesh using constrained Bowyer-Watson Delaunay triangulation, closed-loop Douglas-Peucker contours, and adaptive corner/joint refinement",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"string","width?":100.0,"height?":100.0,"step_px?":22.0,"alpha_threshold?":4,"boundary_offset_px?":2.0,"constrained?":true,"refine_near_corners?":true,"refinement_zones?":[{"center":[0.0,0.0],"radius":24.0,"density_scale?":0.35}]}"#,
 		},
 		CommandSpec {
 			id: "param.add_standard_vtuber",
@@ -168,7 +169,7 @@ pub fn command_registry() -> &'static [CommandSpec] {
 		},
 		CommandSpec {
 			id: "rig.audit",
-			description: "Run 6-point deterministic geometric/visual rig audit (containment, foldovers, stretch, blink, symmetry, masks)",
+			description: "Run 10-point deterministic geometric/visual rig audit (containment, foldovers, stretch, blink, symmetry, masks, deformers, binding coverage, draw order, mask cycles)",
 			params_schema: "{}",
 		},
 		CommandSpec {
@@ -834,6 +835,28 @@ impl Session {
 				let id = self.resolve_node(params, "node_uuid", "node_name")?;
 				let step_px = params["step_px"].as_f32().unwrap_or(22.0);
 				let alpha_threshold = params["alpha_threshold"].as_u8().unwrap_or(4);
+				let boundary_offset_px = params["boundary_offset_px"].as_f32().unwrap_or(2.0);
+				let constrained = params["constrained"].as_bool().unwrap_or(true);
+				let refine_near_corners = params["refine_near_corners"].as_bool().unwrap_or(true);
+
+				let mut refinement_zones = Vec::new();
+				for z in params["refinement_zones"].members() {
+					let cx = z["center"][0]
+						.as_f32()
+						.or_else(|| z["x"].as_f32())
+						.unwrap_or(0.0);
+					let cy = z["center"][1]
+						.as_f32()
+						.or_else(|| z["y"].as_f32())
+						.unwrap_or(0.0);
+					let radius = z["radius"].as_f32().unwrap_or(24.0);
+					let density_scale = z["density_scale"].as_f32().unwrap_or(0.35);
+					refinement_zones.push(RefinementZone {
+						center: vec2(cx, cy),
+						radius,
+						density_scale,
+					});
+				}
 
 				let existing = self
 					.model
@@ -864,7 +887,15 @@ impl Session {
 				let width = params["width"].as_f32().unwrap_or(cur_size.x);
 				let height = params["height"].as_f32().unwrap_or(cur_size.y);
 
-				let new_mesh = generate_delaunay_mesh(&img, width, height, step_px, alpha_threshold);
+				let opts = DelaunayMeshOptions {
+					step_px,
+					alpha_threshold,
+					boundary_offset_px,
+					constrained,
+					refine_near_corners,
+					refinement_zones,
+				};
+				let new_mesh = generate_delaunay_mesh_with_options(&img, width, height, &opts);
 				let vcount = new_mesh.vertices.len();
 				let tcount = new_mesh.indices.len() / 3;
 				self.model.puppet.node_comps.set(id, new_mesh);
@@ -873,6 +904,7 @@ impl Session {
 				Ok(json::object! {
 					node_uuid: id.0,
 					triangulation: "bowyer_watson_delaunay",
+					constrained: opts.constrained,
 					vertices: vcount,
 					triangles: tcount
 				})

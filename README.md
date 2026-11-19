@@ -44,9 +44,9 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 ## Key capabilities
 
 1. **`.inp` read/write** – generates binary `.inp` files (`TRNSRTS\0` + JSON + `TEX_SECT`) that follow the Inochi2D v0.8 layout.
-2. **Rig audit & auto-fix** – `rig.audit` checks containment leaks, triangle fold-overs, extreme mesh stretch, blink and yaw symmetry, and clipping masks; `rig.auto_fix` repairs what it can.
+2. **10-point Rig audit & auto-fix** – `rig.audit` checks containment leaks, triangle fold-overs, extreme mesh stretch, blink and yaw symmetry, clipping masks, deformer hierarchy integrity, binding coverage, draw-order conflicts, and mask cycles; `rig.auto_fix` repairs what it can.
 3. **Visual QA** – `render.frame`, `render.grid` (parameter sweeps, optional wireframe), `render.gif`, `render.diff` (heat-map), `render.anim_sheet`.
-4. **Layered PSD pipeline** – pure-Rust 8-bit RGBA PSD reader/writer, Delaunay meshing, automatic VTuber rig templates (`rig.auto_*`).
+4. **Layered PSD pipeline** – pure-Rust 8-bit RGBA PSD reader/writer, constrained Bowyer-Watson Delaunay meshing (closed-loop Douglas-Peucker contours, signed boundary offset, Sloan edge recovery, adaptive corner/joint refinement), and automatic VTuber rig templates (`rig.auto_*`).
 5. **MCP server** – node, parameter, puppet, render and rig tools over JSON-RPC 2.0, with `--watch` live sync to the GUI.
 
 ## Compatibility
@@ -109,6 +109,7 @@ cargo run -p inox2d-mcp -- commands
 - [x] P1 deformers: `GridDeformer` and `PathDeformer` (`BezierDeformer`) parse/serialize, parameter bindings, and render propagation.
 - [ ] P1 remaining nodes (`AnimatedPart`, `DynamicComposite`, `Driver`, `Shapes`, `Mask`) & verify files saved by current nijigenerate builds.
 - [x] Format-neutral rig model (`riglens-format`) and public **`Importer` / `Exporter` traits** + conformance kit so users can bind their own library and emit any format.
+- [x] P3 algorithm upgrades: nijilive-parity physics initialization & NaN/panic guards, 10-point rig auditor, and constrained Delaunay meshing with adaptive joint refinement.
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
 - [ ] Rename crates and publish documentation.
 

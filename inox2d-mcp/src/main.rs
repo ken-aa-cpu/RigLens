@@ -364,6 +364,10 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("height", json::object! { type: "number" });
 				props.insert("step_px", json::object! { type: "number" });
 				props.insert("alpha_threshold", json::object! { type: "integer" });
+				props.insert("boundary_offset_px", json::object! { type: "number" });
+				props.insert("constrained", json::object! { type: "boolean" });
+				props.insert("refine_near_corners", json::object! { type: "boolean" });
+				props.insert("refinement_zones", json::object! { type: "array" });
 			} else if spec.id == "rig.auto_head_perspective" {
 				props.insert("node_name", json::object! { type: "string" });
 				props.insert("node_uuid", json::object! { type: "integer" });
@@ -1734,5 +1738,296 @@ mod tests {
 		assert!(fresh.model.puppet.animations.contains_key("Idle"));
 
 		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn audit_ten_point_checks_detect_deformers_bindings_draw_order_and_mask_cycles() {
+		use inox2d::math::curve::CurveType;
+		use inox2d::math::interp::InterpolateMode;
+		use inox2d::math::matrix::Matrix2d;
+		use inox2d::math::transform::TransformOffset;
+		use inox2d::node::components::{
+			GridDeformer, GridFormation, Mask, MaskMode, Masks, PathDeformer,
+		};
+		use inox2d::node::{InoxNode, InoxNodeUuid};
+		use inox2d::params::{Binding, BindingValues};
+
+		let mut session = Session::new_sample();
+
+		// Clean sample passes all 10 audit checks
+		let clean = session.exec("rig.audit", &json::object! {}).unwrap();
+		assert_eq!(clean["passed"].as_bool(), Some(true), "clean sample failed audit: {clean}");
+		assert_eq!(clean["summary"]["deformer_issues"].as_u32(), Some(0));
+		assert_eq!(clean["summary"]["binding_coverage"].as_u32(), Some(0));
+		assert_eq!(clean["summary"]["draw_order_conflicts"].as_u32(), Some(0));
+		assert_eq!(clean["summary"]["mask_cycles"].as_u32(), Some(0));
+
+		// Inject Check 7 defects: degenerate GridDeformer + degenerate PathDeformer (both unbound)
+		let root = session.model.puppet.nodes.root_node_id;
+		let bad_grid_id = session.model.puppet.next_node_uuid();
+		session.model.puppet.add_node(
+			root,
+			InoxNode {
+				uuid: bad_grid_id,
+				name: "BrokenGrid".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		session.model.puppet.node_comps.set(
+			bad_grid_id,
+			GridDeformer {
+				axis_x: vec![0.0],
+				axis_y: vec![-10.0, 10.0],
+				formation: GridFormation::Bilinear,
+				dynamic: false,
+				translate_children: true,
+			},
+		);
+
+		let bad_path_id = session.model.puppet.next_node_uuid();
+		session.model.puppet.add_node(
+			root,
+			InoxNode {
+				uuid: bad_path_id,
+				name: "BrokenPath".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		session.model.puppet.node_comps.set(
+			bad_path_id,
+			PathDeformer {
+				curve_type: CurveType::Spline,
+				vertices: vec![glam::vec2(0.0, 0.0)],
+				dynamic: false,
+				physics_only: false,
+			},
+		);
+
+		// Inject Check 8 defects: dangling target UUID & wrong deform vertex count
+		let face_id = session
+			.model
+			.puppet
+			.nodes
+			.iter()
+			.find(|n| n.name == "Face")
+			.unwrap()
+			.uuid;
+		let eye_l_id = session
+			.model
+			.puppet
+			.nodes
+			.iter()
+			.find(|n| n.name == "Eye_L")
+			.unwrap()
+			.uuid;
+		let mouth_id = session
+			.model
+			.puppet
+			.nodes
+			.iter()
+			.find(|n| n.name == "Mouth")
+			.unwrap()
+			.uuid;
+
+		if let Some(roll) = session.model.puppet.params.get_mut("Head:: Roll") {
+			roll.bindings.push(Binding {
+				node: InoxNodeUuid(99999),
+				is_set: Matrix2d::from_grid_transposed(3, 1, |_, _| false),
+				interpolate_mode: InterpolateMode::Linear,
+				values: BindingValues::ZSort(Matrix2d::from_grid_transposed(3, 1, |_, _| 0.0)),
+			});
+			roll.bindings.push(Binding {
+				node: face_id,
+				is_set: Matrix2d::from_grid_transposed(3, 1, |ix, _| ix == 0),
+				interpolate_mode: InterpolateMode::Linear,
+				values: BindingValues::Deform(Matrix2d::from_grid_transposed(3, 1, |_, _| {
+					vec![glam::vec2(0.0, 0.0); 2]
+				})),
+			});
+		}
+
+		// Inject Check 9 defects: move Eye_L behind Face and collide Mouth zsort with Face
+		session.model.puppet.nodes.get_node_mut(eye_l_id).unwrap().zsort = 5.0;
+		session.model.puppet.nodes.get_node_mut(mouth_id).unwrap().zsort = 0.0;
+
+		// Inject Check 10 defects: 2-node mask cycle between Eye_L and Face
+		session.model.puppet.node_comps.set(
+			eye_l_id,
+			Masks {
+				threshold: 0.5,
+				masks: vec![Mask {
+					source: face_id,
+					mode: MaskMode::Mask,
+				}],
+			},
+		);
+		session.model.puppet.node_comps.set(
+			face_id,
+			Masks {
+				threshold: 0.5,
+				masks: vec![Mask {
+					source: eye_l_id,
+					mode: MaskMode::Mask,
+				}],
+			},
+		);
+
+		session.model.puppet.reset_contexts();
+		let dirty = session.exec("rig.audit", &json::object! {}).unwrap();
+		assert_eq!(dirty["passed"].as_bool(), Some(false));
+		assert!(dirty["summary"]["deformer_issues"].as_u32().unwrap() >= 2, "{dirty}");
+		assert!(dirty["summary"]["binding_coverage"].as_u32().unwrap() >= 2, "{dirty}");
+		assert!(dirty["summary"]["draw_order_conflicts"].as_u32().unwrap() >= 2, "{dirty}");
+		assert!(dirty["summary"]["mask_cycles"].as_u32().unwrap() >= 1, "{dirty}");
+	}
+
+	#[test]
+	fn constrained_delaunay_respects_concave_bay_offset_and_joint_refinement() {
+		use image::{Rgba, RgbaImage};
+		use inox2d_mcp::rig::{generate_delaunay_mesh_with_options, DelaunayMeshOptions, RefinementZone};
+
+		// Paint a crisp 160x160 C-shaped silhouette with a wide open concave bay on the right.
+		let mut img = RgbaImage::from_pixel(160, 160, Rgba([0, 0, 0, 0]));
+		let solid = Rgba([220, 180, 160, 255]);
+		for y in 20..140 {
+			for x in 20..140 {
+				let in_spine = x < 56;
+				let in_top = y < 52;
+				let in_bot = y >= 108;
+				if in_spine || in_top || in_bot {
+					img.put_pixel(x, y, solid);
+				}
+			}
+		}
+
+		// 1) Constrained Delaunay with 0px offset must not bridge across the empty concave bay.
+		let c_mesh = generate_delaunay_mesh_with_options(
+			&img,
+			160.0,
+			160.0,
+			&DelaunayMeshOptions {
+				step_px: 18.0,
+				alpha_threshold: 4,
+				boundary_offset_px: 0.0,
+				constrained: true,
+				refine_near_corners: true,
+				refinement_zones: Vec::new(),
+			},
+		);
+		let tri_count = c_mesh.indices.len() / 3;
+		assert!(tri_count >= 20, "expected >= 20 triangles, got {tri_count}");
+
+		for tri in c_mesh.indices.chunks_exact(3) {
+			let a = c_mesh.vertices[tri[0] as usize];
+			let b = c_mesh.vertices[tri[1] as usize];
+			let c = c_mesh.vertices[tri[2] as usize];
+			let area2 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+			assert!(area2 > 0.0, "triangle not CCW or degenerate: {area2}");
+			let centroid = (a + b + c) / 3.0;
+			let in_empty_bay = centroid.x > -18.0 && centroid.x < 56.0 && centroid.y.abs() < 22.0;
+			assert!(
+				!in_empty_bay,
+				"constrained Delaunay bridged empty concave bay at {centroid:?}"
+			);
+		}
+
+		// 2) boundary_offset_px > 0 expands mesh bounds outward cleanly.
+		let expanded = generate_delaunay_mesh_with_options(
+			&img,
+			160.0,
+			160.0,
+			&DelaunayMeshOptions {
+				step_px: 18.0,
+				alpha_threshold: 4,
+				boundary_offset_px: 6.0,
+				constrained: true,
+				refine_near_corners: false,
+				refinement_zones: Vec::new(),
+			},
+		);
+		let span = |m: &inox2d::node::components::Mesh| -> (f32, f32) {
+			let mut mn = glam::vec2(f32::INFINITY, f32::INFINITY);
+			let mut mx = glam::vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+			for &v in &m.vertices {
+				mn = mn.min(v);
+				mx = mx.max(v);
+			}
+			(mx.x - mn.x, mx.y - mn.y)
+		};
+		let (w0, h0) = span(&c_mesh);
+		let (w6, h6) = span(&expanded);
+		assert!(w6 > w0 + 4.0 && h6 > h0 + 4.0, "expected outward offset ({w0},{h0}) -> ({w6},{h6})");
+
+		// 3) Explicit RefinementZone densifies joint region without exploding distant regions.
+		let joint_center = glam::vec2(-42.0, 0.0);
+		let coarse = generate_delaunay_mesh_with_options(
+			&img,
+			160.0,
+			160.0,
+			&DelaunayMeshOptions {
+				step_px: 20.0,
+				alpha_threshold: 4,
+				boundary_offset_px: 0.0,
+				constrained: true,
+				refine_near_corners: false,
+				refinement_zones: Vec::new(),
+			},
+		);
+		let refined = generate_delaunay_mesh_with_options(
+			&img,
+			160.0,
+			160.0,
+			&DelaunayMeshOptions {
+				step_px: 20.0,
+				alpha_threshold: 4,
+				boundary_offset_px: 0.0,
+				constrained: true,
+				refine_near_corners: false,
+				refinement_zones: vec![RefinementZone {
+					center: joint_center,
+					radius: 26.0,
+					density_scale: 0.3,
+				}],
+			},
+		);
+		let count_near = |m: &inox2d::node::components::Mesh| {
+			m.vertices
+				.iter()
+				.filter(|&&v| (v - joint_center).length() <= 26.0)
+				.count()
+		};
+		let c_cnt = count_near(&coarse);
+		let r_cnt = count_near(&refined);
+		assert!(
+			r_cnt > c_cnt * 2,
+			"expected refinement zone to multiply local vertices: coarse={c_cnt}, refined={r_cnt}"
+		);
+
+		// 4) Exercise MCP command `mesh.auto_delaunay` with new parameters end-to-end.
+		let mut session = Session::new_sample();
+		let res = session
+			.exec(
+				"mesh.auto_delaunay",
+				&json::object! {
+					node_name: "Face",
+					step_px: 20.0,
+					boundary_offset_px: 3.0,
+					constrained: true,
+					refine_near_corners: true,
+					refinement_zones: [
+						{ center: [0.0, 0.0], radius: 28.0, density_scale: 0.4 }
+					]
+				},
+			)
+			.unwrap();
+		assert_eq!(res["triangulation"].as_str(), Some("bowyer_watson_delaunay"));
+		assert_eq!(res["constrained"].as_bool(), Some(true));
+		assert!(res["triangles"].as_u32().unwrap() >= 20);
 	}
 }

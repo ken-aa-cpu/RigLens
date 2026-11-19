@@ -35,9 +35,32 @@ impl Pendulum for SpringPendulumCtx {
 		self.state.vars.bob_pos = bob;
 	}
 
+	fn is_initialized(&self) -> bool {
+		self.initialized
+	}
+
+	fn mark_initialized(&mut self) {
+		self.initialized = true;
+	}
+
 	fn tick(&mut self, props: &SimplePhysicsProps, anchor: Vec2, t: f32, dt: f32) -> Vec2 {
+		let length = if props.1.props.length.is_finite() {
+			props.1.props.length
+		} else {
+			0.0
+		};
+		if !self.state.vars.bob_pos.is_finite() || !self.state.vars.bob_vel.is_finite() {
+			self.state.vars.bob_pos = anchor + Vec2::new(0.0, length);
+			self.state.vars.bob_vel = Vec2::ZERO;
+		}
+
 		// Run the spring pendulum simulation
 		self.state.tick(&eval, (props.0, &props.1.props), &anchor, t, dt);
+
+		if !self.state.vars.bob_pos.is_finite() || !self.state.vars.bob_vel.is_finite() {
+			self.state.vars.bob_pos = anchor + Vec2::new(0.0, length);
+			self.state.vars.bob_vel = Vec2::ZERO;
+		}
 
 		self.state.vars.bob_pos
 	}
@@ -52,6 +75,12 @@ fn eval(
 	anchor: &Vec2,
 	_t: f32,
 ) {
+	if !state.vars.bob_pos.is_finite() || !state.vars.bob_vel.is_finite() || !anchor.is_finite() {
+		state.derivatives.bob_pos = Vec2::ZERO;
+		state.derivatives.bob_vel = Vec2::ZERO;
+		return;
+	}
+
 	state.derivatives.bob_pos = state.vars.bob_vel;
 
 	// These are normalized vs. mass
@@ -59,14 +88,29 @@ fn eval(
 	let spring_k = spring_ksqrt.powi(2);
 
 	let g = props.gravity * puppet_physics.pixels_per_meter * puppet_physics.gravity;
+	if !props.frequency.is_finite()
+		|| !spring_ksqrt.is_finite()
+		|| !spring_k.is_finite()
+		|| spring_k.abs() <= 1e-6
+		|| !g.is_finite()
+		|| !props.length.is_finite()
+		|| props.length.abs() <= 1e-6
+		|| !props.angle_damping.is_finite()
+		|| !props.length_damping.is_finite()
+	{
+		state.derivatives.bob_pos = Vec2::ZERO;
+		state.derivatives.bob_vel = Vec2::ZERO;
+		return;
+	}
+
 	let rest_length = props.length - g / spring_k;
 
 	let off_pos = state.vars.bob_pos - *anchor;
-	let off_pos_norm = off_pos.normalize();
+	let off_pos_norm = off_pos.try_normalize().unwrap_or(Vec2::Y);
 
-	let length_ratio = g / props.length;
+	let length_ratio = (g / props.length).max(0.0);
 	let crit_damp_angle = 2. * length_ratio.sqrt();
-	let crit_damp_length = 2. * spring_ksqrt;
+	let crit_damp_length = 2. * spring_ksqrt.abs();
 
 	let dist = anchor.distance(state.vars.bob_pos).abs();
 	let force = vec2(0., g) - (off_pos_norm * (dist - rest_length) * spring_k);
@@ -89,5 +133,5 @@ fn eval(
 
 	let dd_bob = force + dd_bob_damping;
 
-	state.derivatives.bob_vel = dd_bob;
+	state.derivatives.bob_vel = if dd_bob.is_finite() { dd_bob } else { Vec2::ZERO };
 }

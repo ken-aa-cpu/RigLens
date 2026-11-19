@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use glam::{vec2, vec3, Mat4, Vec2};
 use inox2d::model::Model;
-use inox2d::node::components::{Drawable, Mask, MaskMode, Masks, Mesh, TexturedMesh};
+use inox2d::node::components::{
+	Composite, Drawable, GridDeformer, Mask, MaskMode, Masks, Mesh, MeshGroup, PathDeformer, SimplePhysics, TexturedMesh,
+};
 use inox2d::node::InoxNodeUuid;
 use inox2d::params::BindingValues;
 use inox2d::puppet::Puppet;
@@ -527,6 +529,407 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 		}
 	}
 
+	// Check 7: Deformer structural integrity (GridDeformer / PathDeformer / MeshGroup)
+	let mut deformer_issues: Vec<JsonValue> = Vec::new();
+	for node in puppet.nodes.pre_order_iter() {
+		if !node.enabled {
+			continue;
+		}
+		if let Some(grid) = puppet.node_comps.get::<GridDeformer>(node.uuid) {
+			if grid.axis_x.len() < 2 || grid.axis_y.len() < 2 {
+				deformer_issues.push(json::object! {
+					node: node.name.clone(),
+					node_uuid: node.uuid.0,
+					deformer_type: "GridDeformer",
+					issue: "degenerate_grid_axes"
+				});
+			} else if !grid.axis_x.windows(2).all(|w| w[0].is_finite() && w[1].is_finite() && w[0] < w[1])
+				|| !grid.axis_y.windows(2).all(|w| w[0].is_finite() && w[1].is_finite() && w[0] < w[1])
+			{
+				deformer_issues.push(json::object! {
+					node: node.name.clone(),
+					node_uuid: node.uuid.0,
+					deformer_type: "GridDeformer",
+					issue: "non_monotonic_axes"
+				});
+			}
+			if !has_deformable_descendant(puppet, node.uuid) {
+				deformer_issues.push(json::object! {
+					node: node.name.clone(),
+					node_uuid: node.uuid.0,
+					deformer_type: "GridDeformer",
+					issue: "no_deformable_children"
+				});
+			}
+		}
+		if let Some(path) = puppet.node_comps.get::<PathDeformer>(node.uuid) {
+			if path.vertices.len() < 2 {
+				deformer_issues.push(json::object! {
+					node: node.name.clone(),
+					node_uuid: node.uuid.0,
+					deformer_type: "PathDeformer",
+					issue: "degenerate_path_vertices"
+				});
+			} else if path.vertices.iter().any(|v| !v.is_finite()) {
+				deformer_issues.push(json::object! {
+					node: node.name.clone(),
+					node_uuid: node.uuid.0,
+					deformer_type: "PathDeformer",
+					issue: "non_finite_vertices"
+				});
+			}
+			if !has_deformable_descendant(puppet, node.uuid) {
+				deformer_issues.push(json::object! {
+					node: node.name.clone(),
+					node_uuid: node.uuid.0,
+					deformer_type: "PathDeformer",
+					issue: "no_deformable_children"
+				});
+			}
+		}
+		if puppet.node_comps.get::<MeshGroup>(node.uuid).is_some() {
+			let bad_mesh = puppet
+				.node_comps
+				.get::<Mesh>(node.uuid)
+				.map_or(true, |m| m.vertices.len() < 3 || m.indices.len() < 3);
+			if bad_mesh {
+				deformer_issues.push(json::object! {
+					node: node.name.clone(),
+					node_uuid: node.uuid.0,
+					deformer_type: "MeshGroup",
+					issue: "missing_or_empty_mesh"
+				});
+			}
+			if !has_deformable_descendant(puppet, node.uuid) {
+				deformer_issues.push(json::object! {
+					node: node.name.clone(),
+					node_uuid: node.uuid.0,
+					deformer_type: "MeshGroup",
+					issue: "no_deformable_children"
+				});
+			}
+		}
+	}
+
+	// Check 8: Binding coverage & integrity
+	let mut binding_coverage: Vec<JsonValue> = Vec::new();
+	let mut bound_nodes: HashSet<InoxNodeUuid> = HashSet::new();
+	let mut param_names: Vec<&String> = puppet.params.keys().collect();
+	param_names.sort();
+	for param_name in param_names {
+		let param = &puppet.params[param_name];
+		for binding in &param.bindings {
+			bound_nodes.insert(binding.node);
+			let target_node = puppet.nodes.get_node(binding.node);
+			let Some(target) = target_node else {
+				binding_coverage.push(json::object! {
+					param: param_name.clone(),
+					node_uuid: binding.node.0,
+					issue: "dangling_target_node"
+				});
+				continue;
+			};
+
+			let is_set_nx = if binding.is_set.is_transposed() {
+				binding.is_set.height()
+			} else {
+				binding.is_set.width()
+			};
+			let is_set_ny = if binding.is_set.is_transposed() {
+				binding.is_set.width()
+			} else {
+				binding.is_set.height()
+			};
+			let mut any_set = false;
+			for ix in 0..is_set_nx {
+				for iy in 0..is_set_ny {
+					if binding.is_set.get(ix, iy) == Some(&true) {
+						any_set = true;
+						break;
+					}
+				}
+				if any_set {
+					break;
+				}
+			}
+			if !any_set {
+				binding_coverage.push(json::object! {
+					param: param_name.clone(),
+					node: target.name.clone(),
+					node_uuid: binding.node.0,
+					issue: "unset_binding"
+				});
+			}
+
+			if let BindingValues::Deform(matrix) = &binding.values {
+				let expected = puppet
+					.node_comps
+					.get::<Mesh>(binding.node)
+					.map(|m| m.vertices.len())
+					.or_else(|| {
+						puppet
+							.node_comps
+							.get::<GridDeformer>(binding.node)
+							.map(|g| g.vertex_count())
+					})
+					.or_else(|| {
+						puppet
+							.node_comps
+							.get::<PathDeformer>(binding.node)
+							.map(|p| p.vertex_count())
+					});
+
+				match expected {
+					None => {
+						binding_coverage.push(json::object! {
+							param: param_name.clone(),
+							node: target.name.clone(),
+							node_uuid: binding.node.0,
+							issue: "deform_on_non_deformable_node"
+						});
+					}
+					Some(exp_len) => {
+						let mut bad_vec: Option<usize> = None;
+						for ix in 0..is_set_nx {
+							for iy in 0..is_set_ny {
+								if binding.is_set.get(ix, iy) == Some(&true) {
+									if let Some(v) = matrix.get(ix, iy) {
+										if v.len() != exp_len {
+											bad_vec = Some(v.len());
+											break;
+										}
+									}
+								}
+							}
+							if bad_vec.is_some() {
+								break;
+							}
+						}
+						if let Some(actual_len) = bad_vec {
+							binding_coverage.push(json::object! {
+								param: param_name.clone(),
+								node: target.name.clone(),
+								node_uuid: binding.node.0,
+								expected_vertices: exp_len,
+								actual_vertices: actual_len,
+								issue: "deform_vertex_mismatch"
+							});
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Deformers with zero direct parameter bindings have no effect
+	for node in puppet.nodes.pre_order_iter() {
+		if !node.enabled {
+			continue;
+		}
+		let is_deformer = puppet.node_comps.get::<GridDeformer>(node.uuid).is_some()
+			|| puppet.node_comps.get::<PathDeformer>(node.uuid).is_some()
+			|| puppet.node_comps.get::<MeshGroup>(node.uuid).is_some();
+		if is_deformer && !bound_nodes.contains(&node.uuid) {
+			binding_coverage.push(json::object! {
+				node: node.name.clone(),
+				node_uuid: node.uuid.0,
+				issue: "unbound_deformer"
+			});
+		}
+		if let Some(sp) = puppet.node_comps.get::<SimplePhysics>(node.uuid) {
+			match puppet.params.values().find(|p| p.uuid == sp.param) {
+				None => {
+					binding_coverage.push(json::object! {
+						node: node.name.clone(),
+						node_uuid: node.uuid.0,
+						param_uuid: sp.param.0,
+						issue: "dangling_physics_param"
+					});
+				}
+				Some(p) if p.bindings.is_empty() => {
+					binding_coverage.push(json::object! {
+						node: node.name.clone(),
+						node_uuid: node.uuid.0,
+						param: p.name.clone(),
+						issue: "physics_drives_unbound_param"
+					});
+				}
+				Some(_) => {}
+			}
+		}
+	}
+
+	// Restore rest state before checking draw order
+	eval_puppet_at(puppet, &HashMap::new());
+
+	// Check 9: Draw-order conflicts (overlapping equal zsort, anatomical face zsort inversions)
+	let mut draw_order_conflicts: Vec<JsonValue> = Vec::new();
+	struct DrawableZInfo {
+		uuid: InoxNodeUuid,
+		name: String,
+		zsort: f32,
+		min: Vec2,
+		max: Vec2,
+		is_mask_helper: bool,
+	}
+	let mut drawable_z: Vec<DrawableZInfo> = Vec::new();
+	for node in puppet.nodes.pre_order_iter() {
+		if !node.enabled || puppet.node_comps.get::<Drawable>(node.uuid).is_none() {
+			continue;
+		}
+		if let Some((pts, _, _)) = world_vertices_for_node(puppet, node.uuid, false) {
+			if pts.is_empty() {
+				continue;
+			}
+			let mut mn = vec2(f32::INFINITY, f32::INFINITY);
+			let mut mx = vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+			for p in &pts {
+				mn = mn.min(*p);
+				mx = mx.max(*p);
+			}
+			let zsort = puppet.node_zsort(node.uuid).unwrap_or(node.zsort);
+			let lower_name = node.name.to_ascii_lowercase();
+			let opacity = puppet.node_opacity(node.uuid).unwrap_or(1.0);
+			let is_mask_helper = opacity <= 1e-4
+				|| lower_name.contains("mask")
+				|| lower_name.contains("stencil")
+				|| lower_name.contains("clip");
+			drawable_z.push(DrawableZInfo {
+				uuid: node.uuid,
+				name: node.name.clone(),
+				zsort,
+				min: mn,
+				max: mx,
+				is_mask_helper,
+			});
+		}
+	}
+
+	for i in 0..drawable_z.len() {
+		for j in (i + 1)..drawable_z.len() {
+			let a = &drawable_z[i];
+			let b = &drawable_z[j];
+			if a.is_mask_helper || b.is_mask_helper {
+				continue;
+			}
+			if (a.zsort - b.zsort).abs() <= 1e-4 {
+				let ox = (a.max.x.min(b.max.x) - a.min.x.max(b.min.x)).max(0.0);
+				let oy = (a.max.y.min(b.max.y) - a.min.y.max(b.min.y)).max(0.0);
+				let overlap_area = ox * oy;
+				if overlap_area > 16.0 {
+					draw_order_conflicts.push(json::object! {
+						node_a: a.name.clone(),
+						node_b: b.name.clone(),
+						zsort: a.zsort,
+						overlap_area: overlap_area,
+						issue: "overlapping_identical_zsort"
+					});
+				}
+			}
+		}
+	}
+
+	if let Some(fid) = face_id {
+		let face_z = puppet.node_zsort(fid).unwrap_or(0.0);
+		for d in &drawable_z {
+			if d.uuid == fid || d.is_mask_helper {
+				continue;
+			}
+			let lower = d.name.to_ascii_lowercase();
+			let is_posterior = lower.contains("hair_back")
+				|| lower.contains("back_hair")
+				|| lower.contains("backhair")
+				|| lower.contains("rear_hair")
+				|| lower.contains("rearhair");
+			let is_anterior_face_feature = !lower.contains("back")
+				&& !lower.contains("rear")
+				&& (lower.contains("eye")
+					|| lower.contains("iris")
+					|| lower.contains("pupil")
+					|| lower.contains("lash")
+					|| lower.contains("brow")
+					|| lower.contains("mouth")
+					|| lower.contains("lip")
+					|| lower.contains("nose")
+					|| lower.contains("blush")
+					|| lower.contains("bang")
+					|| lower.contains("hair_front")
+					|| lower.contains("front_hair")
+					|| lower.contains("fronthair"));
+			if is_anterior_face_feature && d.zsort > face_z + 1e-3 {
+				draw_order_conflicts.push(json::object! {
+					node: d.name.clone(),
+					node_uuid: d.uuid.0,
+					node_zsort: d.zsort,
+					face_zsort: face_z,
+					issue: "occluded_behind_face"
+				});
+			} else if is_posterior && d.zsort < face_z - 1e-3 {
+				draw_order_conflicts.push(json::object! {
+					node: d.name.clone(),
+					node_uuid: d.uuid.0,
+					node_zsort: d.zsort,
+					face_zsort: face_z,
+					issue: "back_hair_in_front_of_face"
+				});
+			}
+		}
+	}
+
+	// Check 10: Mask dependency cycles & invalid mask sources
+	let mut mask_cycles: Vec<JsonValue> = Vec::new();
+	let mut mask_adj: HashMap<InoxNodeUuid, Vec<InoxNodeUuid>> = HashMap::new();
+	let mut mask_nodes: Vec<InoxNodeUuid> = Vec::new();
+	for node in puppet.nodes.pre_order_iter() {
+		if let Some(masks) = puppet.node_comps.get::<Masks>(node.uuid) {
+			mask_nodes.push(node.uuid);
+			let entry = mask_adj.entry(node.uuid).or_default();
+			for m in &masks.masks {
+				if m.source == node.uuid {
+					mask_cycles.push(json::object! {
+						node: node.name.clone(),
+						node_uuid: node.uuid.0,
+						source_uuid: m.source.0,
+						issue: "self_mask"
+					});
+				} else if puppet.nodes.get_node(m.source).is_none() {
+					mask_cycles.push(json::object! {
+						node: node.name.clone(),
+						node_uuid: node.uuid.0,
+						source_uuid: m.source.0,
+						issue: "dangling_mask_source"
+					});
+				} else if puppet.node_comps.get::<Drawable>(m.source).is_none() {
+					mask_cycles.push(json::object! {
+						node: node.name.clone(),
+						node_uuid: node.uuid.0,
+						source_uuid: m.source.0,
+						issue: "non_drawable_mask_source"
+					});
+				} else if !entry.contains(&m.source) {
+					entry.push(m.source);
+				}
+			}
+		}
+	}
+
+	let mut dfs_state: HashMap<InoxNodeUuid, u8> = HashMap::new();
+	let mut dfs_stack: Vec<InoxNodeUuid> = Vec::new();
+	let mut seen_cycles: HashSet<Vec<u32>> = HashSet::new();
+	for start in mask_nodes {
+		if dfs_state.get(&start).copied().unwrap_or(0) == 0 {
+			detect_mask_cycles_dfs(
+				start,
+				puppet,
+				&mask_adj,
+				&mut dfs_state,
+				&mut dfs_stack,
+				&mut seen_cycles,
+				&mut mask_cycles,
+			);
+		}
+	}
+
 	let mut score: i32 = 100;
 	score -= (containment_leaks.len() as i32) * 8;
 	score -= (mesh_foldovers.len() as i32) * 15;
@@ -534,9 +937,18 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 	score -= (blink_issues.len() as i32) * 10;
 	score -= (symmetry_defects.len() as i32) * 8;
 	score -= (unmasked_parts.len() as i32) * 5;
+	score -= (deformer_issues.len() as i32) * 8;
+	score -= (binding_coverage.len() as i32) * 5;
+	score -= (draw_order_conflicts.len() as i32) * 6;
+	score -= (mask_cycles.len() as i32) * 15;
 	let score = score.clamp(0, 100) as u32;
 
-	let passed = containment_leaks.is_empty() && mesh_foldovers.is_empty() && blink_issues.is_empty() && score >= 80;
+	let passed = containment_leaks.is_empty()
+		&& mesh_foldovers.is_empty()
+		&& blink_issues.is_empty()
+		&& deformer_issues.is_empty()
+		&& mask_cycles.is_empty()
+		&& score >= 80;
 
 	if !containment_leaks.is_empty() || !mesh_foldovers.is_empty() || !unmasked_parts.is_empty() {
 		recommendations.push("Run `rig.auto_fix` to clamp facial feature containment, relax mesh fold-overs, and attach missing masks.".to_owned());
@@ -547,8 +959,20 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 	if !mesh_stretch.is_empty() {
 		recommendations.push("Increase mesh subdivision via `mesh.auto_contour` or `mesh.auto_grid` on stretched parts.".to_owned());
 	}
+	if !deformer_issues.is_empty() {
+		recommendations.push("Repair invalid GridDeformer/PathDeformer/MeshGroup hierarchies or remove empty deformers.".to_owned());
+	}
+	if !binding_coverage.is_empty() {
+		recommendations.push("Fix dangling or mismatched Deform bindings and bind orphan deformers/physics targets.".to_owned());
+	}
+	if !draw_order_conflicts.is_empty() {
+		recommendations.push("Separate overlapping zsort values and ensure anterior facial parts have lower zsort than Face.".to_owned());
+	}
+	if !mask_cycles.is_empty() {
+		recommendations.push("Break cyclic mask dependencies and replace non-drawable or dangling mask sources.".to_owned());
+	}
 	if passed && recommendations.is_empty() {
-		recommendations.push("Rig passed all 6 geometric & visual checks. Ready for `render.grid` / `puppet.save`.".to_owned());
+		recommendations.push("Rig passed all 10 geometric, deformer, binding, draw-order & mask checks. Ready for `render.grid` / `puppet.save`.".to_owned());
 	}
 
 	// Restore rest state
@@ -563,7 +987,11 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			mesh_stretch: mesh_stretch.len(),
 			blink_issues: blink_issues.len(),
 			symmetry_defects: symmetry_defects.len(),
-			unmasked_parts: unmasked_parts.len()
+			unmasked_parts: unmasked_parts.len(),
+			deformer_issues: deformer_issues.len(),
+			binding_coverage: binding_coverage.len(),
+			draw_order_conflicts: draw_order_conflicts.len(),
+			mask_cycles: mask_cycles.len()
 		},
 		details: {
 			containment_leaks: containment_leaks,
@@ -571,10 +999,84 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			mesh_stretch: mesh_stretch,
 			blink_issues: blink_issues,
 			symmetry_defects: symmetry_defects,
-			unmasked_parts: unmasked_parts
+			unmasked_parts: unmasked_parts,
+			deformer_issues: deformer_issues,
+			binding_coverage: binding_coverage,
+			draw_order_conflicts: draw_order_conflicts,
+			mask_cycles: mask_cycles
 		},
 		recommendations: recommendations
 	}
+}
+
+fn has_deformable_descendant(puppet: &Puppet, root: InoxNodeUuid) -> bool {
+	puppet.nodes.pre_order_iter().any(|n| {
+		n.uuid != root
+			&& n.enabled
+			&& puppet.nodes.is_descendant(n.uuid, root)
+			&& (puppet.node_comps.get::<Mesh>(n.uuid).is_some()
+				|| puppet.node_comps.get::<Drawable>(n.uuid).is_some()
+				|| puppet.node_comps.get::<Composite>(n.uuid).is_some())
+	})
+}
+
+fn detect_mask_cycles_dfs(
+	node: InoxNodeUuid,
+	puppet: &Puppet,
+	adj: &HashMap<InoxNodeUuid, Vec<InoxNodeUuid>>,
+	state: &mut HashMap<InoxNodeUuid, u8>,
+	stack: &mut Vec<InoxNodeUuid>,
+	seen_cycles: &mut HashSet<Vec<u32>>,
+	out: &mut Vec<JsonValue>,
+) {
+	state.insert(node, 1);
+	stack.push(node);
+
+	if let Some(neighbors) = adj.get(&node) {
+		for &next in neighbors {
+			match state.get(&next).copied().unwrap_or(0) {
+				0 => detect_mask_cycles_dfs(next, puppet, adj, state, stack, seen_cycles, out),
+				1 => {
+					if let Some(pos) = stack.iter().position(|&u| u == next) {
+						let raw_cycle = &stack[pos..];
+						if raw_cycle.len() >= 2 {
+							let min_idx = raw_cycle
+								.iter()
+								.enumerate()
+								.min_by_key(|&(_, u)| u.0)
+								.map(|(i, _)| i)
+								.unwrap_or(0);
+							let mut canonical = Vec::with_capacity(raw_cycle.len());
+							for k in 0..raw_cycle.len() {
+								canonical.push(raw_cycle[(min_idx + k) % raw_cycle.len()].0);
+							}
+							if seen_cycles.insert(canonical.clone()) {
+								let names: Vec<String> = canonical
+									.iter()
+									.map(|&uid| {
+										puppet
+											.nodes
+											.get_node(InoxNodeUuid(uid))
+											.map(|n| n.name.clone())
+											.unwrap_or_else(|| format!("Node({uid})"))
+									})
+									.collect();
+								out.push(json::object! {
+									issue: "mask_cycle",
+									cycle_uuids: canonical,
+									cycle_names: names
+								});
+							}
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+	}
+
+	stack.pop();
+	state.insert(node, 2);
 }
 
 /// Deterministically fix containment leaks, mesh fold-overs, and missing masks.

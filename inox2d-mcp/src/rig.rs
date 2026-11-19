@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Cursor;
 
 use glam::{vec2, vec3, Vec2};
@@ -2503,18 +2503,76 @@ pub fn remove_animation_keyframe(
 	Ok(lane.keyframes.len() < before)
 }
 
-/// Generate a true contour-hugging Delaunay triangle mesh using:
-/// 1) 2px separable morphological dilation on the alpha channel,
-/// 2) Poisson-spaced boundary contour sampling (preserving silhouette extremes),
-/// 3) Staggered equilateral interior lattice sampling,
-/// 4) Bowyer-Watson Delaunay triangulation in `f64`, and
-/// 5) Concave-bay silhouette culling + unused vertex compaction.
+/// High-density adaptive sampling circle (e.g. eye corners, mouth corners, elbow/knee joints)
+/// passed to [`generate_delaunay_mesh_with_options`].
+#[derive(Clone, Debug)]
+pub struct RefinementZone {
+	/// Local mesh coordinate center (same space as `Mesh.vertices`).
+	pub center: Vec2,
+	/// Influence radius in local mesh units.
+	pub radius: f32,
+	/// Local spacing factor relative to `step_px` (e.g. `0.35` produces ~3x finer triangles).
+	pub density_scale: f32,
+}
+
+/// Options controlling boundary-constrained Bowyer-Watson Delaunay meshing.
+#[derive(Clone, Debug)]
+pub struct DelaunayMeshOptions {
+	pub step_px: f32,
+	pub alpha_threshold: u8,
+	/// Signed pixel offset around alpha silhouette (`>= 0` expands outward margin).
+	pub boundary_offset_px: f32,
+	/// Enforce exact closed contour segments via Sloan edge recovery and polygon-parity culling.
+	pub constrained: bool,
+	/// Automatically refine triangle density around sharp boundary corners (>= 35 deg turn).
+	pub refine_near_corners: bool,
+	/// Explicit localized high-density regions (joints, expression anchor areas).
+	pub refinement_zones: Vec<RefinementZone>,
+}
+
+impl Default for DelaunayMeshOptions {
+	fn default() -> Self {
+		Self {
+			step_px: 22.0,
+			alpha_threshold: 4,
+			boundary_offset_px: 2.0,
+			constrained: true,
+			refine_near_corners: true,
+			refinement_zones: Vec::new(),
+		}
+	}
+}
+
+/// Generate a boundary-conforming Bowyer-Watson Delaunay triangle mesh from an RGBA texture.
 pub fn generate_delaunay_mesh(
 	img: &RgbaImage,
 	width: f32,
 	height: f32,
 	step_px: f32,
 	alpha_threshold: u8,
+) -> Mesh {
+	generate_delaunay_mesh_with_options(
+		img,
+		width,
+		height,
+		&DelaunayMeshOptions {
+			step_px,
+			alpha_threshold,
+			..Default::default()
+		},
+	)
+}
+
+/// Generate a constrained, adaptively refined Bowyer-Watson Delaunay mesh:
+/// 1) Euclidean-chamfer signed boundary offset (`boundary_offset_px`).
+/// 2) Ordered pixel-edge alpha-contour loop tracing + closed-loop Douglas-Peucker simplification.
+/// 3) Corner detection + explicit `RefinementZone` adaptive hex interior lattice.
+/// 4) Sloan edge-flipping constrained Delaunay recovery + exact polygon-parity silhouette culling.
+pub fn generate_delaunay_mesh_with_options(
+	img: &RgbaImage,
+	width: f32,
+	height: f32,
+	opts: &DelaunayMeshOptions,
 ) -> Mesh {
 	let iw = img.width() as usize;
 	let ih = img.height() as usize;
@@ -2524,77 +2582,319 @@ pub fn generate_delaunay_mesh(
 
 	let mut raw = vec![false; iw * ih];
 	let mut any_opaque = false;
-	let mut min_px = iw;
-	let mut min_py = ih;
-	let mut max_px = 0usize;
-	let mut max_py = 0usize;
-
 	for y in 0..ih {
 		for x in 0..iw {
-			if img.get_pixel(x as u32, y as u32).0[3] > alpha_threshold {
+			if img.get_pixel(x as u32, y as u32).0[3] > opts.alpha_threshold {
 				raw[y * iw + x] = true;
 				any_opaque = true;
-				min_px = min_px.min(x);
-				min_py = min_py.min(y);
-				max_px = max_px.max(x);
-				max_py = max_py.max(y);
 			}
 		}
 	}
-
 	if !any_opaque {
 		return generate_grid_mesh(width, height, 2, 2, Vec2::ZERO);
 	}
 
-	// Separable 2px morphological dilation to protect anti-aliased fringes.
-	let dilate = 2isize;
-	let mut horiz = vec![false; iw * ih];
-	for y in 0..ih {
-		let row = y * iw;
-		for x in 0..iw {
-			let x0 = (x as isize - dilate).max(0) as usize;
-			let x1 = (x as isize + dilate).min(iw as isize - 1) as usize;
-			let mut hit = false;
-			for kx in x0..=x1 {
-				if raw[row + kx] {
-					hit = true;
-					break;
-				}
-			}
-			horiz[row + x] = hit;
+	let offset = opts.boundary_offset_px;
+	let mut mask = if offset >= 0.0 {
+		let dist = chamfer_distance_to_mask(&raw, iw, ih, true);
+		let thresh = offset + 1e-4;
+		dist.into_iter().map(|d| d <= thresh).collect::<Vec<bool>>()
+	} else {
+		let dist = chamfer_distance_to_mask(&raw, iw, ih, false);
+		let thresh = -offset + 1e-4;
+		let eroded = dist.into_iter().map(|d| d > thresh).collect::<Vec<bool>>();
+		if eroded.iter().any(|&v| v) {
+			eroded
+		} else {
+			raw.clone()
 		}
-	}
+	};
 
-	let mut mask = vec![false; iw * ih];
-	for y in 0..ih {
-		let y0 = (y as isize - dilate).max(0) as usize;
-		let y1 = (y as isize + dilate).min(ih as isize - 1) as usize;
-		for x in 0..iw {
-			let mut hit = false;
-			for ky in y0..=y1 {
-				if horiz[ky * iw + x] {
-					hit = true;
-					break;
-				}
-			}
-			mask[y * iw + x] = hit;
-		}
+	if !mask.iter().any(|&v| v) {
+		mask = raw;
 	}
 
 	let w64 = width as f64;
 	let h64 = height as f64;
 	let sx = (w64 / iw as f64).max(0.01);
 	let sy = (h64 / ih as f64).max(0.01);
-	let spacing = (step_px.clamp(6.0, 256.0) as f64) * ((sx + sy) * 0.5);
-	let b_min_dist = (spacing * 0.65).max(3.0);
-	let i_min_dist = spacing * 0.52;
+	let spacing = (opts.step_px.clamp(4.0, 256.0) as f64) * ((sx + sy) * 0.5);
 
-	let px_to_local = |px: usize, py: usize| -> DelaunayPt {
+	let grid_to_local = |vx: usize, vy: usize| -> DelaunayPt {
 		DelaunayPt {
-			x: ((px as f64 + 0.5) / iw as f64 - 0.5) * w64,
-			y: ((py as f64 + 0.5) / ih as f64 - 0.5) * h64,
+			x: (vx as f64 / iw as f64 - 0.5) * w64,
+			y: (vy as f64 / ih as f64 - 0.5) * h64,
 		}
 	};
+
+	let raw_loops = extract_alpha_contour_loops(&mask, iw, ih);
+	if raw_loops.is_empty() {
+		return generate_contour_mesh(img, width, height, 4, 4, opts.alpha_threshold);
+	}
+
+	let dp_eps = (spacing * 0.12).clamp(0.4, 3.0);
+	let mut simplified_loops: Vec<Vec<DelaunayPt>> = raw_loops
+		.into_iter()
+		.filter_map(|loop_grid| {
+			let local: Vec<DelaunayPt> = loop_grid
+				.into_iter()
+				.map(|(vx, vy)| grid_to_local(vx, vy))
+				.collect();
+			let clean = collapse_collinear_closed(&local, 1e-6);
+			if clean.len() < 3 {
+				return None;
+			}
+			let simp = douglas_peucker_closed(&clean, dp_eps);
+			if simp.len() < 3 || polygon_signed_area(&simp).abs() < (spacing * spacing * 0.05).max(1.0) {
+				None
+			} else {
+				Some(simp)
+			}
+		})
+		.collect();
+
+	if simplified_loops.is_empty() {
+		return generate_contour_mesh(img, width, height, 4, 4, opts.alpha_threshold);
+	}
+
+	// Collect refinement zones (explicit caller joints first, then sharp boundary corners)
+	let mut active_zones: Vec<RefinementZone> = opts.refinement_zones.clone();
+	if opts.refine_near_corners {
+		let mut corner_cands: Vec<(f64, Vec2)> = Vec::new();
+		for lp in &simplified_loops {
+			let m = lp.len();
+			for i in 0..m {
+				let prev = lp[(i + m - 1) % m];
+				let curr = lp[i];
+				let next = lp[(i + 1) % m];
+				let d1x = curr.x - prev.x;
+				let d1y = curr.y - prev.y;
+				let d2x = next.x - curr.x;
+				let d2y = next.y - curr.y;
+				let l1 = (d1x * d1x + d1y * d1y).sqrt();
+				let l2 = (d2x * d2x + d2y * d2y).sqrt();
+				if l1 > 1e-6 && l2 > 1e-6 {
+					let cos_ang = (d1x * d2x + d1y * d2y) / (l1 * l2);
+					if cos_ang <= 0.81915 {
+						corner_cands.push((cos_ang, vec2(curr.x as f32, curr.y as f32)));
+					}
+				}
+			}
+		}
+		corner_cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+		let min_sep_sq = (spacing * 0.65).powi(2) as f32;
+		let mut added_corners = 0usize;
+		for (_, cpos) in corner_cands {
+			if added_corners >= 64 {
+				break;
+			}
+			let too_close = active_zones
+				.iter()
+				.any(|z| (z.center - cpos).length_squared() < min_sep_sq);
+			if !too_close {
+				active_zones.push(RefinementZone {
+					center: cpos,
+					radius: (spacing * 1.35) as f32,
+					density_scale: 0.45,
+				});
+				added_corners += 1;
+			}
+		}
+	}
+
+	let local_spacing_at = |x: f64, y: f64| -> f64 {
+		let mut scale = 1.0f64;
+		let p = vec2(x as f32, y as f32);
+		for z in &active_zones {
+			if z.radius > 0.0 && (z.center - p).length_squared() <= z.radius * z.radius {
+				scale = scale.min((z.density_scale as f64).clamp(0.2, 1.0));
+			}
+		}
+		(spacing * scale).max(2.0)
+	};
+
+	// Resample long boundary segments adaptively so edges near joints match interior density.
+	for lp in &mut simplified_loops {
+		let m = lp.len();
+		let mut resampled = Vec::with_capacity(m * 2);
+		for i in 0..m {
+			let a = lp[i];
+			let b = lp[(i + 1) % m];
+			let dx = b.x - a.x;
+			let dy = b.y - a.y;
+			let seg_len = (dx * dx + dy * dy).sqrt();
+			let target = local_spacing_at((a.x + b.x) * 0.5, (a.y + b.y) * 0.5).max(2.0);
+			let steps = (seg_len / target).ceil().max(1.0).min(128.0) as usize;
+			for s in 0..steps {
+				let t = s as f64 / steps as f64;
+				resampled.push(DelaunayPt {
+					x: a.x + dx * t,
+					y: a.y + dy * t,
+				});
+			}
+		}
+		*lp = resampled;
+	}
+
+	// Build point array: boundary loop vertices first (exact index rings), then adaptive interior hex points.
+	let mut pts: Vec<DelaunayPt> = Vec::new();
+	let cell_size = spacing.max(4.0);
+	let mut buckets: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+
+	let bucket_insert = |pt: DelaunayPt, pts: &mut Vec<DelaunayPt>, buckets: &mut HashMap<(i32, i32), Vec<usize>>| -> usize {
+		let cx = (pt.x / cell_size).floor() as i32;
+		let cy = (pt.y / cell_size).floor() as i32;
+		for dy in -1..=1 {
+			for dx in -1..=1 {
+				if let Some(list) = buckets.get(&(cx + dx, cy + dy)) {
+					for &idx in list {
+						let ex = pts[idx].x - pt.x;
+						let ey = pts[idx].y - pt.y;
+						if ex * ex + ey * ey < 1e-6 {
+							return idx;
+						}
+					}
+				}
+			}
+		}
+		let idx = pts.len();
+		pts.push(pt);
+		buckets.entry((cx, cy)).or_default().push(idx);
+		idx
+	};
+
+	let mut constrained_edges: Vec<(usize, usize)> = Vec::new();
+	let mut constrained_seen: HashSet<(usize, usize)> = HashSet::new();
+	let mut segs: Vec<(DelaunayPt, DelaunayPt)> = Vec::new();
+
+	for lp in &simplified_loops {
+		let ring_idxs: Vec<usize> = lp.iter().map(|&p| bucket_insert(p, &mut pts, &mut buckets)).collect();
+		let m = ring_idxs.len();
+		for i in 0..m {
+			let u = ring_idxs[i];
+			let v = ring_idxs[(i + 1) % m];
+			if u != v {
+				let key = (u.min(v), u.max(v));
+				if constrained_seen.insert(key) {
+					constrained_edges.push((u, v));
+				}
+				segs.push((pts[u], pts[v]));
+			}
+		}
+	}
+
+	let try_insert_interior = |pt: DelaunayPt,
+	                           local_step: f64,
+	                           pts: &mut Vec<DelaunayPt>,
+	                           buckets: &mut HashMap<(i32, i32), Vec<usize>>| {
+		if !point_in_loops(pt, &simplified_loops) {
+			return;
+		}
+		let clear_sq = (local_step * 0.34).max(0.75).powi(2);
+		for &(a, b) in &segs {
+			if point_to_segment_dist_sq(pt, a, b) < clear_sq {
+				return;
+			}
+		}
+		let min_d2 = (local_step * 0.68).max(1.25).powi(2);
+		let search_cells = ((local_step / cell_size).ceil() as i32).max(1);
+		let cx = (pt.x / cell_size).floor() as i32;
+		let cy = (pt.y / cell_size).floor() as i32;
+		for dy in -search_cells..=search_cells {
+			for dx in -search_cells..=search_cells {
+				if let Some(list) = buckets.get(&(cx + dx, cy + dy)) {
+					for &idx in list {
+						let ex = pts[idx].x - pt.x;
+						let ey = pts[idx].y - pt.y;
+						if ex * ex + ey * ey < min_d2 {
+							return;
+						}
+					}
+				}
+			}
+		}
+		let idx = pts.len();
+		pts.push(pt);
+		buckets.entry((cx, cy)).or_default().push(idx);
+	};
+
+	// Pass 1: Dense hex lattice inside refinement zones (finest zones first)
+	let mut zones_sorted = active_zones.clone();
+	zones_sorted.sort_by(|a, b| a.density_scale.total_cmp(&b.density_scale));
+	for z in &zones_sorted {
+		if z.radius <= 1.0 {
+			continue;
+		}
+		let z_step = (spacing * (z.density_scale as f64).clamp(0.2, 1.0)).max(2.0);
+		let r = (z.radius as f64).min(w64.max(h64));
+		let r2 = r * r;
+		let h_dy = z_step * 0.8660254037844386;
+		let mut row = 0usize;
+		let mut ly = z.center.y as f64 - r + h_dy * 0.5;
+		while ly <= z.center.y as f64 + r {
+			let off = if row % 2 == 1 { z_step * 0.5 } else { 0.0 };
+			let mut lx = z.center.x as f64 - r + off;
+			while lx <= z.center.x as f64 + r {
+				let dx = lx - z.center.x as f64;
+				let dy = ly - z.center.y as f64;
+				if dx * dx + dy * dy <= r2 {
+					try_insert_interior(DelaunayPt { x: lx, y: ly }, z_step, &mut pts, &mut buckets);
+				}
+				lx += z_step;
+			}
+			row += 1;
+			ly += h_dy;
+		}
+	}
+
+	// Pass 2: Global interior staggered hex lattice across silhouette bbox
+	let (mut bmin_x, mut bmax_x) = (f64::INFINITY, f64::NEG_INFINITY);
+	let (mut bmin_y, mut bmax_y) = (f64::INFINITY, f64::NEG_INFINITY);
+	for lp in &simplified_loops {
+		for &p in lp {
+			bmin_x = bmin_x.min(p.x);
+			bmax_x = bmax_x.max(p.x);
+			bmin_y = bmin_y.min(p.y);
+			bmax_y = bmax_y.max(p.y);
+		}
+	}
+	let hex_dx = spacing.max(2.0);
+	let hex_dy = hex_dx * 0.8660254037844386;
+	let mut row_idx = 0usize;
+	let mut ly = bmin_y + hex_dy * 0.5;
+	while ly <= bmax_y - hex_dy * 0.25 {
+		let offset_x = if row_idx % 2 == 1 { hex_dx * 0.5 } else { 0.0 };
+		let mut lx = bmin_x + offset_x;
+		while lx <= bmax_x {
+			let l_step = local_spacing_at(lx, ly);
+			try_insert_interior(DelaunayPt { x: lx, y: ly }, l_step, &mut pts, &mut buckets);
+			lx += hex_dx;
+		}
+		row_idx += 1;
+		ly += hex_dy;
+	}
+
+	let n = pts.len();
+	if n < 3 {
+		return generate_contour_mesh(img, width, height, 4, 4, opts.alpha_threshold);
+	}
+
+	let mut tris = bowyer_watson_tris(&pts, w64.max(h64));
+	if opts.constrained && !constrained_edges.is_empty() {
+		let sos_pts: Vec<DelaunayPt> = pts
+			.iter()
+			.enumerate()
+			.map(|(i, p)| {
+				let jx = (((i.wrapping_mul(2654435761) & 1023) as f64) / 1023.0 - 0.5) * 1e-4;
+				let jy = (((i.wrapping_mul(1597334677) & 1023) as f64) / 1023.0 - 0.5) * 1e-4;
+				DelaunayPt {
+					x: p.x + jx,
+					y: p.y + jy,
+				}
+			})
+			.collect();
+		enforce_constrained_edges(&mut tris, &sos_pts, &constrained_edges);
+	}
 
 	let sample_mask = |lx: f64, ly: f64| -> bool {
 		let u = lx / w64 + 0.5;
@@ -2607,132 +2907,29 @@ pub fn generate_delaunay_mesh(
 		mask[iy as usize * iw + ix as usize]
 	};
 
-	let mut pts: Vec<DelaunayPt> = Vec::new();
-	let mut buckets: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
-	let cell_size = b_min_dist;
-
-	let try_insert = |pt: DelaunayPt,
-	                  min_dist: f64,
-	                  pts: &mut Vec<DelaunayPt>,
-	                  buckets: &mut HashMap<(i32, i32), Vec<usize>>| {
-		let cx = (pt.x / cell_size).floor() as i32;
-		let cy = (pt.y / cell_size).floor() as i32;
-		let r2 = min_dist * min_dist;
-		for dy in -1..=1 {
-			for dx in -1..=1 {
-				if let Some(list) = buckets.get(&(cx + dx, cy + dy)) {
-					for &idx in list {
-						let ex = pts[idx].x - pt.x;
-						let ey = pts[idx].y - pt.y;
-						if ex * ex + ey * ey < r2 {
-							return;
-						}
-					}
-				}
-			}
-		}
-		let idx = pts.len();
-		pts.push(pt);
-		buckets.entry((cx, cy)).or_default().push(idx);
-	};
-
-	// Collect boundary pixels and extreme silhouette anchors so tips/corners are never lost.
-	let mut boundary_coords: Vec<(usize, usize)> = Vec::new();
-	let mut ext_top: Option<(usize, usize)> = None;
-	let mut ext_bot: Option<(usize, usize)> = None;
-	let mut ext_left: Option<(usize, usize)> = None;
-	let mut ext_right: Option<(usize, usize)> = None;
-
-	for y in 0..ih {
-		for x in 0..iw {
-			if !mask[y * iw + x] {
-				continue;
-			}
-			let is_boundary = x == 0
-				|| x + 1 == iw
-				|| y == 0
-				|| y + 1 == ih
-				|| !mask[y * iw + x - 1]
-				|| !mask[y * iw + x + 1]
-				|| !mask[(y - 1) * iw + x]
-				|| !mask[(y + 1) * iw + x];
-			if !is_boundary {
-				continue;
-			}
-			if ext_top.map_or(true, |(_, ey)| y < ey) {
-				ext_top = Some((x, y));
-			}
-			if ext_bot.map_or(true, |(_, ey)| y > ey) {
-				ext_bot = Some((x, y));
-			}
-			if ext_left.map_or(true, |(ex, _)| x < ex) {
-				ext_left = Some((x, y));
-			}
-			if ext_right.map_or(true, |(ex, _)| x > ex) {
-				ext_right = Some((x, y));
-			}
-			boundary_coords.push((x, y));
-		}
-	}
-
-	for ext in [ext_top, ext_bot, ext_left, ext_right].into_iter().flatten() {
-		try_insert(px_to_local(ext.0, ext.1), b_min_dist, &mut pts, &mut buckets);
-	}
-	for (bx, by) in boundary_coords {
-		try_insert(px_to_local(bx, by), b_min_dist, &mut pts, &mut buckets);
-	}
-
-	// Staggered hexagonal lattice for well-shaped interior triangles.
-	let dmin_x = ((min_px.saturating_sub(2) as f64 + 0.5) / iw as f64 - 0.5) * w64;
-	let dmax_x = (((max_px + 2).min(iw - 1) as f64 + 0.5) / iw as f64 - 0.5) * w64;
-	let dmin_y = ((min_py.saturating_sub(2) as f64 + 0.5) / ih as f64 - 0.5) * h64;
-	let dmax_y = (((max_py + 2).min(ih - 1) as f64 + 0.5) / ih as f64 - 0.5) * h64;
-	let hex_dx = spacing;
-	let hex_dy = spacing * 0.8660254037844386;
-
-	let mut row_idx = 0usize;
-	let mut ly = dmin_y + hex_dy * 0.5;
-	while ly <= dmax_y - hex_dy * 0.25 {
-		let offset = if row_idx % 2 == 1 { hex_dx * 0.5 } else { 0.0 };
-		let mut lx = dmin_x + offset;
-		while lx <= dmax_x {
-			if sample_mask(lx, ly) {
-				try_insert(DelaunayPt { x: lx, y: ly }, i_min_dist, &mut pts, &mut buckets);
-			}
-			lx += hex_dx;
-		}
-		row_idx += 1;
-		ly += hex_dy;
-	}
-
-	let n = pts.len();
-	if n < 3 {
-		return generate_contour_mesh(img, width, height, 4, 4, alpha_threshold);
-	}
-
-	let tris = bowyer_watson_tris(&pts, w64.max(h64));
-
-	// Remove super-triangle vertices & cull convex chords spanning empty alpha bays.
 	let mut clean_tris: Vec<[usize; 3]> = Vec::new();
 	for tri in tris {
 		let pa = pts[tri[0]];
 		let pb = pts[tri[1]];
 		let pc = pts[tri[2]];
-		if orient2d_f64(pa, pb, pc).abs() <= 1e-6 {
+		let area = orient2d_f64(pa, pb, pc);
+		if area.abs() <= 1e-6 {
 			continue;
 		}
 		let gx = (pa.x + pb.x + pc.x) / 3.0;
 		let gy = (pa.y + pb.y + pc.y) / 3.0;
-		if !sample_mask(gx, gy) {
+		let inside = if opts.constrained {
+			point_in_loops(DelaunayPt { x: gx, y: gy }, &simplified_loops)
+		} else {
+			let m0 = sample_mask((pa.x + pb.x) * 0.5, (pa.y + pb.y) * 0.5) as u8;
+			let m1 = sample_mask((pb.x + pc.x) * 0.5, (pb.y + pc.y) * 0.5) as u8;
+			let m2 = sample_mask((pc.x + pa.x) * 0.5, (pc.y + pa.y) * 0.5) as u8;
+			sample_mask(gx, gy) && (m0 + m1 + m2 >= 2)
+		};
+		if !inside {
 			continue;
 		}
-		let m0 = sample_mask((pa.x + pb.x) * 0.5, (pa.y + pb.y) * 0.5) as u8;
-		let m1 = sample_mask((pb.x + pc.x) * 0.5, (pb.y + pc.y) * 0.5) as u8;
-		let m2 = sample_mask((pc.x + pa.x) * 0.5, (pc.y + pa.y) * 0.5) as u8;
-		if m0 + m1 + m2 < 2 {
-			continue;
-		}
-		if orient2d_f64(pa, pb, pc) > 0.0 {
+		if area > 0.0 {
 			clean_tris.push(tri);
 		} else {
 			clean_tris.push([tri[0], tri[2], tri[1]]);
@@ -2740,7 +2937,7 @@ pub fn generate_delaunay_mesh(
 	}
 
 	if clean_tris.is_empty() {
-		return generate_contour_mesh(img, width, height, 4, 4, alpha_threshold);
+		return generate_contour_mesh(img, width, height, 4, 4, opts.alpha_threshold);
 	}
 
 	// Compact unused vertices.
@@ -2769,5 +2966,499 @@ pub fn generate_delaunay_mesh(
 		uvs,
 		indices,
 		origin: Vec2::ZERO,
+	}
+}
+
+fn chamfer_distance_to_mask(raw: &[bool], iw: usize, ih: usize, to_foreground: bool) -> Vec<f32> {
+	const INF: f32 = 1e6;
+	const SQRT2: f32 = 1.4142135;
+	let mut dist = vec![INF; iw * ih];
+	for y in 0..ih {
+		for x in 0..iw {
+			let i = y * iw + x;
+			if to_foreground {
+				if raw[i] {
+					dist[i] = 0.0;
+				}
+			} else if !raw[i] {
+				dist[i] = 0.0;
+			} else {
+				let edge_d = ((x + 1).min(iw - x).min(y + 1).min(ih - y)) as f32;
+				dist[i] = edge_d;
+			}
+		}
+	}
+
+	// Forward pass
+	for y in 0..ih {
+		for x in 0..iw {
+			let i = y * iw + x;
+			let mut d = dist[i];
+			if x > 0 {
+				d = d.min(dist[i - 1] + 1.0);
+			}
+			if y > 0 {
+				d = d.min(dist[(y - 1) * iw + x] + 1.0);
+				if x > 0 {
+					d = d.min(dist[(y - 1) * iw + x - 1] + SQRT2);
+				}
+				if x + 1 < iw {
+					d = d.min(dist[(y - 1) * iw + x + 1] + SQRT2);
+				}
+			}
+			dist[i] = d;
+		}
+	}
+
+	// Backward pass
+	for y in (0..ih).rev() {
+		for x in (0..iw).rev() {
+			let i = y * iw + x;
+			let mut d = dist[i];
+			if x + 1 < iw {
+				d = d.min(dist[i + 1] + 1.0);
+			}
+			if y + 1 < ih {
+				d = d.min(dist[(y + 1) * iw + x] + 1.0);
+				if x > 0 {
+					d = d.min(dist[(y + 1) * iw + x - 1] + SQRT2);
+				}
+				if x + 1 < iw {
+					d = d.min(dist[(y + 1) * iw + x + 1] + SQRT2);
+				}
+			}
+			dist[i] = d;
+		}
+	}
+	dist
+}
+
+fn extract_alpha_contour_loops(mask: &[bool], iw: usize, ih: usize) -> Vec<Vec<(usize, usize)>> {
+	let gw = iw + 1;
+	let mut out_dirs = vec![0u8; gw * (ih + 1)];
+
+	for y in 0..ih {
+		for x in 0..iw {
+			if !mask[y * iw + x] {
+				continue;
+			}
+			if y == 0 || !mask[(y - 1) * iw + x] {
+				out_dirs[y * gw + x] |= 1 << 0; // +X
+			}
+			if x + 1 == iw || !mask[y * iw + x + 1] {
+				out_dirs[y * gw + (x + 1)] |= 1 << 1; // +Y
+			}
+			if y + 1 == ih || !mask[(y + 1) * iw + x] {
+				out_dirs[(y + 1) * gw + (x + 1)] |= 1 << 2; // -X
+			}
+			if x == 0 || !mask[y * iw + x - 1] {
+				out_dirs[(y + 1) * gw + x] |= 1 << 3; // -Y
+			}
+		}
+	}
+
+	let step_dir = |vx: usize, vy: usize, dir: u8| -> (usize, usize) {
+		match dir {
+			0 => (vx + 1, vy),
+			1 => (vx, vy + 1),
+			2 => (vx - 1, vy),
+			_ => (vx, vy - 1),
+		}
+	};
+
+	let mut loops = Vec::new();
+	for sy in 0..=ih {
+		for sx in 0..=iw {
+			loop {
+				let bits = out_dirs[sy * gw + sx];
+				if bits == 0 {
+					break;
+				}
+				let start_dir = (0..4u8).find(|&d| (bits & (1 << d)) != 0).unwrap();
+				let mut cx = sx;
+				let mut cy = sy;
+				let mut dir = start_dir;
+				let mut ring = Vec::new();
+				let max_steps = (gw * (ih + 1)) * 2 + 4;
+
+				for _ in 0..max_steps {
+					let slot = &mut out_dirs[cy * gw + cx];
+					if (*slot & (1 << dir)) == 0 {
+						break;
+					}
+					*slot &= !(1 << dir);
+					ring.push((cx, cy));
+					let (nx, ny) = step_dir(cx, cy, dir);
+					cx = nx;
+					cy = ny;
+					let next_bits = out_dirs[cy * gw + cx];
+					// Keep filled interior on the right side of edge while closing saddle loops on start_dir.
+					let prefs = [(dir + 1) % 4, dir, (dir + 3) % 4, (dir + 2) % 4];
+					let next_dir = prefs.iter().copied().find(|&d| {
+						(cx == sx && cy == sy && d == start_dir) || (next_bits & (1 << d)) != 0
+					});
+					match next_dir {
+						Some(nd) if cx == sx && cy == sy && nd == start_dir => break,
+						Some(nd) => dir = nd,
+						None => break,
+					}
+				}
+				if ring.len() >= 3 {
+					loops.push(ring);
+				}
+			}
+		}
+	}
+	loops
+}
+
+fn collapse_collinear_closed(pts: &[DelaunayPt], tol: f64) -> Vec<DelaunayPt> {
+	let n = pts.len();
+	if n < 3 {
+		return pts.to_vec();
+	}
+	let mut out = Vec::with_capacity(n);
+	for i in 0..n {
+		let prev = pts[(i + n - 1) % n];
+		let curr = pts[i];
+		let next = pts[(i + 1) % n];
+		let area = orient2d_f64(prev, curr, next);
+		let d2_prev = (curr.x - prev.x).powi(2) + (curr.y - prev.y).powi(2);
+		let d2_next = (next.x - curr.x).powi(2) + (next.y - curr.y).powi(2);
+		let d_span = ((next.x - prev.x).powi(2) + (next.y - prev.y).powi(2)).sqrt();
+		if d2_prev > 1e-12 && d2_next > 1e-12 && (d_span <= 1e-12 || area.abs() > tol * d_span) {
+			out.push(curr);
+		}
+	}
+	out
+}
+
+fn perp_dist_point_segment(p: DelaunayPt, a: DelaunayPt, b: DelaunayPt) -> f64 {
+	let dx = b.x - a.x;
+	let dy = b.y - a.y;
+	let len = (dx * dx + dy * dy).sqrt();
+	if len <= 1e-12 {
+		return ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
+	}
+	((dy * p.x - dx * p.y + b.x * a.y - b.y * a.x).abs()) / len
+}
+
+fn dp_open_recursive(pts: &[DelaunayPt], eps: f64, out: &mut Vec<DelaunayPt>) {
+	if pts.len() <= 2 {
+		out.push(pts[0]);
+		return;
+	}
+	let a = pts[0];
+	let b = pts[pts.len() - 1];
+	let mut best_idx = 0usize;
+	let mut best_d = -1.0f64;
+	for (i, &p) in pts.iter().enumerate().take(pts.len() - 1).skip(1) {
+		let d = perp_dist_point_segment(p, a, b);
+		if d > best_d {
+			best_d = d;
+			best_idx = i;
+		}
+	}
+	if best_d > eps && best_idx > 0 {
+		dp_open_recursive(&pts[..=best_idx], eps, out);
+		dp_open_recursive(&pts[best_idx..], eps, out);
+	} else {
+		out.push(a);
+	}
+}
+
+fn douglas_peucker_closed(pts: &[DelaunayPt], eps: f64) -> Vec<DelaunayPt> {
+	let n = pts.len();
+	if n <= 4 {
+		return pts.to_vec();
+	}
+	let mut i_a = 0usize;
+	let mut best_d2 = -1.0f64;
+	for (i, &p) in pts.iter().enumerate().skip(1) {
+		let d2 = (p.x - pts[0].x).powi(2) + (p.y - pts[0].y).powi(2);
+		if d2 > best_d2 {
+			best_d2 = d2;
+			i_a = i;
+		}
+	}
+	let mut i_b = (i_a + 1) % n;
+	let mut best_d2_b = -1.0f64;
+	for (i, &p) in pts.iter().enumerate() {
+		let d2 = (p.x - pts[i_a].x).powi(2) + (p.y - pts[i_a].y).powi(2);
+		if d2 > best_d2_b {
+			best_d2_b = d2;
+			i_b = i;
+		}
+	}
+	if i_a == i_b {
+		return pts.to_vec();
+	}
+
+	let mut chain1 = Vec::new();
+	let mut k = i_a;
+	loop {
+		chain1.push(pts[k]);
+		if k == i_b {
+			break;
+		}
+		k = (k + 1) % n;
+	}
+	let mut chain2 = Vec::new();
+	let mut k = i_b;
+	loop {
+		chain2.push(pts[k]);
+		if k == i_a {
+			break;
+		}
+		k = (k + 1) % n;
+	}
+
+	let mut res = Vec::new();
+	dp_open_recursive(&chain1, eps, &mut res);
+	dp_open_recursive(&chain2, eps, &mut res);
+	collapse_collinear_closed(&res, 1e-6)
+}
+
+fn polygon_signed_area(pts: &[DelaunayPt]) -> f64 {
+	let n = pts.len();
+	let mut s = 0.0f64;
+	for i in 0..n {
+		let a = pts[i];
+		let b = pts[(i + 1) % n];
+		s += a.x * b.y - b.x * a.y;
+	}
+	0.5 * s
+}
+
+fn point_in_loops(p: DelaunayPt, loops: &[Vec<DelaunayPt>]) -> bool {
+	let mut inside = false;
+	for lp in loops {
+		let m = lp.len();
+		if m < 3 {
+			continue;
+		}
+		for i in 0..m {
+			let a = lp[i];
+			let b = lp[(i + 1) % m];
+			let cond = (a.y > p.y) != (b.y > p.y);
+			if cond {
+				let x_int = (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x;
+				if p.x < x_int {
+					inside = !inside;
+				}
+			}
+		}
+	}
+	inside
+}
+
+fn point_to_segment_dist_sq(p: DelaunayPt, a: DelaunayPt, b: DelaunayPt) -> f64 {
+	let abx = b.x - a.x;
+	let aby = b.y - a.y;
+	let len2 = abx * abx + aby * aby;
+	if len2 <= 1e-12 {
+		return (p.x - a.x).powi(2) + (p.y - a.y).powi(2);
+	}
+	let t = (((p.x - a.x) * abx + (p.y - a.y) * aby) / len2).clamp(0.0, 1.0);
+	let px = a.x + abx * t;
+	let py = a.y + aby * t;
+	(p.x - px).powi(2) + (p.y - py).powi(2)
+}
+
+fn segments_properly_intersect(a: DelaunayPt, b: DelaunayPt, c: DelaunayPt, d: DelaunayPt) -> bool {
+	let o1 = orient2d_f64(a, b, c);
+	let o2 = orient2d_f64(a, b, d);
+	let o3 = orient2d_f64(c, d, a);
+	let o4 = orient2d_f64(c, d, b);
+	let opp12 = (o1 > 1e-8 && o2 < -1e-8) || (o1 < -1e-8 && o2 > 1e-8);
+	let opp34 = (o3 > 1e-8 && o4 < -1e-8) || (o3 < -1e-8 && o4 > 1e-8);
+	opp12 && opp34
+}
+
+#[inline]
+fn edge_key_uv(u: usize, v: usize) -> (usize, usize) {
+	if u < v {
+		(u, v)
+	} else {
+		(v, u)
+	}
+}
+
+fn remove_tri_from_map(tris: &[[usize; 3]], edge_tris: &mut HashMap<(usize, usize), Vec<usize>>, ti: usize) {
+	let t = tris[ti];
+	for &(a, b) in &[(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+		let k = edge_key_uv(a, b);
+		if let Some(list) = edge_tris.get_mut(&k) {
+			list.retain(|&x| x != ti);
+			if list.is_empty() {
+				edge_tris.remove(&k);
+			}
+		}
+	}
+}
+
+fn add_tri_to_map(tris: &[[usize; 3]], edge_tris: &mut HashMap<(usize, usize), Vec<usize>>, ti: usize) {
+	let t = tris[ti];
+	for &(a, b) in &[(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+		let k = edge_key_uv(a, b);
+		let list = edge_tris.entry(k).or_default();
+		if !list.contains(&ti) {
+			list.push(ti);
+		}
+	}
+}
+
+fn extract_directed_opposite(tri: [usize; 3], p: usize, q: usize) -> Option<usize> {
+	if tri[0] == p && tri[1] == q {
+		Some(tri[2])
+	} else if tri[1] == p && tri[2] == q {
+		Some(tri[0])
+	} else if tri[2] == p && tri[0] == q {
+		Some(tri[1])
+	} else {
+		None
+	}
+}
+
+fn enforce_constrained_edges(
+	tris: &mut Vec<[usize; 3]>,
+	pts: &[DelaunayPt],
+	constrained_edges: &[(usize, usize)],
+) {
+	let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+	for ti in 0..tris.len() {
+		add_tri_to_map(tris, &mut edge_tris, ti);
+	}
+	let constrained_set: HashSet<(usize, usize)> = constrained_edges
+		.iter()
+		.map(|&(u, v)| edge_key_uv(u, v))
+		.collect();
+
+	for &(u, v) in constrained_edges {
+		let target_key = edge_key_uv(u, v);
+		if edge_tris.contains_key(&target_key) {
+			continue;
+		}
+		let mut crossing: VecDeque<(usize, usize)> = edge_tris
+			.iter()
+			.filter_map(|(&ek, tlist)| {
+				if tlist.len() == 2
+					&& !constrained_set.contains(&ek)
+					&& ek.0 != u
+					&& ek.0 != v
+					&& ek.1 != u
+					&& ek.1 != v
+					&& segments_properly_intersect(pts[u], pts[v], pts[ek.0], pts[ek.1])
+				{
+					Some(ek)
+				} else {
+					None
+				}
+			})
+			.collect();
+
+		let mut new_edges: Vec<(usize, usize)> = Vec::new();
+		let mut streak = 0usize;
+		while let Some(ek) = crossing.pop_front() {
+			let Some(tlist) = edge_tris.get(&ek) else {
+				continue;
+			};
+			if tlist.len() != 2 {
+				continue;
+			}
+			let t1 = tlist[0];
+			let t2 = tlist[1];
+			let (p, q, r, s) = if let (Some(r), Some(s)) = (
+				extract_directed_opposite(tris[t1], ek.0, ek.1),
+				extract_directed_opposite(tris[t2], ek.1, ek.0),
+			) {
+				(ek.0, ek.1, r, s)
+			} else if let (Some(r), Some(s)) = (
+				extract_directed_opposite(tris[t1], ek.1, ek.0),
+				extract_directed_opposite(tris[t2], ek.0, ek.1),
+			) {
+				(ek.1, ek.0, r, s)
+			} else {
+				continue;
+			};
+
+			if r == s {
+				continue;
+			}
+
+			// Quad (p, s, q, r) is strictly convex iff both flipped triangles are CCW.
+			if orient2d_f64(pts[r], pts[p], pts[s]) > 1e-8 && orient2d_f64(pts[s], pts[q], pts[r]) > 1e-8 {
+				remove_tri_from_map(tris, &mut edge_tris, t1);
+				remove_tri_from_map(tris, &mut edge_tris, t2);
+				tris[t1] = [r, p, s];
+				tris[t2] = [s, q, r];
+				add_tri_to_map(tris, &mut edge_tris, t1);
+				add_tri_to_map(tris, &mut edge_tris, t2);
+				streak = 0;
+
+				let nk = edge_key_uv(r, s);
+				if r != u && r != v && s != u && s != v && segments_properly_intersect(pts[u], pts[v], pts[r], pts[s]) {
+					crossing.push_back(nk);
+				} else {
+					new_edges.push(nk);
+				}
+			} else {
+				crossing.push_back(ek);
+				streak += 1;
+				if streak > crossing.len() * 2 + 16 {
+					break;
+				}
+			}
+		}
+
+		// Step 2: Restore Delaunay condition on newly created unconstrained edges.
+		let max_swaps = new_edges.len() * 12 + 64;
+		let mut swaps = 0usize;
+		while let Some(ek) = new_edges.pop() {
+			if swaps >= max_swaps || ek == target_key || constrained_set.contains(&ek) {
+				continue;
+			}
+			let Some(tlist) = edge_tris.get(&ek) else {
+				continue;
+			};
+			if tlist.len() != 2 {
+				continue;
+			}
+			let t1 = tlist[0];
+			let t2 = tlist[1];
+			let (p, q, r, s) = if let (Some(r), Some(s)) = (
+				extract_directed_opposite(tris[t1], ek.0, ek.1),
+				extract_directed_opposite(tris[t2], ek.1, ek.0),
+			) {
+				(ek.0, ek.1, r, s)
+			} else if let (Some(r), Some(s)) = (
+				extract_directed_opposite(tris[t1], ek.1, ek.0),
+				extract_directed_opposite(tris[t2], ek.0, ek.1),
+			) {
+				(ek.1, ek.0, r, s)
+			} else {
+				continue;
+			};
+
+			if r != s
+				&& orient2d_f64(pts[r], pts[p], pts[s]) > 1e-8
+				&& orient2d_f64(pts[s], pts[q], pts[r]) > 1e-8
+				&& in_circumcircle_ccw(pts[p], pts[q], pts[r], pts[s])
+			{
+				remove_tri_from_map(tris, &mut edge_tris, t1);
+				remove_tri_from_map(tris, &mut edge_tris, t2);
+				tris[t1] = [r, p, s];
+				tris[t2] = [s, q, r];
+				add_tri_to_map(tris, &mut edge_tris, t1);
+				add_tri_to_map(tris, &mut edge_tris, t2);
+				swaps += 1;
+				for (ea, eb) in [(p, s), (s, q), (q, r), (r, p)] {
+					let nek = edge_key_uv(ea, eb);
+					if nek != target_key && !constrained_set.contains(&nek) {
+						new_edges.push(nek);
+					}
+				}
+			}
+		}
 	}
 }

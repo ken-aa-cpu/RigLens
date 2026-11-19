@@ -462,12 +462,14 @@ impl Default for PhysicsProps {
 pub(crate) struct RigidPendulumCtx {
 	pub bob: Vec2,
 	pub state: PhysicsState<2, RigidPendulum>,
+	pub initialized: bool,
 }
 
 /// Physical states for simulating a spring pendulum.
 #[derive(Default)]
 pub(crate) struct SpringPendulumCtx {
 	pub state: PhysicsState<4, SpringPendulum>,
+	pub initialized: bool,
 }
 
 /* --- TEXTURED MESH --- */

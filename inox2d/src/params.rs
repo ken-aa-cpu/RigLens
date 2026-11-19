@@ -148,71 +148,43 @@ impl Param {
 			match binding.values {
 				BindingValues::ZSort(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-
-					comps.get_mut::<ZSort>(binding.node).unwrap().0 +=
-						cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
+					if let Some(zsort) = comps.get_mut::<ZSort>(binding.node) {
+						zsort.0 += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
+					} else {
+						tracing::warn!(
+							param = %self.name,
+							node_uuid = binding.node.0,
+							"Param ZSort binding targets missing node/component; skipping."
+						);
+					}
 				}
-				BindingValues::TransformTX(ref matrix) => {
+				BindingValues::TransformTX(ref matrix)
+				| BindingValues::TransformTY(ref matrix)
+				| BindingValues::TransformSX(ref matrix)
+				| BindingValues::TransformSY(ref matrix)
+				| BindingValues::TransformRX(ref matrix)
+				| BindingValues::TransformRY(ref matrix)
+				| BindingValues::TransformRZ(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-
-					comps
-						.get_mut::<TransformStore>(binding.node)
-						.unwrap()
-						.relative
-						.translation
-						.x += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
-				}
-				BindingValues::TransformTY(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-
-					comps
-						.get_mut::<TransformStore>(binding.node)
-						.unwrap()
-						.relative
-						.translation
-						.y += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
-				}
-				BindingValues::TransformSX(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-
-					comps.get_mut::<TransformStore>(binding.node).unwrap().relative.scale.x *=
-						cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
-				}
-				BindingValues::TransformSY(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-
-					comps.get_mut::<TransformStore>(binding.node).unwrap().relative.scale.y *=
-						cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
-				}
-				BindingValues::TransformRX(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-
-					comps
-						.get_mut::<TransformStore>(binding.node)
-						.unwrap()
-						.relative
-						.rotation
-						.x += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
-				}
-				BindingValues::TransformRY(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-
-					comps
-						.get_mut::<TransformStore>(binding.node)
-						.unwrap()
-						.relative
-						.rotation
-						.y += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
-				}
-				BindingValues::TransformRZ(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-
-					comps
-						.get_mut::<TransformStore>(binding.node)
-						.unwrap()
-						.relative
-						.rotation
-						.z += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
+					let val = cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
+					let Some(ts) = comps.get_mut::<TransformStore>(binding.node) else {
+						tracing::warn!(
+							param = %self.name,
+							node_uuid = binding.node.0,
+							"Param transform binding targets missing node/TransformStore; skipping."
+						);
+						continue;
+					};
+					match binding.values {
+						BindingValues::TransformTX(_) => ts.relative.translation.x += val,
+						BindingValues::TransformTY(_) => ts.relative.translation.y += val,
+						BindingValues::TransformSX(_) => ts.relative.scale.x *= val,
+						BindingValues::TransformSY(_) => ts.relative.scale.y *= val,
+						BindingValues::TransformRX(_) => ts.relative.rotation.x += val,
+						BindingValues::TransformRY(_) => ts.relative.rotation.y += val,
+						BindingValues::TransformRZ(_) => ts.relative.rotation.z += val,
+						_ => unreachable!(),
+					}
 				}
 				BindingValues::Deform(ref matrix) => {
 					let out_top = InterpRange::new(
