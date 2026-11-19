@@ -1,4 +1,4 @@
-//! Dual-channel orchestrator: 120Hz physics + VTS Port 8001 + M2 GPU compute + Spout2 frame forwarding.
+//! Dual-channel orchestrator: 120Hz physics + VTS Port 8001 + M2/M3 GPU compute + Spout2 frame forwarding.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,6 +40,7 @@ impl Default for BoosterConfig {
 pub struct BoosterTelemetry {
 	pub ticks: u64,
 	pub frames_forwarded: u64,
+	pub generated_frames: u64,
 	pub gpu_frames_processed: u64,
 	pub avg_gpu_ms: f32,
 	pub vts_injects: u64,
@@ -127,6 +128,7 @@ impl BoosterPipeline {
 		let mut last_pose = MotionPoseInput::default();
 		let mut prev_t = Instant::now();
 		let mut gpu_total_ms = 0.0f32;
+		let mut first_frame_logged = false;
 
 		while !stop.load(Ordering::Relaxed) {
 			if let Some(limit) = max_ticks {
@@ -164,25 +166,37 @@ impl BoosterPipeline {
 
 			if let (Some(ref mut src), Some(ref mut dst)) = (&mut self.source, &mut self.sink) {
 				if let Ok(Some(frame)) = src.recv_frame() {
-					let out_frame = if let Some(ref mut gpu) = self.gpu {
+					if !first_frame_logged {
+						first_frame_logged = true;
+						println!(
+							"[Spout2] Receiving {}x{} RGBA frames cleanly -> processing & forwarding.",
+							frame.width, frame.height
+						);
+					}
+					let out_frames = if let Some(ref mut gpu) = self.gpu {
 						let t0 = Instant::now();
-						match gpu.process_frame(&frame, &phys_out.motion_hint, dt) {
+						match gpu.process_frame_with_gen(&frame, &phys_out.motion_hint, dt, None) {
 							Ok(processed) => {
 								gpu_total_ms += t0.elapsed().as_secs_f32() * 1000.0;
 								telemetry.gpu_frames_processed += 1;
 								telemetry.avg_gpu_ms = gpu_total_ms / telemetry.gpu_frames_processed as f32;
+								if processed.len() > 1 {
+									telemetry.generated_frames += (processed.len() - 1) as u64;
+								}
 								processed
 							}
 							Err(e) => {
-								warn!("GPU process_frame error (passing raw frame through): {e}");
-								frame
+								warn!("GPU process_frame_with_gen error (passing raw frame through): {e}");
+								vec![frame]
 							}
 						}
 					} else {
-						frame
+						vec![frame]
 					};
-					if dst.send_frame(&out_frame).is_ok() {
-						telemetry.frames_forwarded += 1;
+					for out_frame in out_frames {
+						if dst.send_frame(&out_frame).is_ok() {
+							telemetry.frames_forwarded += 1;
+						}
 					}
 				}
 			}

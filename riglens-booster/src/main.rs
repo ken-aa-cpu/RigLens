@@ -51,15 +51,24 @@ enum Commands {
 		frames: u32,
 		#[arg(long, default_value_t = 60.0)]
 		fps: f32,
-		/// Run frames through the M2 GPU compute pipeline (XPBD + JFA 2.5D rim light + particles)
+		/// Run frames through the M2/M3 GPU compute pipeline (XPBD + JFA 2.5D rim light + particles + 2D DLSS)
 		#[arg(long, default_value_t = false)]
 		gpu_fx: bool,
 		#[arg(long, default_value = "cyberpunk")]
 		rim_theme: String,
 		#[arg(long, default_value_t = 384)]
 		particles: u32,
+		/// M3 Alpha-aware anime super-resolution factor (1.0 - 2.0)
+		#[arg(long, default_value_t = 1.0)]
+		upscale: f32,
+		/// M3 Alpha-aware line-art sharpness (0.0 - 2.0)
+		#[arg(long, default_value_t = 0.65)]
+		sharpness: f32,
+		/// M3 Motion-vector frame generation multiplier (1 = off, 2 = 2x FPS)
+		#[arg(long, default_value_t = 1)]
+		frame_gen: u32,
 	},
-	/// Benchmark the M2 wgpu compute/render pipeline on live GPU hardware
+	/// Benchmark the M2/M3 wgpu compute/render pipeline (XPBD, JFA, Particles, 2D DLSS) on live GPU hardware
 	GpuBench {
 		#[arg(long, default_value_t = 1280)]
 		width: u32,
@@ -69,8 +78,17 @@ enum Commands {
 		frames: u32,
 		#[arg(long, default_value_t = 512)]
 		particles: u32,
+		/// M3 Alpha-aware anime super-resolution factor (1.0 - 2.0)
+		#[arg(long, default_value_t = 1.0)]
+		upscale: f32,
+		/// M3 Alpha-aware line-art sharpness (0.0 - 2.0)
+		#[arg(long, default_value_t = 0.65)]
+		sharpness: f32,
+		/// M3 Motion-vector frame generation multiplier (1 = off, 2 = 2x FPS)
+		#[arg(long, default_value_t = 1)]
+		frame_gen: u32,
 	},
-	/// Run the live 120Hz dual-channel physics + VTS + M2 GPU FX + Spout2 bridge
+	/// Run the live 120Hz dual-channel physics + VTS + M2/M3 GPU FX + Spout2 bridge
 	Run {
 		#[arg(long, default_value = "ws://127.0.0.1:8001")]
 		vts_url: String,
@@ -86,7 +104,7 @@ enum Commands {
 		hz: f32,
 		#[arg(long, default_value_t = 0.55)]
 		wind: f32,
-		/// Disable M2 GPU effects and pass Spout2 frames straight through
+		/// Disable M2/M3 GPU effects and pass Spout2 frames straight through
 		#[arg(long, default_value_t = false)]
 		no_gpu: bool,
 		/// Disable XPBD soft-body warp pass while keeping rim light / particles
@@ -99,6 +117,15 @@ enum Commands {
 		rim_theme: String,
 		#[arg(long, default_value_t = 384)]
 		particles: u32,
+		/// M3 Alpha-aware anime super-resolution factor (1.0 - 2.0)
+		#[arg(long, default_value_t = 1.0)]
+		upscale: f32,
+		/// M3 Alpha-aware line-art sharpness (0.0 - 2.0)
+		#[arg(long, default_value_t = 0.65)]
+		sharpness: f32,
+		/// M3 Motion-vector frame generation multiplier (1 = off, 2 = 2x FPS)
+		#[arg(long, default_value_t = 1)]
+		frame_gen: u32,
 	},
 }
 
@@ -197,9 +224,15 @@ async fn main() {
 			height,
 			frames,
 			particles,
+			upscale,
+			sharpness,
+			frame_gen,
 		} => {
 			let cfg = GpuEffectsConfig {
 				particle_count: particles,
+				upscale_factor: upscale,
+				upscale_sharpness: sharpness,
+				frame_gen_multiplier: frame_gen,
 				..Default::default()
 			};
 			let mut gpu = match GpuFrameProcessor::new_async(cfg).await {
@@ -209,6 +242,7 @@ async fn main() {
 					std::process::exit(1);
 				}
 			};
+			let (out_width, out_height) = gpu.output_dimensions(width, height);
 			let mut rgba = vec![0u8; (width * height * 4) as usize];
 			paint_sphere_rgba(
 				&mut rgba,
@@ -227,19 +261,30 @@ async fn main() {
 				..Default::default()
 			};
 
-			// Warmup passes (compiles target cache & dynamic JFA uniform slots)
+			// Warmup passes (compiles target cache, dynamic JFA uniform slots & prev frame)
 			for _ in 0..2 {
-				gpu.process_frame(&fb, &hint, 1.0 / 60.0).unwrap();
+				gpu.process_frame_with_gen(&fb, &hint, 1.0 / 60.0, None).unwrap();
 			}
 
 			let n = frames.max(1);
 			let mut min_ms = f32::INFINITY;
 			let mut max_ms = 0.0f32;
 			let mut sum_ms = 0.0f32;
-			for _ in 0..n {
+			let mut total_out_frames = 0u64;
+			for i in 0..n {
+				let moving_hint = MotionHint {
+					face_found: true,
+					head_velocity: vec2((i as f32 * 0.4).sin() * 12.0, -3.0),
+					overall_motion: 1.0,
+					wind_vec: vec2(0.7, 0.2),
+					..Default::default()
+				};
 				let t0 = Instant::now();
-				gpu.process_frame(&fb, &hint, 1.0 / 60.0).unwrap();
+				let produced = gpu
+					.process_frame_with_gen(&fb, &moving_hint, 1.0 / 60.0, None)
+					.unwrap();
 				let ms = t0.elapsed().as_secs_f32() * 1000.0;
+				total_out_frames += produced.len() as u64;
 				min_ms = min_ms.min(ms);
 				max_ms = max_ms.max(ms);
 				sum_ms += ms;
@@ -251,12 +296,19 @@ async fn main() {
 					"adapter": gpu.adapter_info(),
 					"width": width,
 					"height": height,
+					"out_width": out_width,
+					"out_height": out_height,
+					"upscale": upscale,
+					"sharpness": sharpness,
+					"frame_gen": frame_gen,
 					"frames": n,
+					"total_out_frames": total_out_frames,
 					"particles": particles,
 					"avg_ms": avg_ms,
 					"min_ms": min_ms,
 					"max_ms": max_ms,
-					"effective_fps": 1000.0 / avg_ms.max(0.001),
+					"effective_input_fps": 1000.0 / avg_ms.max(0.001),
+					"effective_output_fps": (total_out_frames as f32 * 1000.0) / sum_ms.max(0.001),
 				}))
 				.unwrap()
 			);
@@ -270,6 +322,9 @@ async fn main() {
 			gpu_fx,
 			rim_theme,
 			particles,
+			upscale,
+			sharpness,
+			frame_gen,
 		} => {
 			let mut sink = match Spout2Sender::new(&sender) {
 				Ok(s) => s,
@@ -278,19 +333,23 @@ async fn main() {
 					std::process::exit(1);
 				}
 			};
-			let mut gpu = if gpu_fx {
+			let use_gpu = gpu_fx || upscale > 1.0 || frame_gen > 1;
+			let mut gpu = if use_gpu {
 				let cfg = GpuEffectsConfig {
 					ambient_theme: AmbientTheme::parse(&rim_theme).unwrap_or(AmbientTheme::Cyberpunk),
 					particle_count: particles,
+					upscale_factor: upscale,
+					upscale_sharpness: sharpness,
+					frame_gen_multiplier: frame_gen,
 					..Default::default()
 				};
 				match GpuFrameProcessor::new_async(cfg).await {
 					Ok(g) => {
-						println!("M2 GPU FX enabled on '{}'", g.adapter_info());
+						println!("M2/M3 GPU FX enabled on '{}'", g.adapter_info());
 						Some(g)
 					}
 					Err(e) => {
-						eprintln!("Failed to init M2 GPU FX (falling back to raw): {e}");
+						eprintln!("Failed to init M2/M3 GPU FX (falling back to raw): {e}");
 						None
 					}
 				}
@@ -299,7 +358,7 @@ async fn main() {
 			};
 
 			println!(
-				"Streaming {width}x{height} transparent RGBA test over Spout2 sender '{sender}' for {frames} frames (gpu_fx={gpu_fx})..."
+				"Streaming {width}x{height} transparent RGBA test over Spout2 sender '{sender}' for {frames} frames (gpu_fx={use_gpu}, upscale={upscale}x, frame_gen={frame_gen}x)..."
 			);
 			let dt = 1.0 / fps.clamp(1.0, 240.0);
 			let period = Duration::from_secs_f32(dt);
@@ -316,7 +375,7 @@ async fn main() {
 				paint_sphere_rgba(&mut rgba, width, height, ox, oy, rad);
 
 				let fb = FrameBuffer::new(width, height, PixelFormat::Rgba8, rgba.clone()).unwrap();
-				let out_fb = if let Some(ref mut g) = gpu {
+				let out_frames = if let Some(ref mut g) = gpu {
 					let hint = MotionHint {
 						face_found: true,
 						head_velocity: vec2(-t.sin() * 14.0, (t * 1.3).cos() * 18.0),
@@ -324,13 +383,16 @@ async fn main() {
 						wind_vec: vec2(0.8, (t * 0.5).sin() * 0.3),
 						..Default::default()
 					};
-					g.process_frame(&fb, &hint, dt).unwrap_or(fb)
+					g.process_frame_with_gen(&fb, &hint, dt, None)
+						.unwrap_or_else(|_| vec![fb])
 				} else {
-					fb
+					vec![fb]
 				};
-				if let Err(e) = sink.send_frame(&out_fb) {
-					eprintln!("Spout send error at frame {f}: {e}");
-					break;
+				for out_fb in out_frames {
+					if let Err(e) = sink.send_frame(&out_fb) {
+						eprintln!("Spout send error at frame {f}: {e}");
+						break;
+					}
 				}
 				let target = start + period * (f + 1);
 				let now = Instant::now();
@@ -353,7 +415,20 @@ async fn main() {
 			rim_intensity,
 			rim_theme,
 			particles,
+			upscale,
+			sharpness,
+			frame_gen,
 		} => {
+			if let Some(ref in_name) = spout_in {
+				let senders = list_spout_senders();
+				if !senders.iter().any(|s| s == in_name) {
+					eprintln!(
+						"[Spout2] Sender '{in_name}' is not active right now (currently visible: {senders:?}).\n\
+						 -> In VTube Studio: load a model and enable Camera -> Spout2 Output (creates '{in_name}').\n\
+						 -> In OBS: add a 'Spout2 Capture' source selecting '{spout_out}'."
+					);
+				}
+			}
 			let source: Option<Box<dyn FrameSource>> = match spout_in {
 				Some(name) => match Spout2Receiver::new(&name) {
 					Ok(rx) => Some(Box::new(rx)),
@@ -382,6 +457,9 @@ async fn main() {
 				rim_intensity,
 				ambient_theme: AmbientTheme::parse(&rim_theme).unwrap_or(AmbientTheme::Cyberpunk),
 				particle_count: particles,
+				upscale_factor: upscale,
+				upscale_sharpness: sharpness,
+				frame_gen_multiplier: frame_gen,
 				..Default::default()
 			};
 
@@ -416,7 +494,7 @@ async fn main() {
 			};
 			let vts_ok = pipeline.init_vts().await;
 			println!(
-				"RigLens Booster running at {hz}Hz (VTS: {vts_ok}, GPU: {gpu_label}, Spout out: '{spout_out}'). Press Ctrl+C to stop."
+				"RigLens Booster running at {hz}Hz (VTS: {vts_ok}, GPU: {gpu_label}, upscale: {upscale}x, frame_gen: {frame_gen}x, Spout out: '{spout_out}'). Press Ctrl+C to stop."
 			);
 
 			let stop = Arc::new(AtomicBool::new(false));
@@ -428,11 +506,12 @@ async fn main() {
 
 			let telemetry = pipeline.run(stop, None).await;
 			println!(
-				"Booster stopped cleanly: ticks={}, vts_injects={}, vts_errors={}, frames_forwarded={}, gpu_frames={}, avg_gpu_ms={:.3}",
+				"Booster stopped cleanly: ticks={}, vts_injects={}, vts_errors={}, frames_forwarded={}, generated_frames={}, gpu_frames={}, avg_gpu_ms={:.3}",
 				telemetry.ticks,
 				telemetry.vts_injects,
 				telemetry.vts_errors,
 				telemetry.frames_forwarded,
+				telemetry.generated_frames,
 				telemetry.gpu_frames_processed,
 				telemetry.avg_gpu_ms
 			);

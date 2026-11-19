@@ -36,7 +36,7 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 | [`inox2d-opengl`](inox2d-opengl/) | OpenGL renderer with live `.inp` hot-reload and WASM/WebGL support. |
 | [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer, rig auditor / auto-fixer, pure-Rust `.psd` import/export (`PsdFormat`), CLI, JSON-RPC 2.0 MCP server. |
 | [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): viewport, gizmos, parameter pads, timeline and curves. |
-| [`riglens-booster`](riglens-booster/) | Dual-channel GPU co-processor & 120Hz physics booster (`WindField`, coupled spring chains, VTube Studio Port 8001 WebSocket, Windows DX11 Spout2 bridge, `wgpu` XPBD soft-body, JFA 2D SDF 2.5D rim lighting & GPU particles). |
+| [`riglens-booster`](riglens-booster/) | Dual-channel GPU co-processor & 120Hz physics booster (`WindField`, coupled spring chains, VTube Studio Port 8001 WebSocket, Windows DX11 Spout2 bridge, `wgpu` XPBD soft-body, JFA 2D SDF 2.5D rim lighting & particles, M3 2D-Native DLSS alpha-aware super-resolution & dual-tier motion-vector frame generation). |
 | [`.agent/skills/inox2d-vtuber-rigger`](.agent/skills/inox2d-vtuber-rigger/SKILL.md) | Playbook for AI agents rigging VTuber puppets through the MCP server. |
 | [`docs/EXPORTER_PLUGINS.md`](docs/EXPORTER_PLUGINS.md) | Guide for writing custom Rust or `.rigjson`-based exporter plugins. |
 
@@ -66,8 +66,8 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 ## Quick start
 
 ```sh
-# Run tests
-cargo test -p riglens-format -p inox2d -p inox2d-mcp -p inox2d-opengl -p inox2d-gui
+# Run tests (across all 6 workspace crates)
+cargo test -p riglens-format -p inox2d -p inox2d-mcp -p inox2d-opengl -p inox2d-gui -p riglens-booster
 
 # Open the built-in sample in the desktop studio
 cargo run -p inox2d-gui -- --sample
@@ -87,6 +87,11 @@ cargo run -p inox2d-mcp -- export-psd sample_vtuber.inp --out character.psd
 cargo run -p inox2d-mcp -- formats
 cargo run -p inox2d-mcp -- export sample_vtuber.inp --out sample.rigjson --pretty
 cargo run -p inox2d-mcp -- commands
+
+# Dual-channel GPU & 120Hz physics booster (VTube Studio Port 8001 + Spout2 + 2D DLSS)
+cargo run --release -p riglens-booster -- list-spout
+cargo run --release -p riglens-booster -- gpu-bench --width 1280 --height 720 --frames 20 --upscale 2.0 --frame-gen 2
+cargo run --release -p riglens-booster -- run --spout-in VTubeStudioSpout --spout-out RigLensBooster --upscale 1.5 --frame-gen 2
 ```
 
 ### MCP client configuration
@@ -113,7 +118,8 @@ cargo run -p inox2d-mcp -- commands
 - [x] P3 algorithm upgrades: nijilive-parity physics initialization & NaN/panic guards, 10-point rig auditor, and constrained Delaunay meshing with adaptive joint refinement.
 - [x] Co-processor M1 (`riglens-booster`): 120Hz coupled physics/wind engine, VTube Studio Public API (Port `8001`) WebSocket bridge, and Windows DX11 Spout2 shared-texture sender/receiver.
 - [x] Co-processor M2 (`riglens-booster`): `wgpu` GPU compute/render pipeline with screen-space XPBD soft-body mesh deformation, JFA 2D SDF normals & directional 2.5D rim lighting (including Windows screen-edge ambient sync), motion-driven GPU particles, and `gpu-bench`.
-- [ ] Co-processor M3–M4: alpha-aware 2D super-resolution / motion-vector frame generation (2D DLSS), launcher UI, and MCP `booster.*` controls.
+- [x] Co-processor M3 (`riglens-booster`): **2D-Native DLSS** (`upscale_alpha_aware.wgsl` premultiplied-alpha Catmull-Rom super-resolution + edge sharpening, `flow_estimate.wgsl` + `MotionVectorField` dual-tier motion-vector frame generation via `frame_gen_warp.wgsl`).
+- [ ] Co-processor M4: launcher GUI (`inox2d-gui` / tray control) and MCP `booster.*` controls.
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
 - [ ] Rename crates and publish documentation.
 
