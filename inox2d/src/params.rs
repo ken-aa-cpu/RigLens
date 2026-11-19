@@ -8,7 +8,7 @@ use crate::math::{
 	matrix::Matrix2d,
 };
 use crate::node::{
-	components::{DeformSource, DeformStack, Mesh, OpacityStore, TransformStore, ZSort},
+	components::{DeformSource, DeformStack, GridDeformer, Mesh, OpacityStore, PathDeformer, TransformStore, ZSort},
 	InoxNodeUuid,
 };
 use crate::puppet::{InoxNodeTree, Puppet, World};
@@ -52,6 +52,19 @@ fn ranges_out(
 	let out_top = InterpRange::new(matrix[(x_mindex, y_mindex)], matrix[(x_maxdex, y_mindex)]);
 	let out_btm = InterpRange::new(matrix[(x_mindex, y_maxdex)], matrix[(x_maxdex, y_maxdex)]);
 	(out_top, out_btm)
+}
+
+fn deform_vertex_count(comps: &World, id: InoxNodeUuid) -> Option<usize> {
+	if let Some(m) = comps.get::<Mesh>(id) {
+		return Some(m.vertices.len());
+	}
+	if let Some(g) = comps.get::<GridDeformer>(id) {
+		return Some(g.vertex_count());
+	}
+	if let Some(p) = comps.get::<PathDeformer>(id) {
+		return Some(p.vertex_count());
+	}
+	None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -213,30 +226,30 @@ impl Param {
 
 					// deform specified by a parameter must be direct, i.e., in the form of displacements of all vertices
 					let direct_deform = {
-						let Some(mesh) = comps.get::<Mesh>(binding.node) else {
+						let Some(vert_len) = deform_vertex_count(comps, binding.node) else {
 							let target_name = nodes.get_node(binding.node).map(|n| n.name.as_str());
 							tracing::error!(
-								"Deform param target must have an associated Mesh. (Param: {}, Binding Node: {} ({:?}))",
+								"Deform param target must have an associated Mesh or deformer. (Param: {}, Binding Node: {} ({:?}))",
 								self.name,
 								target_name.unwrap_or("<NO NAME>"),
 								binding.node.0
 							);
 							continue;
 						};
+						if vert_len == 0 {
+							continue;
+						}
 
-						let vert_len = mesh.vertices.len();
-						let mut direct_deform: Vec<Vec2> = Vec::with_capacity(vert_len);
-						direct_deform.resize(vert_len, Vec2::ZERO);
+						let mut direct_deform: Vec<Vec2> = vec![Vec2::ZERO; vert_len];
 
 						cell.vec2s_additive(matrix, out_top, out_bottom, binding.interpolate_mode, &mut direct_deform);
 
 						direct_deform
 					};
 
-					comps
-						.get_mut::<DeformStack>(binding.node)
-						.expect("Nodes being deformed must have a DeformStack component.")
-						.push(DeformSource::Param(self.uuid), Deform::Direct(direct_deform));
+					if let Some(stack) = comps.get_mut::<DeformStack>(binding.node) {
+						stack.push(DeformSource::Param(self.uuid), Deform::Direct(direct_deform));
+					}
 				}
 				BindingValues::Opacity(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);

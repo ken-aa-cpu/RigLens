@@ -52,10 +52,11 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 | Target | Status |
 | :--- | :--- |
 | Inochi2D v0.8-era `.inp` | Implemented; verified against the upstream `inox2d` loader. |
-| nijilive-only nodes (`GridDeformer`, `PathDeformer`, `AnimatedPart`, `DynamicComposite`, `Driver`, ...) | **Preserved, not interpreted.** Kept as opaque data and written back unchanged; not rendered or deformed. Loading reports a warning (`warnings` in `puppet.info`). Covered by synthetic regression tests. |
+| `GridDeformer` & `PathDeformer` (`BezierDeformer` alias) | Parsed, serialized, targetable by deform parameters, and propagated into rendered meshes (including nested deformers). Attached path physics drivers are preserved in files with a diagnostic warning. |
+| Remaining nijilive-only nodes (`AnimatedPart`, `DynamicComposite`, `Driver`, `Shapes`, `Mask`, ...) | **Preserved, not interpreted.** Kept as opaque data and written back unchanged; not rendered or deformed. Loading reports a warning (`warnings` in `puppet.info`). Covered by synthetic regression tests. |
 | All 19 nijilive blend modes | Preserved on round trip. The software renderer implements them; the OpenGL renderer approximates some (see source). |
 | Real `.inx` files (Inochi2D example models Aka and Midori, made with nijigenerate-era tools) | **Round trip verified**: node and parameter counts, parameter order, every binding and its interpolation mode, `psdLayerPath`, `emissionStrength`, `mesh.grid_axes`, parameter groups. Unmodelled fields are preserved verbatim. |
-| `Cubic` / `Bezier` interpolation | Preserved in files. **Evaluated as Linear** for now (true cubic is planned), so poses can differ slightly from nijigenerate. |
+| `Cubic` / `Bezier` interpolation | Evaluated with Catmull-Rom cubic (parameters and animations) and Hermite tension (animations), matching nijilive. |
 | Animations, automation, `.inx` `EXT_SECT` from nijigenerate itself | Not yet verified against files saved by current nijigenerate builds. |
 | Live2D `.moc3` | Not supported; proprietary format. Not planned in core. |
 
@@ -100,8 +101,9 @@ cargo run -p inox2d-mcp -- commands
 
 - [x] Lossless round trip for unknown node types and all blend modes (synthetic tests).
 - [x] Round-trip verified on real `.inx` files (Aka, Midori).
-- [ ] True cubic / bezier interpolation, so evaluation matches nijigenerate.
-- [ ] Verify files saved by current nijigenerate builds (animations, automation, deformer nodes).
+- [x] True Catmull-Rom `Cubic` & Hermite `Bezier` evaluation, matching nijilive.
+- [x] P1 deformers: `GridDeformer` and `PathDeformer` (`BezierDeformer`) parse/serialize, parameter bindings, and render propagation.
+- [ ] P1 remaining nodes (`AnimatedPart`, `DynamicComposite`, `Driver`, `Shapes`, `Mask`) & verify files saved by current nijigenerate builds.
 - [ ] Format-neutral rig model and a public **`Exporter` trait** so users can bind their own library and emit any format.
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
 - [ ] Rename crates and publish documentation.

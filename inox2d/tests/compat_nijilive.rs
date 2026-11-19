@@ -63,8 +63,8 @@ fn type_and_fields(puppet: &inox2d::puppet::Puppet) -> Vec<(String, String, Stri
 #[test]
 fn unknown_node_types_survive_round_trip() {
 	let children = [
-		node(4, "Grid", "GridDeformer", r#","dynamic_deformation":true,"vertices":[0,0,1,0,0,1,1,1]"#, &part(5, "InGrid", "Normal")),
-		node(6, "Path", "PathDeformer", r#","vertices":[0,0,1,1],"curveType":1"#, ""),
+		node(4, "Shp", "Shapes", r#","shape":"circle""#, &part(5, "InShape", "Normal")),
+		node(6, "Msk", "Mask", r#","inverted":false"#, ""),
 		node(8, "Anim", "AnimatedPart", r#","sheet":{"rows":2,"cols":2}"#, ""),
 		node(9, "Dyn", "DynamicComposite", r#","opacity":1.0"#, ""),
 		node(11, "Drv", "Driver", r#","param_id":1"#, ""),
@@ -78,7 +78,7 @@ fn unknown_node_types_survive_round_trip() {
 	assert_eq!(before, after, "type names and payload fields must be unchanged");
 	assert!(a.puppet.diagnostics.len() >= 5, "loading must report each unsupported node");
 	// Children of an unknown node are still loaded.
-	assert!(b.puppet.nodes.iter().any(|n| n.name == "InGrid"));
+	assert!(b.puppet.nodes.iter().any(|n| n.name == "InShape"));
 }
 
 #[test]
@@ -343,4 +343,206 @@ fn real_midori_cubic_vs_linear_evaluation() {
 		max_deform_diff > 1e-3 || max_trans_diff > 1e-3,
 		"expected non-zero delta between Cubic and Linear on Midori (deform={max_deform_diff}, trans={max_trans_diff})"
 	);
+}
+
+fn wrap_inp(json: &str) -> Vec<u8> {
+	let mut out = b"TRNSRTS\0".to_vec();
+	out.extend((json.len() as u32).to_be_bytes());
+	out.extend(json.as_bytes());
+	out.extend(b"TEX_SECT");
+	out.extend(0u32.to_be_bytes());
+	out
+}
+
+#[test]
+fn grid_deformer_round_trip_and_bilinear_propagation() {
+	use glam::{vec2, Vec2};
+	use inox2d::node::components::{GridDeformer, GridFormation};
+	use inox2d::node::InoxNodeUuid;
+	use inox2d::render::TexturedMeshRenderCtx;
+
+	// Part vertices: (-10,-10), (0,0), (10,10), (20,0) — last vertex is outside [-10,10] to verify clamping.
+	let child = node(
+		5,
+		"ChildPart",
+		"Part",
+		r#","mesh":{"verts":[-10,-10,0,0,10,10,20,0],"uvs":[0,0,0.5,0.5,1,1,1,0.5],"indices":[0,1,2,0,2,3],"origin":[0,0]},
+		"textures":[0],"blend_mode":"Normal","tint":[1,1,1],"screenTint":[0,0,0],"mask_threshold":0.5,"opacity":1.0,"masks":[]"#,
+		"",
+	);
+	let grid = node(
+		4,
+		"Grid",
+		"GridDeformer",
+		r#","grid_axis_x":[-10.0,10.0],"grid_axis_y":[-10.0,10.0],"formation":"Bilinear","dynamic":false"#,
+		&child,
+	);
+	let root = node(1, "Root", "Node", "", &grid);
+	// 2x2 corners row-major: (x=-10,y=-10), (10,-10), (-10,10), (10,10)
+	// Deforms at p=1.0: [(0,0), (10,0), (0,20), (10,20)]
+	let src = format!(
+		r#"{{"meta":{{"name":"grid","version":"1.0-alpha","thumbnailId":4294967295,"preservePixels":false}},
+		"physics":{{"pixelsPerMeter":1000.0,"gravity":9.8}},"nodes":{root},
+		"param":[{{"uuid":10,"name":"MoveGrid","is_vec2":false,"min":[0,0],"max":[1,0],"defaults":[0,0],
+		  "axis_points":[[0.0,1.0],[0.0]],"bindings":[
+		    {{"node":4,"param_name":"deform","isSet":[[true],[true]],"interpolate_mode":"Linear",
+		      "values":[[[[0,0],[0,0],[0,0],[0,0]]],[[[0,0],[10,0],[0,20],[10,20]]]]}}
+		  ]}}],
+		"automation":[],"groups":[],"animations":{{}}}}"#
+	);
+
+	let (a, mut b) = roundtrip(&wrap_inp(&src));
+	assert!(a.puppet.diagnostics.is_empty(), "GridDeformer must load cleanly without warnings: {:?}", a.puppet.diagnostics);
+	let g = b.puppet.node_comps.get::<GridDeformer>(InoxNodeUuid(4)).expect("GridDeformer component");
+	assert_eq!(g.axis_x, vec![-10.0, 10.0]);
+	assert_eq!(g.axis_y, vec![-10.0, 10.0]);
+	assert_eq!(g.formation, GridFormation::Bilinear);
+	assert!(!g.dynamic);
+
+	b.puppet.init_all();
+	b.puppet.begin_frame();
+	b.puppet.param_ctx.as_mut().unwrap().set("MoveGrid", Vec2::new(1.0, 0.0)).unwrap();
+	b.puppet.end_frame(0.0);
+
+	let rc = b.puppet.render_ctx.as_ref().unwrap();
+	let tm = b.puppet.node_comps.get::<TexturedMeshRenderCtx>(InoxNodeUuid(5)).unwrap();
+	let off = tm.vert_offset as usize;
+	let deforms = &rc.vertex_buffers.deforms[off..off + tm.vert_len];
+	let expected = [vec2(0.0, 0.0), vec2(5.0, 10.0), vec2(10.0, 20.0), vec2(10.0, 10.0)];
+	for (i, (got, exp)) in deforms.iter().zip(expected).enumerate() {
+		assert!((*got - exp).length() < 1e-4, "vert {i}: got={got:?} expected={exp:?}");
+	}
+}
+
+#[test]
+fn path_deformer_round_trip_and_frame_propagation() {
+	use glam::{vec2, Vec2};
+	use inox2d::math::curve::CurveType;
+	use inox2d::node::components::PathDeformer;
+	use inox2d::node::InoxNodeUuid;
+	use inox2d::render::TexturedMeshRenderCtx;
+
+	// Part vertices: (10, 0) on the spine, (10, 5) offset 5 units along +Y normal, (0, 0) at origin.
+	let child = node(
+		5,
+		"Arm",
+		"Part",
+		r#","mesh":{"verts":[10,0,10,5,0,0],"uvs":[0,0,1,0,0,1],"indices":[0,1,2],"origin":[0,0]},
+		"textures":[0],"blend_mode":"Normal","tint":[1,1,1],"screenTint":[0,0,0],"mask_threshold":0.5,"opacity":1.0,"masks":[]"#,
+		"",
+	);
+	let path = node(
+		4,
+		"Spine",
+		"PathDeformer",
+		r#","curve_type":"Spline","vertices":[0,0,10,0,20,0],"dynamic_deformation":false,"physics":{"type":"Pendulum","gravity":9.8}"#,
+		&child,
+	);
+	let alias = node(
+		8,
+		"LegacyBezier",
+		"BezierDeformer",
+		r#","vertices":[0,0,5,5,10,0],"dynamic_deformation":true"#,
+		"",
+	);
+	let root = node(1, "Root", "Node", "", &format!("{path},{alias}"));
+	// Rotate path 90 deg CCW around origin: [0,0, 10,0, 20,0] -> [0,0, 0,10, 0,20]
+	// Deltas: [(0,0), (-10,10), (-20,20)]
+	let src = format!(
+		r#"{{"meta":{{"name":"path","version":"1.0-alpha","thumbnailId":4294967295,"preservePixels":false}},
+		"physics":{{"pixelsPerMeter":1000.0,"gravity":9.8}},"nodes":{root},
+		"param":[{{"uuid":10,"name":"Bend","is_vec2":false,"min":[0,0],"max":[1,0],"defaults":[0,0],
+		  "axis_points":[[0.0,1.0],[0.0]],"bindings":[
+		    {{"node":4,"param_name":"deform","isSet":[[true],[true]],"interpolate_mode":"Linear",
+		      "values":[[[[0,0],[0,0],[0,0]]],[[[0,0],[-10,10],[-20,20]]]]}}
+		  ]}}],
+		"automation":[],"groups":[],"animations":{{}}}}"#
+	);
+
+	let (a, mut b) = roundtrip(&wrap_inp(&src));
+	assert_eq!(a.puppet.diagnostics.len(), 1, "expected 1 diagnostic for attached path physics: {:?}", a.puppet.diagnostics);
+	assert!(a.puppet.diagnostics[0].contains("physics"));
+
+	// Verify BezierDeformer alias decoded as PathDeformer with CurveType::Bezier.
+	let bez = b.puppet.node_comps.get::<PathDeformer>(InoxNodeUuid(8)).expect("BezierDeformer -> PathDeformer");
+	assert_eq!(bez.curve_type, CurveType::Bezier);
+	assert!(bez.dynamic);
+
+	// Verify round-tripped PathDeformer fields and preserved physics ExtraFields.
+	let mut buf = Vec::new();
+	write_inp(&b, &mut buf).unwrap();
+	let out_json = payload_json(&buf);
+	let mut nodes = Vec::new();
+	all_nodes(&out_json["nodes"], &mut nodes);
+	let pj = nodes.iter().find(|n| n["name"] == "Spine").unwrap();
+	assert_eq!(pj["curve_type"], "Spline");
+	assert_eq!(pj["physics"]["type"], "Pendulum");
+
+	b.puppet.init_all();
+	b.puppet.begin_frame();
+	b.puppet.param_ctx.as_mut().unwrap().set("Bend", Vec2::new(1.0, 0.0)).unwrap();
+	b.puppet.end_frame(0.0);
+
+	let rc = b.puppet.render_ctx.as_ref().unwrap();
+	let tm = b.puppet.node_comps.get::<TexturedMeshRenderCtx>(InoxNodeUuid(5)).unwrap();
+	let off = tm.vert_offset as usize;
+	let deforms = &rc.vertex_buffers.deforms[off..off + tm.vert_len];
+	// (10,0) -> (0,10): delta (-10,10); (10,5) -> (-5,10): delta (-15,5); (0,0) -> (0,0): delta (0,0)
+	assert!((deforms[0] - vec2(-10.0, 10.0)).length() < 1e-2, "v0 got {:?}", deforms[0]);
+	assert!((deforms[1] - vec2(-15.0, 5.0)).length() < 1e-2, "v1 got {:?}", deforms[1]);
+	assert!(deforms[2].length() < 1e-2, "v2 got {:?}", deforms[2]);
+}
+
+#[test]
+fn nested_path_to_grid_does_not_double_deform() {
+	use glam::{vec2, Vec2};
+	use inox2d::node::InoxNodeUuid;
+	use inox2d::render::TexturedMeshRenderCtx;
+
+	let leaf = node(
+		6,
+		"Leaf",
+		"Part",
+		r#","mesh":{"verts":[0,0,5,0,5,5],"uvs":[0,0,1,0,1,1],"indices":[0,1,2],"origin":[0,0]},
+		"textures":[0],"blend_mode":"Normal","tint":[1,1,1],"screenTint":[0,0,0],"mask_threshold":0.5,"opacity":1.0,"masks":[]"#,
+		"",
+	);
+	let grid = node(
+		5,
+		"MidGrid",
+		"GridDeformer",
+		r#","grid_axis_x":[-10.0,10.0],"grid_axis_y":[-10.0,10.0],"formation":"Bilinear","dynamic":false"#,
+		&leaf,
+	);
+	let path = node(
+		4,
+		"OuterPath",
+		"PathDeformer",
+		r#","curve_type":"Spline","vertices":[0,0,10,0],"dynamic_deformation":false"#,
+		&grid,
+	);
+	let root = node(1, "Root", "Node", "", &path);
+	let src = format!(
+		r#"{{"meta":{{"name":"nested","version":"1.0-alpha","thumbnailId":4294967295,"preservePixels":false}},
+		"physics":{{"pixelsPerMeter":1000.0,"gravity":9.8}},"nodes":{root},
+		"param":[{{"uuid":10,"name":"Shift","is_vec2":false,"min":[0,0],"max":[1,0],"defaults":[0,0],
+		  "axis_points":[[0.0,1.0],[0.0]],"bindings":[
+		    {{"node":4,"param_name":"deform","isSet":[[true],[true]],"interpolate_mode":"Linear",
+		      "values":[[[[0,0],[0,0]]],[[[10,0],[10,0]]]]}}
+		  ]}}],
+		"automation":[],"groups":[],"animations":{{}}}}"#
+	);
+
+	let mut model = parse_inp(&wrap_inp(&src)[..]).unwrap();
+	model.puppet.init_all();
+	model.puppet.begin_frame();
+	model.puppet.param_ctx.as_mut().unwrap().set("Shift", Vec2::new(1.0, 0.0)).unwrap();
+	model.puppet.end_frame(0.0);
+
+	let rc = model.puppet.render_ctx.as_ref().unwrap();
+	let tm = model.puppet.node_comps.get::<TexturedMeshRenderCtx>(InoxNodeUuid(6)).unwrap();
+	let off = tm.vert_offset as usize;
+	for (i, d) in rc.vertex_buffers.deforms[off..off + tm.vert_len].iter().enumerate() {
+		assert!((*d - vec2(10.0, 0.0)).length() < 1e-4, "vert {i}: got {d:?} (must be (10,0), not doubled)");
+	}
 }

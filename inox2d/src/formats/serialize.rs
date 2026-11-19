@@ -5,7 +5,7 @@ use json::JsonValue;
 use crate::animation::PuppetAnimation;
 use crate::math::transform::TransformOffset;
 use crate::node::components::{
-	ExtraFields, MeshExtraFields, RawNodeData,
+	ExtraFields, GridDeformer, MeshExtraFields, PathDeformer, RawNodeData,
 	BlendMode, Composite, Drawable, MaskMode, Masks, Mesh, MeshGroup, PhysicsModel, PhysicsParamMapMode,
 	SimplePhysics, TexturedMesh,
 };
@@ -235,6 +235,8 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 	let has_comp = puppet.node_comps.get::<Composite>(id);
 	let has_phys = puppet.node_comps.get::<SimplePhysics>(id);
 	let has_mg = puppet.node_comps.get::<MeshGroup>(id);
+	let has_grid = puppet.node_comps.get::<GridDeformer>(id);
+	let has_path = puppet.node_comps.get::<PathDeformer>(id);
 
 	let has_raw = puppet.node_comps.get::<RawNodeData>(id);
 
@@ -244,6 +246,10 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 		"Part"
 	} else if has_mg.is_some() && has_mesh.is_some() {
 		"MeshGroup"
+	} else if has_grid.is_some() {
+		"GridDeformer"
+	} else if has_path.is_some() {
+		"PathDeformer"
 	} else if has_comp.is_some() {
 		"Composite"
 	} else if has_phys.is_some() {
@@ -287,6 +293,35 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 			}
 			if let Some(mesh) = has_mesh {
 				obj.insert("mesh", serialize_mesh(mesh));
+			}
+		}
+		"GridDeformer" => {
+			if let Some(g) = has_grid {
+				obj.insert(
+					"grid_axis_x",
+					JsonValue::Array(g.axis_x.iter().copied().map(JsonValue::from).collect()),
+				);
+				obj.insert(
+					"grid_axis_y",
+					JsonValue::Array(g.axis_y.iter().copied().map(JsonValue::from).collect()),
+				);
+				obj.insert("formation", JsonValue::String(g.formation.as_str().to_owned()));
+				obj.insert("dynamic", JsonValue::Boolean(g.dynamic));
+			}
+		}
+		"PathDeformer" => {
+			if let Some(p) = has_path {
+				if p.physics_only {
+					obj.insert("physics_only", JsonValue::Boolean(true));
+				}
+				obj.insert("curve_type", JsonValue::String(p.curve_type.as_str().to_owned()));
+				let mut verts = Vec::with_capacity(p.vertices.len() * 2);
+				for v in &p.vertices {
+					verts.push(JsonValue::from(v.x));
+					verts.push(JsonValue::from(v.y));
+				}
+				obj.insert("vertices", JsonValue::Array(verts));
+				obj.insert("dynamic_deformation", JsonValue::Boolean(p.dynamic));
 			}
 		}
 		_ => {

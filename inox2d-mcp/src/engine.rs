@@ -10,7 +10,8 @@ use inox2d::math::interp::InterpolateMode;
 use inox2d::math::transform::TransformOffset;
 use inox2d::model::{Model, ModelTexture, VendorData};
 use inox2d::node::components::{
-	BlendMode, Composite, Drawable, Mask, MaskMode, Masks, Mesh, MeshGroup, PhysicsModel, SimplePhysics, TexturedMesh,
+	BlendMode, Composite, Drawable, GridDeformer, Mask, MaskMode, Masks, Mesh, MeshGroup, PathDeformer,
+	PhysicsModel, RawNodeData, SimplePhysics, TexturedMesh,
 };
 use inox2d::node::{InoxNode, InoxNodeUuid};
 use inox2d::puppet::Puppet;
@@ -1637,10 +1638,16 @@ impl Session {
 			.pre_order_iter()
 			.map(|n| {
 				let comps = &self.model.puppet.node_comps;
-				let kind = if comps.get::<TexturedMesh>(n.uuid).is_some() {
+				let kind: &str = if let Some(raw) = comps.get::<RawNodeData>(n.uuid) {
+					raw.type_name.as_str()
+				} else if comps.get::<TexturedMesh>(n.uuid).is_some() {
 					"Part"
 				} else if comps.get::<MeshGroup>(n.uuid).is_some() {
 					"MeshGroup"
+				} else if comps.get::<GridDeformer>(n.uuid).is_some() {
+					"GridDeformer"
+				} else if comps.get::<PathDeformer>(n.uuid).is_some() {
+					"PathDeformer"
 				} else if comps.get::<Composite>(n.uuid).is_some() {
 					"Composite"
 				} else if comps.get::<SimplePhysics>(n.uuid).is_some() {
@@ -1651,6 +1658,8 @@ impl Session {
 				let (verts, tris) = comps
 					.get::<Mesh>(n.uuid)
 					.map(|m| (m.vertices.len(), m.indices.len() / 3))
+					.or_else(|| comps.get::<GridDeformer>(n.uuid).map(|g| (g.vertex_count(), 0)))
+					.or_else(|| comps.get::<PathDeformer>(n.uuid).map(|p| (p.vertex_count(), 0)))
 					.unwrap_or((0, 0));
 				json::object! {
 					uuid: n.uuid.0,

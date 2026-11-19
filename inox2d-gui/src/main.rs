@@ -19,7 +19,8 @@ use inox2d::math::camera::Camera;
 use inox2d::math::interp::InterpolateMode;
 use inox2d::model::Model;
 use inox2d::node::components::{
-	Drawable, MaskMode, Mesh, MeshGroup, SimplePhysics, TexturedMesh, TransformStore,
+	Drawable, GridDeformer, MaskMode, Mesh, MeshGroup, PathDeformer, RawNodeData, SimplePhysics, TexturedMesh,
+	TransformStore,
 };
 use inox2d::node::InoxNodeUuid;
 use inox2d::render::{CompositeRenderCtx, TexturedMeshRenderCtx};
@@ -2160,14 +2161,21 @@ impl Inox2dStudioApp {
 
 			if let Some(id) = self.selected_node {
 				if let Some(node) = self.session.model.puppet.nodes.get_node(id).cloned() {
-					let is_mesh = self.session.model.puppet.node_comps.get::<TexturedMesh>(id).is_some();
-					let is_mg = self.session.model.puppet.node_comps.get::<MeshGroup>(id).is_some();
-					let kind_tag = if is_mg {
-						"MeshGroup"
+					let comps = &self.session.model.puppet.node_comps;
+					let is_mesh = comps.get::<TexturedMesh>(id).is_some();
+					let is_mg = comps.get::<MeshGroup>(id).is_some();
+					let kind_tag: String = if let Some(raw) = comps.get::<RawNodeData>(id) {
+						raw.type_name.clone()
+					} else if is_mg {
+						"MeshGroup".to_owned()
+					} else if comps.get::<GridDeformer>(id).is_some() {
+						"GridDeformer".to_owned()
+					} else if comps.get::<PathDeformer>(id).is_some() {
+						"PathDeformer".to_owned()
 					} else if is_mesh {
-						"Part"
+						"Part".to_owned()
 					} else {
-						"Node"
+						"Node".to_owned()
 					};
 
 					egui::Grid::new("prop_grid").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
@@ -2767,19 +2775,31 @@ impl Inox2dStudioApp {
 			.iter()
 			.filter(|n| n.uuid != self.session.model.puppet.nodes.root_node_id)
 			.map(|n| {
-				let is_part = self.session.model.puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some();
-				let is_mg = self.session.model.puppet.node_comps.get::<MeshGroup>(n.uuid).is_some();
-				let has_mask = self
-					.session
-					.model
-					.puppet
-					.node_comps
+				let comps = &self.session.model.puppet.node_comps;
+				let is_part = comps.get::<TexturedMesh>(n.uuid).is_some();
+				let is_mg = comps.get::<MeshGroup>(n.uuid).is_some();
+				let is_grid = comps.get::<GridDeformer>(n.uuid).is_some();
+				let is_path = comps.get::<PathDeformer>(n.uuid).is_some();
+				let is_raw = comps.get::<RawNodeData>(n.uuid).is_some();
+				let has_mask = comps
 					.get::<Drawable>(n.uuid)
 					.and_then(|d| d.masks.as_ref())
 					.map(|m| !m.masks.is_empty())
 					.unwrap_or(false);
-				let has_phys = self.session.model.puppet.node_comps.get::<SimplePhysics>(n.uuid).is_some();
-				(n.uuid, n.name.clone(), n.enabled, n.zsort, is_part, is_mg, has_mask, has_phys)
+				let has_phys = comps.get::<SimplePhysics>(n.uuid).is_some();
+				(
+					n.uuid,
+					n.name.clone(),
+					n.enabled,
+					n.zsort,
+					is_part,
+					is_mg,
+					is_grid,
+					is_path,
+					is_raw,
+					has_mask,
+					has_phys,
+				)
 			})
 			.collect();
 
@@ -2796,11 +2816,13 @@ impl Inox2dStudioApp {
 
 		let mut left_ui = ui.child_ui(left_rect, egui::Layout::top_down(egui::Align::Min), None);
 		egui::ScrollArea::vertical().id_source("layers_scroll").show(&mut left_ui, |ui| {
-			for (idx, (uid, name, enabled, zsort, is_part, is_mg, has_mask, has_phys)) in nodes_list.iter().enumerate() {
+			for (idx, (uid, name, enabled, zsort, is_part, is_mg, is_grid, is_path, is_raw, has_mask, has_phys)) in
+				nodes_list.iter().enumerate()
+			{
 				let is_sel = self.selected_node == Some(*uid);
 				let tag_col = if *has_phys {
 					TIMELINE_EMERALD
-				} else if *is_mg {
+				} else if *is_mg || *is_grid || *is_path {
 					TIMELINE_VIOLET
 				} else if *has_mask {
 					AUDIT_WARN_AMBER
@@ -2820,10 +2842,16 @@ impl Inox2dStudioApp {
 
 				let mut icon_lbl = if *is_mg {
 					"[MG] "
+				} else if *is_grid {
+					"[GD] "
+				} else if *is_path {
+					"[PD] "
 				} else if *has_phys {
 					"[PH] "
 				} else if *is_part {
 					""
+				} else if *is_raw {
+					"[RAW] "
 				} else {
 					"[G] "
 				};
@@ -2920,7 +2948,7 @@ impl Inox2dStudioApp {
 			let span_w = (anim_len as f32 * px_per_frame).min(right_rect.width() - 24.0).max(40.0);
 			let mut kf_hits: Vec<(egui::Pos2, String, u8, i32)> = Vec::new();
 
-			for (idx, (uid, name, _, _, _, _, _, _)) in nodes_list.iter().enumerate() {
+			for (idx, (uid, name, _, _, _, _, _, _, _, _, _)) in nodes_list.iter().enumerate() {
 				let y = right_rect.top() + ruler_h + idx as f32 * (row_h + 2.0) + 3.0;
 				if y + row_h > right_rect.bottom() {
 					break;

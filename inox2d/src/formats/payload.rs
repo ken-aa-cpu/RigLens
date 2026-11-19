@@ -4,6 +4,7 @@ use glam::{vec2, vec3, Vec2};
 use json::JsonValue;
 
 use crate::animation::{AnimationLane, Keyframe, PuppetAnimation};
+use crate::math::curve::CurveType;
 use crate::math::interp::InterpolateMode;
 use crate::math::matrix::{Matrix2d, Matrix2dFromSliceVecsError};
 use crate::math::transform::TransformOffset;
@@ -342,10 +343,10 @@ impl Puppet {
 		data: JsonObject,
 		load_node_data_custom: Option<&impl Fn(&mut Self, &str, JsonObject) -> InoxParseResult<()>>,
 	) -> InoxParseResult<()> {
-		if matches!(ty, "Node" | "Part" | "Composite" | "SimplePhysics" | "MeshGroup") {
+		if let Some(managed_keys) = managed_keys_for_type(ty) {
 			let mut extra = json::object::Object::new();
 			for (k, v) in data.0.iter() {
-				if !NODE_MANAGED_KEYS.contains(&k) {
+				if !managed_keys.contains(&k) {
 					extra.insert(k, v.clone());
 				}
 			}
@@ -391,6 +392,72 @@ impl Puppet {
 				);
 				self.node_comps
 					.add(id, vals("mesh", deserialize_mesh(data.get_object("mesh")?))?);
+			}
+			"GridDeformer" => {
+				let axis_x = GridDeformer::normalize_axis(
+					data.get_list("grid_axis_x").map(deserialize_f32s).unwrap_or_default(),
+				);
+				let axis_y = GridDeformer::normalize_axis(
+					data.get_list("grid_axis_y").map(deserialize_f32s).unwrap_or_default(),
+				);
+				let formation = data
+					.0
+					.get("formation")
+					.and_then(|v| {
+						v.as_str()
+							.and_then(GridFormation::from_name)
+							.or_else(|| v.as_i64().and_then(GridFormation::from_ordinal))
+					})
+					.unwrap_or_default();
+				let dynamic = data.get_bool("dynamic").unwrap_or(false);
+				let translate_children = data.get_bool("translate_children").unwrap_or(true);
+				self.node_comps.add(
+					id,
+					GridDeformer {
+						axis_x,
+						axis_y,
+						formation,
+						dynamic,
+						translate_children,
+					},
+				);
+			}
+			"PathDeformer" | "BezierDeformer" => {
+				let mut curve_type = if ty == "BezierDeformer" {
+					CurveType::Bezier
+				} else {
+					CurveType::Spline
+				};
+				if let Some(ct_val) = data.0.get("curve_type") {
+					if let Some(ct) = ct_val
+						.as_str()
+						.and_then(CurveType::from_name)
+						.or_else(|| ct_val.as_i64().and_then(CurveType::from_ordinal))
+					{
+						curve_type = ct;
+					}
+				}
+				let vertices = match data.get_list("vertices") {
+					Ok(vals) if !vals.is_empty() => deserialize_vec2s_flat(vals)?,
+					_ => Vec::new(),
+				};
+				let dynamic = data.get_bool("dynamic_deformation").unwrap_or(false);
+				let physics_only = data.get_bool("physics_only").unwrap_or(false);
+				if data.0.get("physics").is_some_and(|v| !v.is_null()) {
+					self.diagnostics.push(format!(
+						"node {} (PathDeformer) has attached path physics driver; preserved in file but not simulated",
+						id.0
+					));
+				}
+				self.node_comps.add(
+					id,
+					PathDeformer {
+						curve_type,
+						vertices,
+						dynamic,
+						physics_only,
+					},
+				);
 			}
 			custom => {
 				let mut fields = data.0.clone();
@@ -452,37 +519,108 @@ impl Puppet {
 /// Parameter keys this crate models; everything else is kept as extras.
 const PARAM_MANAGED_KEYS: &[&str] = &["uuid", "name", "is_vec2", "min", "max", "defaults", "axis_points", "bindings"];
 
-/// Node keys this crate models; everything else is kept as extras (see `ExtraFields`).
-const NODE_MANAGED_KEYS: &[&str] = &[
-	"uuid",
-	"name",
-	"type",
-	"enabled",
-	"zsort",
-	"transform",
-	"lockToRoot",
-	"children",
-	"mesh",
-	"textures",
-	"blend_mode",
-	"tint",
-	"screenTint",
-	"mask_threshold",
-	"masks",
-	"opacity",
-	"param",
-	"model_type",
-	"map_mode",
-	"gravity",
-	"length",
-	"frequency",
-	"angle_damping",
-	"length_damping",
-	"output_scale",
-	"local_only",
-	"dynamic_deformation",
-	"translate_children",
-];
+/// Per-node-type keys that this crate models; everything else is kept as extras (see `ExtraFields`).
+fn managed_keys_for_type(ty: &str) -> Option<&'static [&'static str]> {
+	Some(match ty {
+		"Node" => &["uuid", "name", "type", "enabled", "zsort", "transform", "lockToRoot", "children"],
+		"Part" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"mesh",
+			"textures",
+			"blend_mode",
+			"tint",
+			"screenTint",
+			"mask_threshold",
+			"masks",
+			"opacity",
+		],
+		"Composite" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"blend_mode",
+			"tint",
+			"screenTint",
+			"mask_threshold",
+			"masks",
+			"opacity",
+		],
+		"SimplePhysics" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"param",
+			"model_type",
+			"map_mode",
+			"gravity",
+			"length",
+			"frequency",
+			"angle_damping",
+			"length_damping",
+			"output_scale",
+			"local_only",
+		],
+		"MeshGroup" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"mesh",
+			"dynamic_deformation",
+			"translate_children",
+		],
+		"GridDeformer" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"grid_axis_x",
+			"grid_axis_y",
+			"formation",
+			"dynamic",
+		],
+		"PathDeformer" | "BezierDeformer" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"curve_type",
+			"vertices",
+			"dynamic_deformation",
+			"physics_only",
+		],
+		_ => return None,
+	})
+}
 
 fn deserialize_params(vals: &[json::JsonValue]) -> InoxParseResult<HashMap<String, Param>> {
 	let mut params = HashMap::new();

@@ -1,14 +1,17 @@
 mod deform_stack;
 mod vertex_buffers;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem::swap;
 
-use glam::{vec2, vec3, Vec2};
+use glam::{vec2, vec3, Mat4, Vec2};
 
+use crate::math::curve::{closest_point, evaluate_derivative, evaluate_point};
 use crate::math::deform::Deform;
 use crate::node::{
-	components::{DeformSource, DeformStack, Mask, Masks, Mesh, MeshGroup, TransformStore, ZSort},
+	components::{
+		DeformSource, DeformStack, GridDeformer, Mask, Masks, Mesh, MeshGroup, PathDeformer, TransformStore, ZSort,
+	},
 	drawables::{CompositeComponents, DrawableKind, TexturedMeshComponents},
 	InoxNodeUuid,
 };
@@ -42,6 +45,66 @@ pub struct RenderCtx {
 	/// - including standalone parts and composite parents,
 	/// - excluding (TODO: plain mesh masks) and composite children.
 	pub root_drawables_zsorted: Vec<InoxNodeUuid>,
+	/// Cached closest curve parameter `t` per `(path_deformer_uuid, descendant_target_uuid)` vertex.
+	path_t_cache: HashMap<(InoxNodeUuid, InoxNodeUuid), Vec<f32>>,
+}
+
+fn rest_absolute_transforms(nodes: &InoxNodeTree) -> HashMap<InoxNodeUuid, Mat4> {
+	let mut out = HashMap::new();
+	let root_id = nodes.root_node_id;
+	let root_mat = nodes
+		.get_node(root_id)
+		.map(|n| n.trans_offset.to_matrix())
+		.unwrap_or(Mat4::IDENTITY);
+	out.insert(root_id, root_mat);
+	for node in nodes.pre_order_iter().skip(1) {
+		let base = if node.lock_to_root {
+			root_mat
+		} else {
+			let parent = nodes.get_parent(node.uuid);
+			out.get(&parent.uuid).copied().unwrap_or(root_mat)
+		};
+		out.insert(node.uuid, base * node.trans_offset.to_matrix());
+	}
+	out
+}
+
+fn node_must_propagate(comps: &World, id: InoxNodeUuid) -> bool {
+	comps.get::<MeshGroup>(id).is_none() && comps.get::<GridDeformer>(id).is_none()
+}
+
+fn collect_propagated_descendants(nodes: &InoxNodeTree, comps: &World, root: InoxNodeUuid) -> Vec<InoxNodeUuid> {
+	let mut out = Vec::new();
+	let mut stack: Vec<InoxNodeUuid> = nodes.get_children(root).map(|c| c.uuid).collect();
+	while let Some(cid) = stack.pop() {
+		out.push(cid);
+		if node_must_propagate(comps, cid) {
+			for gc in nodes.get_children(cid) {
+				stack.push(gc.uuid);
+			}
+		}
+	}
+	out
+}
+
+fn node_deform_target_verts(comps: &World, id: InoxNodeUuid) -> Option<(Vec<Vec2>, Vec2)> {
+	if let Some(mesh) = comps.get::<Mesh>(id) {
+		return Some((mesh.vertices.clone(), mesh.origin));
+	}
+	if let Some(grid) = comps.get::<GridDeformer>(id) {
+		return Some((grid.rest_vertices(), Vec2::ZERO));
+	}
+	None
+}
+
+fn combine_node_deforms(nodes: &InoxNodeTree, comps: &World, id: InoxNodeUuid, len: usize) -> Option<Vec<Vec2>> {
+	let stack = comps.get::<DeformStack>(id)?;
+	if stack.deform_len != len {
+		return None;
+	}
+	let mut out = vec![Vec2::ZERO; len];
+	stack.combine(nodes, comps, &mut out);
+	Some(out)
 }
 
 impl RenderCtx {
@@ -59,20 +122,65 @@ impl RenderCtx {
 			});
 		}
 
-		let mut meshgroup_children = HashSet::new();
+		let rest_abs = rest_absolute_transforms(nodes);
+		let mut deformer_influenced = HashSet::new();
+		let mut path_t_cache = HashMap::new();
+
 		for node in nodes.iter() {
+			let is_deformer = comps.get::<MeshGroup>(node.uuid).is_some()
+				|| comps.get::<GridDeformer>(node.uuid).is_some()
+				|| comps.get::<PathDeformer>(node.uuid).is_some();
+			if !is_deformer {
+				continue;
+			}
+			let descendants = collect_propagated_descendants(nodes, comps, node.uuid);
+			for &cid in &descendants {
+				deformer_influenced.insert(cid);
+			}
+			if let Some(path) = comps.get::<PathDeformer>(node.uuid) {
+				if path.vertices.len() >= 2 {
+					let path_inv = rest_abs.get(&node.uuid).copied().unwrap_or(Mat4::IDENTITY).inverse();
+					if path_inv.is_finite() {
+						for &cid in &descendants {
+							if let Some((verts, origin)) = node_deform_target_verts(comps, cid) {
+								let child_abs = rest_abs.get(&cid).copied().unwrap_or(Mat4::IDENTITY);
+								let to_path = path_inv * child_abs;
+								if to_path.is_finite() {
+									let ts = verts
+										.iter()
+										.map(|&v| {
+											let local = vec3(v.x - origin.x, v.y - origin.y, 0.0);
+											let p_path = to_path.transform_point3(local).truncate();
+											closest_point(path.curve_type, &path.vertices, p_path, 100)
+										})
+										.collect();
+									path_t_cache.insert((node.uuid, cid), ts);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		for node in nodes.iter() {
+			let needs_stack = nodes_to_deform.contains(&node.uuid) || deformer_influenced.contains(&node.uuid);
+			if !needs_stack {
+				continue;
+			}
 			if comps.get::<MeshGroup>(node.uuid).is_some() {
 				if let Some(mesh) = comps.get::<Mesh>(node.uuid) {
-					if nodes_to_deform.contains(&node.uuid) {
+					if !mesh.vertices.is_empty() {
 						comps.set(node.uuid, DeformStack::new(mesh.vertices.len()));
 					}
 				}
-				let mut stack: Vec<InoxNodeUuid> = nodes.get_children(node.uuid).map(|c| c.uuid).collect();
-				while let Some(cid) = stack.pop() {
-					meshgroup_children.insert(cid);
-					for gc in nodes.get_children(cid) {
-						stack.push(gc.uuid);
-					}
+			} else if let Some(grid) = comps.get::<GridDeformer>(node.uuid) {
+				if grid.vertex_count() > 0 {
+					comps.set(node.uuid, DeformStack::new(grid.vertex_count()));
+				}
+			} else if let Some(path) = comps.get::<PathDeformer>(node.uuid) {
+				if path.vertex_count() > 0 {
+					comps.set(node.uuid, DeformStack::new(path.vertex_count()));
 				}
 			}
 		}
@@ -100,8 +208,8 @@ impl RenderCtx {
 							},
 						);
 
-						// TexturedMesh deformed by params or an ancestor MeshGroup needs a DeformStack
-						if nodes_to_deform.contains(&node.uuid) || meshgroup_children.contains(&node.uuid) {
+						// TexturedMesh deformed by params or an ancestor deformer needs a DeformStack
+						if nodes_to_deform.contains(&node.uuid) || deformer_influenced.contains(&node.uuid) {
 							comps.set(node.uuid, DeformStack::new(vert_len));
 						}
 					}
@@ -140,6 +248,7 @@ impl RenderCtx {
 		Self {
 			vertex_buffers,
 			root_drawables_zsorted,
+			path_t_cache,
 		}
 	}
 
@@ -154,55 +263,191 @@ impl RenderCtx {
 
 	/// Update zsort-ordered info and deform buffer content inside self, according to updated puppet.
 	pub(crate) fn update(&mut self, nodes: &InoxNodeTree, comps: &mut World) {
-		// Propagate MeshGroup deformations top-down before combining Part deforms.
+		// Propagate MeshGroup, GridDeformer and PathDeformer deformations top-down before combining Part deforms.
 		for node in nodes.pre_order_iter().skip(1) {
-			if comps.get::<MeshGroup>(node.uuid).is_none() {
-				continue;
-			}
-			let Some(mg_mesh) = comps.get::<Mesh>(node.uuid).cloned() else {
-				continue;
-			};
-			let Some(mg_stack) = comps.get::<DeformStack>(node.uuid) else {
-				continue;
-			};
-			let mut mg_deforms = vec![Vec2::ZERO; mg_mesh.vertices.len()];
-			mg_stack.combine(nodes, comps, &mut mg_deforms);
-			if !mg_deforms.iter().any(|d| d.length_squared() > 1e-8) {
-				continue;
-			}
-			let mg_abs = comps.get::<TransformStore>(node.uuid).unwrap().absolute;
-			let mg_inv = mg_abs.inverse();
-
-			let mut stack: Vec<InoxNodeUuid> = nodes.get_children(node.uuid).map(|c| c.uuid).collect();
-			while let Some(cid) = stack.pop() {
-				for gc in nodes.get_children(cid) {
-					stack.push(gc.uuid);
-				}
-				if comps.get::<DeformStack>(cid).is_none() {
-					continue;
-				}
-				let Some(child_mesh) = comps.get::<Mesh>(cid).cloned() else {
+			if comps.get::<MeshGroup>(node.uuid).is_some() {
+				let Some(mg_mesh) = comps.get::<Mesh>(node.uuid).cloned() else {
 					continue;
 				};
-				let child_abs = comps.get::<TransformStore>(cid).unwrap().absolute;
-				let to_mg = mg_inv * child_abs;
-				let to_child = child_abs.inverse() * mg_abs;
+				let Some(mg_deforms) = combine_node_deforms(nodes, comps, node.uuid, mg_mesh.vertices.len()) else {
+					continue;
+				};
+				if !mg_deforms.iter().any(|d| d.length_squared() > 1e-8) {
+					continue;
+				}
+				let mg_abs = comps.get::<TransformStore>(node.uuid).unwrap().absolute;
+				let mg_inv = mg_abs.inverse();
+				if !mg_inv.is_finite() {
+					continue;
+				}
 
-				let child_deforms: Vec<Vec2> = child_mesh
+				for cid in collect_propagated_descendants(nodes, comps, node.uuid) {
+					if comps.get::<DeformStack>(cid).is_none() {
+						continue;
+					}
+					let Some((verts, origin)) = node_deform_target_verts(comps, cid) else {
+						continue;
+					};
+					let child_abs = comps.get::<TransformStore>(cid).unwrap().absolute;
+					let to_mg = mg_inv * child_abs;
+					let to_child = child_abs.inverse() * mg_abs;
+					if !to_mg.is_finite() || !to_child.is_finite() {
+						continue;
+					}
+
+					let child_deforms: Vec<Vec2> = verts
+						.iter()
+						.map(|&v| {
+							let local = vec3(v.x - origin.x, v.y - origin.y, 0.0);
+							let p_mg = to_mg.transform_point3(local).truncate() + mg_mesh.origin;
+							let d_mg = sample_mesh_deform(&mg_mesh, &mg_deforms, p_mg);
+							to_child.transform_vector3(d_mg.extend(0.0)).truncate()
+						})
+						.collect();
+
+					comps
+						.get_mut::<DeformStack>(cid)
+						.unwrap()
+						.push(DeformSource::Node(node.uuid), Deform::Direct(child_deforms));
+				}
+			} else if let Some(grid) = comps.get::<GridDeformer>(node.uuid).cloned() {
+				if !grid.has_valid_grid() {
+					continue;
+				}
+				let Some(grid_deforms) = combine_node_deforms(nodes, comps, node.uuid, grid.vertex_count()) else {
+					continue;
+				};
+				if !grid_deforms.iter().any(|d| d.length_squared() > 1e-8) {
+					continue;
+				}
+				let grid_abs = comps.get::<TransformStore>(node.uuid).unwrap().absolute;
+				let grid_inv = grid_abs.inverse();
+				if !grid_inv.is_finite() {
+					continue;
+				}
+
+				for cid in collect_propagated_descendants(nodes, comps, node.uuid) {
+					if comps.get::<DeformStack>(cid).is_none() {
+						continue;
+					}
+					let Some((verts, origin)) = node_deform_target_verts(comps, cid) else {
+						continue;
+					};
+					let child_abs = comps.get::<TransformStore>(cid).unwrap().absolute;
+					let to_grid = grid_inv * child_abs;
+					let to_child = child_abs.inverse() * grid_abs;
+					if !to_grid.is_finite() || !to_child.is_finite() {
+						continue;
+					}
+					let existing = if grid.dynamic {
+						combine_node_deforms(nodes, comps, cid, verts.len())
+					} else {
+						None
+					};
+
+					let child_deforms: Vec<Vec2> = verts
+						.iter()
+						.enumerate()
+						.map(|(i, &v)| {
+							let extra = existing.as_ref().map_or(Vec2::ZERO, |e| e[i]);
+							let local = vec3(v.x - origin.x + extra.x, v.y - origin.y + extra.y, 0.0);
+							let p_grid = to_grid.transform_point3(local).truncate();
+							let d_grid = grid.sample_deform(&grid_deforms, p_grid);
+							to_child.transform_vector3(d_grid.extend(0.0)).truncate()
+						})
+						.collect();
+
+					comps
+						.get_mut::<DeformStack>(cid)
+						.unwrap()
+						.push(DeformSource::Node(node.uuid), Deform::Direct(child_deforms));
+				}
+			} else if let Some(path) = comps.get::<PathDeformer>(node.uuid).cloned() {
+				if path.vertices.len() < 2 {
+					continue;
+				}
+				let Some(path_deforms) = combine_node_deforms(nodes, comps, node.uuid, path.vertex_count()) else {
+					continue;
+				};
+				if !path_deforms.iter().any(|d| d.length_squared() > 1e-8) {
+					continue;
+				}
+				let deformed_pts: Vec<Vec2> = path
 					.vertices
 					.iter()
-					.map(|&v| {
-						let local = vec3(v.x - child_mesh.origin.x, v.y - child_mesh.origin.y, 0.0);
-						let p_mg = to_mg.transform_point3(local).truncate() + mg_mesh.origin;
-						let d_mg = sample_mesh_deform(&mg_mesh, &mg_deforms, p_mg);
-						to_child.transform_vector3(d_mg.extend(0.0)).truncate()
-					})
+					.zip(&path_deforms)
+					.map(|(&p, &d)| p + d)
 					.collect();
+				let path_abs = comps.get::<TransformStore>(node.uuid).unwrap().absolute;
+				let path_inv = path_abs.inverse();
+				if !path_inv.is_finite() {
+					continue;
+				}
 
-				comps
-					.get_mut::<DeformStack>(cid)
-					.unwrap()
-					.push(DeformSource::Node(node.uuid), Deform::Direct(child_deforms));
+				for cid in collect_propagated_descendants(nodes, comps, node.uuid) {
+					let Some(t_samples) = self.path_t_cache.get(&(node.uuid, cid)) else {
+						continue;
+					};
+					let Some((verts, origin)) = node_deform_target_verts(comps, cid) else {
+						continue;
+					};
+					if t_samples.len() != verts.len() {
+						continue;
+					}
+					let Some(existing) = combine_node_deforms(nodes, comps, cid, verts.len()) else {
+						continue;
+					};
+					let child_abs = comps.get::<TransformStore>(cid).unwrap().absolute;
+					let to_path = path_inv * child_abs;
+					let to_child = child_abs.inverse() * path_abs;
+					if !to_path.is_finite() || !to_child.is_finite() {
+						continue;
+					}
+
+					let child_deforms: Vec<Vec2> = verts
+						.iter()
+						.enumerate()
+						.map(|(i, &v)| {
+							let local = vec3(v.x - origin.x + existing[i].x, v.y - origin.y + existing[i].y, 0.0);
+							let c_vertex = to_path.transform_point3(local).truncate();
+							let t = t_samples[i];
+
+							let orig_pt = evaluate_point(path.curve_type, &path.vertices, t);
+							let orig_tan_raw = evaluate_derivative(path.curve_type, &path.vertices, t);
+							let orig_tan = if orig_tan_raw.length_squared() > 1e-16 {
+								orig_tan_raw.normalize()
+							} else {
+								Vec2::X
+							};
+							let orig_nrm = vec2(-orig_tan.y, orig_tan.x);
+
+							let def_pt = evaluate_point(path.curve_type, &deformed_pts, t);
+							let def_tan_raw = evaluate_derivative(path.curve_type, &deformed_pts, t);
+							let def_tan = if def_tan_raw.length_squared() > 1e-16 {
+								def_tan_raw.normalize()
+							} else {
+								orig_tan
+							};
+							let def_nrm = vec2(-def_tan.y, def_tan.x);
+
+							let diff = c_vertex - orig_pt;
+							let n_dist = diff.dot(orig_nrm);
+							let t_dist = diff.dot(orig_tan);
+							let deformed_v = def_pt + def_nrm * n_dist + def_tan * t_dist;
+							let offset_local = deformed_v - c_vertex;
+							if offset_local.is_finite() {
+								to_child.transform_vector3(offset_local.extend(0.0)).truncate()
+							} else {
+								Vec2::ZERO
+							}
+						})
+						.collect();
+
+					comps
+						.get_mut::<DeformStack>(cid)
+						.unwrap()
+						.push(DeformSource::Node(node.uuid), Deform::Direct(child_deforms));
+				}
 			}
 		}
 

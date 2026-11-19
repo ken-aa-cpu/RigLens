@@ -7,6 +7,12 @@ distributed under the BSD 2-Clause License (see LICENSE).
 Modifications and additions (read/write core, MCP server, GUI, PSD pipeline,
 rig auditor) Copyright (c) 2026 ken_aa, also under the BSD 2-Clause License.
 
+Deformer and interpolation semantics (`GridDeformer`, `PathDeformer`, Catmull-Rom
+cubic / Hermite curve evaluation) follow nijilive and inmath:
+- nijilive (https://github.com/nijigenerate/nijilive), Copyright (c) 2020
+  Inochi2D Project; Copyright (c) 2024 nijigenerate Project (BSD 2-Clause License).
+- inmath (https://github.com/Inochi2D/inmath) (BSD 2-Clause License).
+
 This project is independent and is not affiliated with or endorsed by
 Inochi2D, nijigenerate, nijilive, nijiexpose or Live2D Inc. Those names are
 used only to describe file-format compatibility.
