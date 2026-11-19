@@ -574,6 +574,21 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("name", json::object! { type: "string" });
 				props.insert("length", json::object! { type: "integer" });
 				props.insert("fps", json::object! { type: "number" });
+			} else if spec.id == "booster.configure" || spec.id == "booster.start" {
+				props.insert("vts_url", json::object! { type: "string" });
+				props.insert("enable_vts", json::object! { type: "boolean" });
+				props.insert("spout_in", json::object! { type: "string" });
+				props.insert("spout_out", json::object! { type: "string" });
+				props.insert("tick_hz", json::object! { type: "number" });
+				props.insert("wind_turbulence", json::object! { type: "number" });
+				props.insert("enable_gpu", json::object! { type: "boolean" });
+				props.insert("enable_soft_body", json::object! { type: "boolean" });
+				props.insert("rim_intensity", json::object! { type: "number" });
+				props.insert("rim_theme", json::object! { type: "string" });
+				props.insert("particle_count", json::object! { type: "integer" });
+				props.insert("upscale_factor", json::object! { type: "number" });
+				props.insert("upscale_sharpness", json::object! { type: "number" });
+				props.insert("frame_gen_multiplier", json::object! { type: "integer" });
 			}
 
 			json::object! {
@@ -2229,5 +2244,45 @@ mod tests {
 		assert_eq!(session.revision, rev_before);
 		assert!(diag["warnings"].is_array());
 		assert!(diag["raw_nodes"].is_array());
+	}
+
+	#[test]
+	fn mcp_booster_commands_configure_start_status_and_stop() {
+		let mut session = Session::new_sample();
+
+		let list = session.exec("booster.list_spout", &json::object! {}).unwrap();
+		assert!(list["senders"].is_array());
+
+		let cfg_res = session
+			.exec(
+				"booster.configure",
+				&json::object! {
+					enable_vts: false,
+					enable_gpu: false,
+					spout_in: "",
+					spout_out: "RigLensTestOut",
+					tick_hz: 120.0,
+					wind_turbulence: 0.42
+				},
+			)
+			.unwrap();
+		assert_eq!(cfg_res["running"].as_bool(), Some(false));
+		assert_eq!(cfg_res["config"]["enable_vts"].as_bool(), Some(false));
+		assert!(cfg_res["config"]["spout_in"].is_null());
+
+		let start_res = session.exec("booster.start", &json::object! {}).unwrap();
+		assert_eq!(start_res["running"].as_bool(), Some(true));
+
+		let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+		let mut status = session.exec("booster.status", &json::object! {}).unwrap();
+		while status["ticks"].as_u64().unwrap_or(0) < 1 && std::time::Instant::now() < deadline {
+			std::thread::sleep(std::time::Duration::from_millis(10));
+			status = session.exec("booster.status", &json::object! {}).unwrap();
+		}
+		assert_eq!(status["running"].as_bool(), Some(true));
+		assert!(status["ticks"].as_u64().unwrap_or(0) >= 1);
+
+		let stop_res = session.exec("booster.stop", &json::object! {}).unwrap();
+		assert_eq!(stop_res["running"].as_bool(), Some(false));
 	}
 }

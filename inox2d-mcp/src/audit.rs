@@ -183,7 +183,11 @@ pub fn analyze_anatomy(puppet: &mut Puppet) -> JsonValue {
 	let (face_mn, face_mx, face_name) = if let Some(fid) = face_id {
 		let (pts, _, _) = world_vertices_for_node(puppet, fid, false).unwrap();
 		let (mn, mx) = bbox_of(&pts);
-		let name = puppet.nodes.get_node(fid).map(|n| n.name.clone()).unwrap_or_default();
+		let name = puppet
+			.nodes
+			.get_node(fid)
+			.map(|n| n.name.trim_end_matches('\0').to_owned())
+			.unwrap_or_default();
 		(mn, mx, name)
 	} else {
 		(vec2(-100.0, -100.0), vec2(100.0, 100.0), "<none>".to_owned())
@@ -201,7 +205,7 @@ pub fn analyze_anatomy(puppet: &mut Puppet) -> JsonValue {
 		.pre_order_iter()
 		.filter_map(|n| {
 			if puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some() {
-				Some((n.uuid, n.name.clone(), n.enabled))
+				Some((n.uuid, n.name.trim_end_matches('\0').to_owned(), n.enabled))
 			} else {
 				None
 			}
@@ -272,26 +276,44 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 		.pre_order_iter()
 		.filter_map(|n| {
 			if n.enabled && puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some() {
-				Some((n.uuid, n.name.clone()))
+				Some((n.uuid, n.name.trim_end_matches('\0').to_owned()))
 			} else {
 				None
 			}
 		})
 		.collect();
 
-	// Record rest triangle signed areas & edge lengths
+	// Record rest triangle signed areas & edge lengths, plus triangles already crushed at neutral rest
 	struct RestGeom {
 		verts: Vec<Vec2>,
 		indices: Vec<u32>,
 		tri_areas: Vec<f32>,
 	}
 	let mut rest_map: HashMap<InoxNodeUuid, RestGeom> = HashMap::new();
+	let mut neutral_crushed: HashMap<InoxNodeUuid, std::collections::HashSet<usize>> = HashMap::new();
 	for &(id, _) in &part_nodes {
 		if let Some((verts, indices, _)) = world_vertices_for_node(puppet, id, false) {
 			let mut tri_areas = Vec::with_capacity(indices.len() / 3);
 			for tri in indices.chunks_exact(3) {
 				let a = tri_signed_area(verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]);
 				tri_areas.push(a);
+			}
+			if let Some((nverts, _, _)) = world_vertices_for_node(puppet, id, true) {
+				let mut set = std::collections::HashSet::new();
+				for (ti, tri) in indices.chunks_exact(3).enumerate() {
+					let ra = tri_areas[ti];
+					if ra.abs() < 1e-4 {
+						continue;
+					}
+					let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+					let na = tri_signed_area(nverts[i0], nverts[i1], nverts[i2]);
+					if na * ra >= 0.0 && na.abs() < ra.abs() * 0.025 {
+						set.insert(ti);
+					}
+				}
+				if !set.is_empty() {
+					neutral_crushed.insert(id, set);
+				}
 			}
 			rest_map.insert(id, RestGeom { verts, indices, tri_areas });
 		}
@@ -414,7 +436,11 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 					continue;
 				}
 				let da = tri_signed_area(verts[i0], verts[i1], verts[i2]);
-				if da * ra < 0.0 || da.abs() < ra.abs() * crush_thresh {
+				let is_neutral_crushed = neutral_crushed
+					.get(&id)
+					.map(|s| s.contains(&ti))
+					.unwrap_or(false);
+				if da * ra < 0.0 || (!is_neutral_crushed && da.abs() < ra.abs() * crush_thresh) {
 					fold_count += 1;
 				}
 				for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
@@ -538,7 +564,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 		if let Some(grid) = puppet.node_comps.get::<GridDeformer>(node.uuid) {
 			if grid.axis_x.len() < 2 || grid.axis_y.len() < 2 {
 				deformer_issues.push(json::object! {
-					node: node.name.clone(),
+					node: node.name.trim_end_matches('\0').to_owned(),
 					node_uuid: node.uuid.0,
 					deformer_type: "GridDeformer",
 					issue: "degenerate_grid_axes"
@@ -547,7 +573,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 				|| !grid.axis_y.windows(2).all(|w| w[0].is_finite() && w[1].is_finite() && w[0] < w[1])
 			{
 				deformer_issues.push(json::object! {
-					node: node.name.clone(),
+					node: node.name.trim_end_matches('\0').to_owned(),
 					node_uuid: node.uuid.0,
 					deformer_type: "GridDeformer",
 					issue: "non_monotonic_axes"
@@ -555,7 +581,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			}
 			if !has_deformable_descendant(puppet, node.uuid) {
 				deformer_issues.push(json::object! {
-					node: node.name.clone(),
+					node: node.name.trim_end_matches('\0').to_owned(),
 					node_uuid: node.uuid.0,
 					deformer_type: "GridDeformer",
 					issue: "no_deformable_children"
@@ -565,14 +591,14 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 		if let Some(path) = puppet.node_comps.get::<PathDeformer>(node.uuid) {
 			if path.vertices.len() < 2 {
 				deformer_issues.push(json::object! {
-					node: node.name.clone(),
+					node: node.name.trim_end_matches('\0').to_owned(),
 					node_uuid: node.uuid.0,
 					deformer_type: "PathDeformer",
 					issue: "degenerate_path_vertices"
 				});
 			} else if path.vertices.iter().any(|v| !v.is_finite()) {
 				deformer_issues.push(json::object! {
-					node: node.name.clone(),
+					node: node.name.trim_end_matches('\0').to_owned(),
 					node_uuid: node.uuid.0,
 					deformer_type: "PathDeformer",
 					issue: "non_finite_vertices"
@@ -580,7 +606,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			}
 			if !has_deformable_descendant(puppet, node.uuid) {
 				deformer_issues.push(json::object! {
-					node: node.name.clone(),
+					node: node.name.trim_end_matches('\0').to_owned(),
 					node_uuid: node.uuid.0,
 					deformer_type: "PathDeformer",
 					issue: "no_deformable_children"
@@ -594,7 +620,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 				.map_or(true, |m| m.vertices.len() < 3 || m.indices.len() < 3);
 			if bad_mesh {
 				deformer_issues.push(json::object! {
-					node: node.name.clone(),
+					node: node.name.trim_end_matches('\0').to_owned(),
 					node_uuid: node.uuid.0,
 					deformer_type: "MeshGroup",
 					issue: "missing_or_empty_mesh"
@@ -602,7 +628,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			}
 			if !has_deformable_descendant(puppet, node.uuid) {
 				deformer_issues.push(json::object! {
-					node: node.name.clone(),
+					node: node.name.trim_end_matches('\0').to_owned(),
 					node_uuid: node.uuid.0,
 					deformer_type: "MeshGroup",
 					issue: "no_deformable_children"
@@ -655,7 +681,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			if !any_set {
 				binding_coverage.push(json::object! {
 					param: param_name.clone(),
-					node: target.name.clone(),
+					node: target.name.trim_end_matches('\0').to_owned(),
 					node_uuid: binding.node.0,
 					issue: "unset_binding"
 				});
@@ -683,7 +709,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 					None => {
 						binding_coverage.push(json::object! {
 							param: param_name.clone(),
-							node: target.name.clone(),
+							node: target.name.trim_end_matches('\0').to_owned(),
 							node_uuid: binding.node.0,
 							issue: "deform_on_non_deformable_node"
 						});
@@ -708,7 +734,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 						if let Some(actual_len) = bad_vec {
 							binding_coverage.push(json::object! {
 								param: param_name.clone(),
-								node: target.name.clone(),
+								node: target.name.trim_end_matches('\0').to_owned(),
 								node_uuid: binding.node.0,
 								expected_vertices: exp_len,
 								actual_vertices: actual_len,
@@ -731,7 +757,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			|| puppet.node_comps.get::<MeshGroup>(node.uuid).is_some();
 		if is_deformer && !bound_nodes.contains(&node.uuid) {
 			binding_coverage.push(json::object! {
-				node: node.name.clone(),
+				node: node.name.trim_end_matches('\0').to_owned(),
 				node_uuid: node.uuid.0,
 				issue: "unbound_deformer"
 			});
@@ -740,7 +766,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			match puppet.params.values().find(|p| p.uuid == sp.param) {
 				None => {
 					binding_coverage.push(json::object! {
-						node: node.name.clone(),
+						node: node.name.trim_end_matches('\0').to_owned(),
 						node_uuid: node.uuid.0,
 						param_uuid: sp.param.0,
 						issue: "dangling_physics_param"
@@ -748,7 +774,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 				}
 				Some(p) if p.bindings.is_empty() => {
 					binding_coverage.push(json::object! {
-						node: node.name.clone(),
+						node: node.name.trim_end_matches('\0').to_owned(),
 						node_uuid: node.uuid.0,
 						param: p.name.clone(),
 						issue: "physics_drives_unbound_param"
@@ -796,7 +822,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 				|| lower_name.contains("clip");
 			drawable_z.push(DrawableZInfo {
 				uuid: node.uuid,
-				name: node.name.clone(),
+				name: node.name.trim_end_matches('\0').to_owned(),
 				zsort,
 				min: mn,
 				max: mx,
@@ -858,7 +884,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 					|| lower.contains("fronthair"));
 			if is_anterior_face_feature && d.zsort > face_z + 1e-3 {
 				draw_order_conflicts.push(json::object! {
-					node: d.name.clone(),
+					node: d.name.trim_end_matches('\0').to_owned(),
 					node_uuid: d.uuid.0,
 					node_zsort: d.zsort,
 					face_zsort: face_z,
@@ -866,7 +892,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 				});
 			} else if is_posterior && d.zsort < face_z - 1e-3 {
 				draw_order_conflicts.push(json::object! {
-					node: d.name.clone(),
+					node: d.name.trim_end_matches('\0').to_owned(),
 					node_uuid: d.uuid.0,
 					node_zsort: d.zsort,
 					face_zsort: face_z,
@@ -887,21 +913,21 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 			for m in &masks.masks {
 				if m.source == node.uuid {
 					mask_cycles.push(json::object! {
-						node: node.name.clone(),
+						node: node.name.trim_end_matches('\0').to_owned(),
 						node_uuid: node.uuid.0,
 						source_uuid: m.source.0,
 						issue: "self_mask"
 					});
 				} else if puppet.nodes.get_node(m.source).is_none() {
 					mask_cycles.push(json::object! {
-						node: node.name.clone(),
+						node: node.name.trim_end_matches('\0').to_owned(),
 						node_uuid: node.uuid.0,
 						source_uuid: m.source.0,
 						issue: "dangling_mask_source"
 					});
 				} else if puppet.node_comps.get::<Drawable>(m.source).is_none() {
 					mask_cycles.push(json::object! {
-						node: node.name.clone(),
+						node: node.name.trim_end_matches('\0').to_owned(),
 						node_uuid: node.uuid.0,
 						source_uuid: m.source.0,
 						issue: "non_drawable_mask_source"
@@ -932,7 +958,11 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 
 	let mut score: i32 = 100;
 	score -= (containment_leaks.len() as i32) * 8;
-	score -= (mesh_foldovers.len() as i32) * 15;
+	let distinct_foldover_nodes: std::collections::HashSet<&str> = mesh_foldovers
+		.iter()
+		.filter_map(|e| e["node"].as_str())
+		.collect();
+	score -= (distinct_foldover_nodes.len() as i32) * 15;
 	score -= (mesh_stretch.len() as i32) * 5;
 	score -= (blink_issues.len() as i32) * 10;
 	score -= (symmetry_defects.len() as i32) * 8;
@@ -1057,7 +1087,7 @@ fn detect_mask_cycles_dfs(
 										puppet
 											.nodes
 											.get_node(InoxNodeUuid(uid))
-											.map(|n| n.name.clone())
+											.map(|n| n.name.trim_end_matches('\0').to_owned())
 											.unwrap_or_else(|| format!("Node({uid})"))
 									})
 									.collect();
@@ -1261,7 +1291,9 @@ pub fn auto_fix_puppet(puppet: &mut Puppet) -> JsonValue {
 			FeatureRole::EyeLeft => eye_l_id = Some(node.uuid),
 			FeatureRole::EyeRight => eye_r_id = Some(node.uuid),
 			FeatureRole::Mouth => mouth_id = Some(node.uuid),
-			FeatureRole::PupilOrIris | FeatureRole::Tongue => candidates.push((node.uuid, node.name.clone())),
+			FeatureRole::PupilOrIris | FeatureRole::Tongue => {
+				candidates.push((node.uuid, node.name.trim_end_matches('\0').to_owned()))
+			}
 			_ => {}
 		}
 	}

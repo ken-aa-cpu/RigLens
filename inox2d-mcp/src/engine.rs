@@ -43,6 +43,9 @@ use crate::rig::{
 	synthesize_expression_overlay, DelaunayMeshOptions, RefinementZone,
 };
 
+use riglens_booster::pipeline::{BoosterController, BoosterControllerConfig};
+use riglens_booster::transport::spout2::{get_active_spout_sender, list_spout_senders};
+
 pub struct CommandSpec {
 	pub id: &'static str,
 	pub description: &'static str,
@@ -361,7 +364,89 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			description: "Create an empty named animation timeline container",
 			params_schema: r#"{"name":"Wave","length?":120,"fps?":30}"#,
 		},
+		CommandSpec {
+			id: "booster.status",
+			description: "Query live RigLens Booster status, VTS connection, GPU adapter, Spout2 channels, and telemetry",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "booster.list_spout",
+			description: "List active Windows Spout2 shared-texture senders and active sender name",
+			params_schema: "{}",
+		},
+		CommandSpec {
+			id: "booster.configure",
+			description: "Configure RigLens Booster VTS, Spout2, physics, GPU rim/soft-body, and 2D-DLSS settings",
+			params_schema: r#"{"vts_url?":"ws://127.0.0.1:8001","enable_vts?":true,"spout_in?":"VTubeStudioSpout","spout_out?":"RigLensBooster","tick_hz?":120.0,"wind_turbulence?":0.35,"enable_gpu?":true,"enable_soft_body?":true,"rim_intensity?":0.75,"rim_theme?":"cyberpunk","particle_count?":384,"upscale_factor?":1.0,"upscale_sharpness?":0.65,"frame_gen_multiplier?":1}"#,
+		},
+		CommandSpec {
+			id: "booster.start",
+			description: "Start the background RigLens Booster 120Hz physics + GPU/Spout2 pipeline (optionally applying config overrides)",
+			params_schema: r#"{"vts_url?":"ws://127.0.0.1:8001","enable_vts?":true,"spout_in?":"VTubeStudioSpout","spout_out?":"RigLensBooster","tick_hz?":120.0,"wind_turbulence?":0.35,"enable_gpu?":true,"enable_soft_body?":true,"rim_intensity?":0.75,"rim_theme?":"cyberpunk","particle_count?":384,"upscale_factor?":1.0,"upscale_sharpness?":0.65,"frame_gen_multiplier?":1}"#,
+		},
+		CommandSpec {
+			id: "booster.stop",
+			description: "Stop the running RigLens Booster background pipeline",
+			params_schema: "{}",
+		},
 	]
+}
+
+fn serde_to_json(val: &serde_json::Value) -> Result<JsonValue, String> {
+	let serialized = serde_json::to_string(val).map_err(|e| format!("JSON serialize error: {e}"))?;
+	json::parse(&serialized).map_err(|e| format!("JSON parse error: {e}"))
+}
+
+fn apply_booster_config_patch(base: &BoosterControllerConfig, params: &JsonValue) -> BoosterControllerConfig {
+	let mut cfg = base.clone();
+	if let Some(s) = params["vts_url"].as_str() {
+		cfg.vts_url = s.to_owned();
+	}
+	if let Some(v) = params["enable_vts"].as_bool() {
+		cfg.enable_vts = v;
+	}
+	if params.has_key("spout_in") {
+		if params["spout_in"].is_null() {
+			cfg.spout_in = None;
+		} else if let Some(s) = params["spout_in"].as_str() {
+			let t = s.trim();
+			cfg.spout_in = if t.is_empty() { None } else { Some(t.to_owned()) };
+		}
+	}
+	if let Some(s) = params["spout_out"].as_str() {
+		cfg.spout_out = s.to_owned();
+	}
+	if let Some(v) = params["tick_hz"].as_f32() {
+		cfg.tick_hz = v;
+	}
+	if let Some(v) = params["wind_turbulence"].as_f32() {
+		cfg.wind_turbulence = v;
+	}
+	if let Some(v) = params["enable_gpu"].as_bool() {
+		cfg.enable_gpu = v;
+	}
+	if let Some(v) = params["enable_soft_body"].as_bool() {
+		cfg.enable_soft_body = v;
+	}
+	if let Some(v) = params["rim_intensity"].as_f32() {
+		cfg.rim_intensity = v;
+	}
+	if let Some(s) = params["rim_theme"].as_str() {
+		cfg.rim_theme = s.to_owned();
+	}
+	if let Some(v) = params["particle_count"].as_u32() {
+		cfg.particle_count = v;
+	}
+	if let Some(v) = params["upscale_factor"].as_f32() {
+		cfg.upscale_factor = v;
+	}
+	if let Some(v) = params["upscale_sharpness"].as_f32() {
+		cfg.upscale_sharpness = v;
+	}
+	if let Some(v) = params["frame_gen_multiplier"].as_u32() {
+		cfg.frame_gen_multiplier = v;
+	}
+	cfg
 }
 
 #[derive(Clone)]
@@ -379,6 +464,7 @@ pub struct Session {
 	pub undo_stack: Vec<ModelSnapshot>,
 	pub redo_stack: Vec<ModelSnapshot>,
 	pub checkpoints: HashMap<String, ModelSnapshot>,
+	pub booster: BoosterController,
 }
 
 impl Session {
@@ -390,6 +476,7 @@ impl Session {
 			undo_stack: Vec::new(),
 			redo_stack: Vec::new(),
 			checkpoints: HashMap::new(),
+			booster: BoosterController::default(),
 		}
 	}
 
@@ -479,6 +566,11 @@ impl Session {
 				| "session.checkpoint"
 				| "session.restore"
 				| "session.batch"
+				| "booster.status"
+				| "booster.list_spout"
+				| "booster.configure"
+				| "booster.start"
+				| "booster.stop"
 		)
 	}
 
@@ -2068,6 +2160,36 @@ impl Session {
 					length: length,
 					fps: fps
 				})
+			}
+			"booster.status" => {
+				let st = self.booster.status();
+				let v = serde_json::to_value(&st).map_err(|e| format!("Status serialize error: {e}"))?;
+				serde_to_json(&v)
+			}
+			"booster.list_spout" => Ok(json::object! {
+				active_sender: get_active_spout_sender(),
+				senders: list_spout_senders()
+			}),
+			"booster.configure" => {
+				let cfg = apply_booster_config_patch(self.booster.config(), params);
+				let st = self.booster.configure(cfg)?;
+				let v = serde_json::to_value(&st).map_err(|e| format!("Status serialize error: {e}"))?;
+				serde_to_json(&v)
+			}
+			"booster.start" => {
+				let next_cfg = if params.is_object() && params.entries().next().is_some() {
+					Some(apply_booster_config_patch(self.booster.config(), params))
+				} else {
+					None
+				};
+				let st = self.booster.start(next_cfg)?;
+				let v = serde_json::to_value(&st).map_err(|e| format!("Status serialize error: {e}"))?;
+				serde_to_json(&v)
+			}
+			"booster.stop" => {
+				let st = self.booster.stop();
+				let v = serde_json::to_value(&st).map_err(|e| format!("Status serialize error: {e}"))?;
+				serde_to_json(&v)
 			}
 			other => Err(format!("Unknown command: '{other}'")),
 		}

@@ -2,12 +2,13 @@
 
 mod autosave;
 mod bindings;
+mod booster_panel;
 mod dialogs;
 mod hierarchy;
 mod icons;
 mod theme;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -30,10 +31,10 @@ use inox2d::node::components::{
 use inox2d::node::InoxNodeUuid;
 use inox2d::puppet::Puppet;
 use inox2d::render::{CompositeRenderCtx, TexturedMeshRenderCtx};
-use inox2d::texture::decode_model_textures;
+use inox2d::texture::{decode_model_textures, ShallowTexture};
 use inox2d_mcp::audit::audit_rig;
 use inox2d_mcp::engine::{command_registry, ModelSnapshot, Session};
-use inox2d_mcp::headless_render::render_diagnostic;
+use inox2d_mcp::headless_render::{render_diagnostic, render_frame_with_textures, RenderOptions};
 use inox2d_mcp::psd::{import_psd_to_model_with_mode, parse_psd_bytes};
 use inox2d_mcp::rig::{
 	apply_vertex_deform_delta, configure_pendulum_physics, retriangulate_points_preserving_deforms,
@@ -56,9 +57,11 @@ use theme::{
 #[derive(Parser, Debug)]
 #[command(name = "inox2d-gui", version, about = "Craft-style native Rust desktop studio for Inox2D")]
 struct Cli {
-	/// Input .inp or .psd file, or 'sample' (defaults to built-in VTuber puppet)
-	#[arg(default_value = "--sample")]
-	input: String,
+	/// Input .inp/.inx/.psd/.rigjson file or 'sample'
+	input: Option<String>,
+	/// Select a model preset ('midori', 'aka', 'sample') or example filename/path
+	#[arg(long)]
+	model: Option<String>,
 	/// Load the built-in rigged sample VTuber puppet
 	#[arg(long)]
 	sample: bool,
@@ -320,6 +323,162 @@ fn pick_default_anim(puppet: &Puppet) -> String {
 	keys.into_iter().next().unwrap_or_else(|| "Idle".to_owned())
 }
 
+pub fn find_example_models() -> Vec<(String, PathBuf)> {
+	let mut search_dirs: Vec<PathBuf> = Vec::new();
+	if let Some(env_dir) = std::env::var_os("RIGLENS_EXAMPLE_MODELS") {
+		search_dirs.push(PathBuf::from(env_dir));
+	}
+	search_dirs.push(PathBuf::from("assets/example-models"));
+	search_dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/example-models"));
+	if let Ok(exe) = std::env::current_exe() {
+		if let Some(dir) = exe.parent() {
+			search_dirs.push(dir.join("assets/example-models"));
+			search_dirs.push(dir.join("../../assets/example-models"));
+		}
+	}
+
+	let mut by_key: BTreeMap<String, (String, PathBuf)> = BTreeMap::new();
+	for dir in search_dirs {
+		let Ok(entries) = fs::read_dir(&dir) else {
+			continue;
+		};
+		for entry in entries.flatten() {
+			let path = entry.path();
+			if !path.is_file() {
+				continue;
+			}
+			let ext = path
+				.extension()
+				.and_then(|s| s.to_str())
+				.map(str::to_ascii_lowercase)
+				.unwrap_or_default();
+			if ext != "inx" && ext != "inp" {
+				continue;
+			}
+			let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
+				continue;
+			};
+			let key = stem.to_ascii_lowercase();
+			by_key.entry(key).or_insert_with(|| (stem, path));
+		}
+	}
+
+	let mut out: Vec<(String, PathBuf)> = by_key.into_values().collect();
+	out.sort_by(|(a, _), (b, _)| {
+		let rank = |s: &str| match s.to_ascii_lowercase().as_str() {
+			"midori" => 0usize,
+			"aka" => 1usize,
+			_ => 2usize,
+		};
+		rank(a)
+			.cmp(&rank(b))
+			.then_with(|| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()))
+	});
+	out
+}
+
+fn resolve_startup_input(cli: &Cli) -> Result<(String, Option<PathBuf>), String> {
+	if cli.sample {
+		return Ok(("--sample".to_owned(), None));
+	}
+	if let Some(ref model_arg) = cli.model {
+		let trimmed = model_arg.trim();
+		if trimmed.eq_ignore_ascii_case("sample") || trimmed == "--sample" {
+			return Ok(("--sample".to_owned(), None));
+		}
+		let direct = Path::new(trimmed);
+		if direct.is_file() {
+			return Ok((trimmed.to_owned(), Some(direct.to_path_buf())));
+		}
+		let needle = trimmed.to_ascii_lowercase();
+		let models = find_example_models();
+		if let Some((_, p)) = models.iter().find(|(name, _)| name.eq_ignore_ascii_case(trimmed)) {
+			return Ok((p.to_string_lossy().into_owned(), Some(p.clone())));
+		}
+		if let Some((_, p)) = models
+			.iter()
+			.find(|(name, _)| name.to_ascii_lowercase().contains(&needle))
+		{
+			return Ok((p.to_string_lossy().into_owned(), Some(p.clone())));
+		}
+		let available: Vec<String> = models.into_iter().map(|(n, _)| n).collect();
+		return Err(format!(
+			"Model '{model_arg}' not found (available example models: {available:?}, or 'sample')"
+		));
+	}
+	if let Some(ref inp) = cli.input {
+		if inp == "--sample" || inp.eq_ignore_ascii_case("sample") {
+			return Ok(("--sample".to_owned(), None));
+		}
+		return Ok((inp.clone(), Some(PathBuf::from(inp))));
+	}
+	if let Some((_, p)) = find_example_models().into_iter().next() {
+		return Ok((p.to_string_lossy().into_owned(), Some(p)));
+	}
+	Ok(("--sample".to_owned(), None))
+}
+
+fn pick_default_pad_params(puppet: &Puppet) -> [String; 2] {
+	let mut vec2_params: Vec<String> = puppet
+		.params
+		.iter()
+		.filter(|(_, p)| p.is_vec2)
+		.map(|(k, _)| k.clone())
+		.collect();
+	vec2_params.sort();
+
+	let pad1 = if puppet.params.contains_key("Head:: Yaw-Pitch") {
+		"Head:: Yaw-Pitch".to_owned()
+	} else if let Some(h) = vec2_params
+		.iter()
+		.find(|p| p.to_ascii_lowercase().contains("head"))
+	{
+		h.clone()
+	} else {
+		vec2_params
+			.first()
+			.cloned()
+			.unwrap_or_else(|| "Head:: Yaw-Pitch".to_owned())
+	};
+
+	let pad2 = [
+		"Body:: Yaw-Pitch",
+		"Mouth:: Viseme",
+		"Mouth:: Shape",
+	]
+	.into_iter()
+	.find(|&cand| cand != pad1 && puppet.params.contains_key(cand))
+	.map(str::to_owned)
+	.or_else(|| {
+		vec2_params
+			.iter()
+			.find(|p| **p != pad1 && p.to_ascii_lowercase().contains("mouth"))
+			.cloned()
+	})
+	.or_else(|| {
+		vec2_params
+			.iter()
+			.find(|p| **p != pad1 && p.to_ascii_lowercase().contains("body"))
+			.cloned()
+	})
+	.or_else(|| vec2_params.iter().find(|p| **p != pad1).cloned())
+	.unwrap_or_else(|| "Mouth:: Viseme".to_owned());
+
+	[pad1, pad2]
+}
+
+fn clean_display_name(s: &str) -> &str {
+	s.trim_end_matches(|c: char| c == '\0' || c.is_whitespace()).trim_start()
+}
+
+fn format_clean_zsort(z: f32) -> f32 {
+	if z.abs() < 0.5 {
+		0.0
+	} else {
+		z
+	}
+}
+
 fn load_initial_session(input: &str) -> Result<Session, String> {
 	if input == "--sample" || input == "sample" {
 		let mut session = Session::new_sample();
@@ -417,14 +576,18 @@ struct Inox2dStudioApp {
 
 	stage_res: u32,
 	puppet_scale: f32,
+	puppet_center: GVec2,
 	view_zoom: f32,
 	view_pan: Vec2,
 	wireframe: bool,
 	xray_mode: bool,
+	exact_composite: bool,
+	live_physics: bool,
 	show_sel_overlay: bool,
 
 	brush_param: String,
 	brush_radius_ratio: f32,
+	pad_params: [String; 2],
 
 	stage_drag: Option<StageDrag>,
 	gesture_snapshot: Option<ModelSnapshot>,
@@ -441,6 +604,7 @@ struct Inox2dStudioApp {
 	curve_drag: Option<CurveDragState>,
 
 	gpu_textures: Vec<egui::TextureHandle>,
+	decoded_textures: Vec<ShallowTexture>,
 	tex_alpha_polys: Vec<Vec<GVec2>>,
 	gpu_tex_dirty: bool,
 	stage_tex: Option<egui::TextureHandle>,
@@ -451,6 +615,7 @@ struct Inox2dStudioApp {
 
 	audit_cache: JsonValue,
 	audit_rev: u64,
+	booster_ui: booster_panel::BoosterUiState,
 
 	status_msg: String,
 	status_ok: bool,
@@ -492,6 +657,8 @@ impl Inox2dStudioApp {
 			None
 		};
 		let diag_count = session.model.puppet.diagnostics.len();
+		let pad_params = pick_default_pad_params(&session.model.puppet);
+		let brush_param = pad_params[0].clone();
 		let initial_status = if diag_count > 0 {
 			format!("Loaded with {diag_count} compatibility warning(s) — check Audit tab")
 		} else {
@@ -520,13 +687,17 @@ impl Inox2dStudioApp {
 			vertex_mode: VertexEditMode::DeformKeypoint,
 			stage_res: 512,
 			puppet_scale: 0.92,
+			puppet_center: GVec2::ZERO,
 			view_zoom: 1.0,
 			view_pan: Vec2::ZERO,
 			wireframe: false,
 			xray_mode: false,
+			exact_composite: true,
+			live_physics: false,
 			show_sel_overlay: true,
-			brush_param: "Head:: Yaw-Pitch".to_owned(),
+			brush_param: brush_param.clone(),
 			brush_radius_ratio: 0.45,
+			pad_params,
 			stage_drag: None,
 			gesture_snapshot: None,
 			bottom_tab: BottomTab::Timeline,
@@ -536,10 +707,11 @@ impl Inox2dStudioApp {
 			loop_anim: true,
 			playhead_frame: 1.0,
 			last_tick: Instant::now(),
-			selected_curve_lane: Some(("Head:: Yaw-Pitch".to_owned(), 0)),
+			selected_curve_lane: Some((brush_param, 0)),
 			selected_keyframe: None,
 			curve_drag: None,
 			gpu_textures: Vec::new(),
+			decoded_textures: Vec::new(),
 			tex_alpha_polys: Vec::new(),
 			gpu_tex_dirty: true,
 			stage_tex: None,
@@ -549,6 +721,7 @@ impl Inox2dStudioApp {
 			render_ms: 0.0,
 			audit_cache: JsonValue::new_object(),
 			audit_rev: u64::MAX,
+			booster_ui: booster_panel::BoosterUiState::default(),
 			status_msg: initial_status,
 			status_ok: diag_count == 0,
 			cmd_palette_open: false,
@@ -588,25 +761,93 @@ impl Inox2dStudioApp {
 	}
 
 	fn fit_puppet_scale(&mut self) {
-		let mut min_y = f32::INFINITY;
-		let mut max_y = f32::NEG_INFINITY;
-		for node in self.session.model.puppet.nodes.iter() {
-			if let Some(m) = self.session.model.puppet.node_comps.get::<Mesh>(node.uuid) {
-				let oy = node.trans_offset.translation.y;
-				for &v in &m.vertices {
-					min_y = min_y.min(v.y + oy);
-					max_y = max_y.max(v.y + oy);
-				}
+		let puppet = &mut self.session.model.puppet;
+		if puppet.render_ctx.is_none()
+			|| puppet
+				.param_ctx
+				.as_ref()
+				.map(|c| c.values().len() != puppet.params.len())
+				.unwrap_or(true)
+		{
+			puppet.init_all();
+		}
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+
+		let mut min_pt = GVec2::splat(f32::INFINITY);
+		let mut max_pt = GVec2::splat(f32::NEG_INFINITY);
+		for node in puppet.nodes.iter() {
+			if !node.enabled || puppet.node_comps.get::<TexturedMesh>(node.uuid).is_none() {
+				continue;
+			}
+			let Some(m) = puppet.node_comps.get::<Mesh>(node.uuid) else {
+				continue;
+			};
+			let abs = puppet
+				.node_comps
+				.get::<TransformStore>(node.uuid)
+				.map(|ts| ts.absolute)
+				.unwrap_or(Mat4::IDENTITY);
+			for &v in &m.vertices {
+				let w = abs
+					.transform_point3(gvec3(v.x - m.origin.x, v.y - m.origin.y, 0.0))
+					.truncate();
+				min_pt = min_pt.min(w);
+				max_pt = max_pt.max(w);
 			}
 		}
-		if min_y.is_finite() && max_y.is_finite() && (max_y - min_y) > 8.0 {
-			let span = (max_y - min_y).max(64.0);
-			self.puppet_scale = ((self.stage_res as f32 * 0.72) / span).clamp(0.12, 1.5);
+		if min_pt.x.is_finite()
+			&& min_pt.y.is_finite()
+			&& max_pt.x.is_finite()
+			&& max_pt.y.is_finite()
+			&& ((max_pt.x - min_pt.x) > 8.0 || (max_pt.y - min_pt.y) > 8.0)
+		{
+			self.puppet_center = (min_pt + max_pt) * 0.5;
+			let span = (max_pt.x - min_pt.x).max(max_pt.y - min_pt.y).max(64.0);
+			self.puppet_scale = ((self.stage_res as f32 * 0.86) / span).clamp(0.05, 2.0);
 		} else {
+			self.puppet_center = gvec2(0.0, 35.0);
 			self.puppet_scale = 0.85;
 		}
 		self.view_zoom = 1.0;
 		self.view_pan = Vec2::ZERO;
+	}
+
+	fn load_session_into_app(&mut self, mut session: Session, source_path: Option<PathBuf>, status_msg: String) {
+		// Preserve running booster lifecycle if user switches model files cleanly
+		std::mem::swap(&mut session.booster, &mut self.session.booster);
+		self.session = session;
+		self.source_path = source_path;
+		self.last_saved_rev = self.session.revision;
+		self.last_synced_rev = self.session.revision;
+		self.selected_node = pick_default_selected_node(&self.session.model.puppet);
+		self.active_anim = pick_default_anim(&self.session.model.puppet);
+		self.selected_physics = self
+			.session
+			.model
+			.puppet
+			.nodes
+			.iter()
+			.find(|n| self.session.model.puppet.node_comps.get::<SimplePhysics>(n.uuid).is_some())
+			.map(|n| n.uuid);
+		self.pad_params = pick_default_pad_params(&self.session.model.puppet);
+		self.brush_param = self.pad_params[0].clone();
+		self.selected_curve_lane = Some((self.brush_param.clone(), 0));
+		self.selected_vertices.clear();
+		self.collapsed_nodes.clear();
+		self.inspector_state.rename_node_id = None;
+		self.gpu_tex_dirty = true;
+		self.sync_watch_out();
+		self.fit_puppet_scale();
+		self.cached_rev = u64::MAX;
+		self.audit_rev = u64::MAX;
+		self.refresh_audit();
+		let warns = self.session.model.puppet.diagnostics.len();
+		if warns > 0 {
+			self.set_status(false, format!("{status_msg} ({warns} warning(s))"));
+		} else {
+			self.set_status(true, status_msg);
+		}
 	}
 
 	fn exec_cmd(&mut self, cmd: &str, params: JsonValue, ok_label: &str) {
@@ -661,26 +902,11 @@ impl Inox2dStudioApp {
 		let path_str = path.to_string_lossy().to_string();
 		match load_initial_session(&path_str) {
 			Ok(session) => {
-				self.session = session;
-				self.source_path = Some(path.to_path_buf());
-				self.last_saved_rev = self.session.revision;
-				self.last_synced_rev = self.session.revision;
-				self.selected_node = pick_default_selected_node(&self.session.model.puppet);
-				self.active_anim = pick_default_anim(&self.session.model.puppet);
-				self.selected_vertices.clear();
-				self.collapsed_nodes.clear();
-				self.inspector_state.rename_node_id = None;
-				self.gpu_tex_dirty = true;
-				self.fit_puppet_scale();
-				self.cached_rev = u64::MAX;
-				self.audit_rev = u64::MAX;
-				self.refresh_audit();
-				let warns = self.session.model.puppet.diagnostics.len();
-				if warns > 0 {
-					self.set_status(false, format!("Loaded '{}' with {warns} warning(s)", path.display()));
-				} else {
-					self.set_status(true, format!("Opened '{}'", path.display()));
-				}
+				self.load_session_into_app(
+					session,
+					Some(path.to_path_buf()),
+					format!("Opened '{}'", path.display()),
+				);
 			}
 			Err(err) => {
 				self.set_status(false, err);
@@ -813,8 +1039,14 @@ impl Inox2dStudioApp {
 		self.session.revision.hash(&mut h);
 		self.stage_res.hash(&mut h);
 		self.puppet_scale.to_bits().hash(&mut h);
+		self.puppet_center.x.to_bits().hash(&mut h);
+		self.puppet_center.y.to_bits().hash(&mut h);
 		self.wireframe.hash(&mut h);
 		self.xray_mode.hash(&mut h);
+		self.exact_composite.hash(&mut h);
+		self.live_physics.hash(&mut h);
+		self.stage_drag.is_some().hash(&mut h);
+		self.playing.hash(&mut h);
 		let mut keys: Vec<_> = self.session.param_overrides.keys().collect();
 		keys.sort();
 		for k in keys {
@@ -827,6 +1059,10 @@ impl Inox2dStudioApp {
 			self.playhead_frame.to_bits().hash(&mut h);
 		}
 		h.finish()
+	}
+
+	fn use_exact_stage(&self) -> bool {
+		self.exact_composite && !self.xray_mode && self.stage_drag.is_none() && !self.playing
 	}
 
 	fn ensure_gpu_textures(&mut self, ctx: &egui::Context) {
@@ -848,20 +1084,36 @@ impl Inox2dStudioApp {
 				egui::TextureOptions::LINEAR,
 			));
 		}
+		self.decoded_textures = decoded;
 		self.gpu_tex_dirty = false;
 	}
 
 	fn prepare_stage_frame(&mut self, ctx: &egui::Context) {
 		self.ensure_gpu_textures(ctx);
 
+		let use_exact = self.use_exact_stage();
 		let sig = self.render_signature();
-		if self.cached_rev == self.session.revision && self.cached_sig == sig && (!self.xray_mode || self.stage_tex.is_some()) {
+		if !self.live_physics
+			&& self.cached_rev == self.session.revision
+			&& self.cached_sig == sig
+			&& ((!self.xray_mode && !use_exact) || self.stage_tex.is_some())
+		{
 			return;
 		}
 
 		let start = Instant::now();
+		let pmap = self.filtered_params();
+		let dt = if self.playing
+			|| self.live_physics
+			|| self.tool == StudioTool::Physics
+			|| matches!(self.stage_drag, Some(StageDrag::Pose25D))
+		{
+			1.0 / 60.0
+		} else {
+			0.0
+		};
+
 		if self.xray_mode {
-			let pmap = self.filtered_params();
 			if let Ok(img) = render_diagnostic(&mut self.session.model, &pmap, self.stage_res, self.stage_res, self.puppet_scale) {
 				let (w, h) = img.dimensions();
 				let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
@@ -871,8 +1123,28 @@ impl Inox2dStudioApp {
 					self.stage_tex = Some(ctx.load_texture("inox2d_stage", cimg, egui::TextureOptions::LINEAR));
 				}
 			}
+		} else if use_exact {
+			let render_side = self.stage_res.max(720).min(720);
+			let render_scale = self.puppet_scale * (render_side as f32 / self.stage_res.max(1) as f32);
+			let opts = RenderOptions {
+				width: render_side,
+				height: render_side,
+				scale: render_scale,
+				camera_pos: -self.puppet_center,
+				wireframe: self.wireframe,
+				dt,
+				background: [0, 0, 0, 0],
+			};
+			if let Ok(img) = render_frame_with_textures(&mut self.session.model, &self.decoded_textures, &pmap, &opts) {
+				let (w, h) = img.dimensions();
+				let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
+				if let Some(tex) = self.stage_tex.as_mut() {
+					tex.set(cimg, egui::TextureOptions::LINEAR);
+				} else {
+					self.stage_tex = Some(ctx.load_texture("inox2d_stage", cimg, egui::TextureOptions::LINEAR));
+				}
+			}
 		} else {
-			let pmap = self.filtered_params();
 			let puppet = &mut self.session.model.puppet;
 			if puppet.render_ctx.is_none()
 				|| puppet
@@ -889,16 +1161,11 @@ impl Inox2dStudioApp {
 					let _ = pctx.set(name, *val);
 				}
 			}
-			let dt = if self.playing || self.tool == StudioTool::Physics {
-				1.0 / 60.0
-			} else {
-				0.0
-			};
 			puppet.end_frame(dt);
 		}
 		let elapsed_ms = start.elapsed().as_secs_f32() * 1000.0;
 		self.eval_ms = elapsed_ms;
-		if self.xray_mode {
+		if self.xray_mode || use_exact {
 			self.render_ms = elapsed_ms;
 		}
 		self.cached_rev = self.session.revision;
@@ -957,19 +1224,28 @@ impl Inox2dStudioApp {
 		let mvp_cam = self.mvp_cam();
 
 		// Flatten draw order cleanly: root drawables zsorted descending (Composite expands its zsorted children).
-		let mut ordered_parts: Vec<InoxNodeUuid> = Vec::with_capacity(prctx.root_drawables_zsorted.len() + 8);
+		let mut ordered_parts: Vec<(InoxNodeUuid, f32, GVec3)> =
+			Vec::with_capacity(prctx.root_drawables_zsorted.len() + 8);
 		for &root_id in &prctx.root_drawables_zsorted {
 			if let Some(comp_ctx) = puppet.node_comps.get::<CompositeRenderCtx>(root_id) {
 				let comp_enabled = puppet.nodes.get_node(root_id).map(|n| n.enabled).unwrap_or(true);
 				if comp_enabled {
-					ordered_parts.extend(comp_ctx.zsorted_children_list.iter().copied());
+					let parent_op = puppet.node_opacity(root_id).unwrap_or(1.0).clamp(0.0, 1.0);
+					let parent_tint = puppet
+						.node_comps
+						.get::<Drawable>(root_id)
+						.map(|d| d.blending.tint.clamp(GVec3::ZERO, GVec3::ONE))
+						.unwrap_or(GVec3::ONE);
+					for &cid in &comp_ctx.zsorted_children_list {
+						ordered_parts.push((cid, parent_op, parent_tint));
+					}
 				}
 			} else {
-				ordered_parts.push(root_id);
+				ordered_parts.push((root_id, 1.0, GVec3::ONE));
 			}
 		}
 
-		for id in ordered_parts {
+		for (id, parent_op, parent_tint) in ordered_parts {
 			let Some(node) = puppet.nodes.get_node(id) else {
 				continue;
 			};
@@ -995,11 +1271,11 @@ impl Inox2dStudioApp {
 				continue;
 			};
 
-			let opacity = puppet.node_opacity(id).unwrap_or(drawable.blending.opacity).clamp(0.0, 1.0);
+			let opacity = (puppet.node_opacity(id).unwrap_or(drawable.blending.opacity) * parent_op).clamp(0.0, 1.0);
 			if opacity <= 0.002 {
 				continue;
 			}
-			let tint = drawable.blending.tint.clamp(GVec3::ZERO, GVec3::ONE);
+			let tint = (drawable.blending.tint.clamp(GVec3::ZERO, GVec3::ONE) * parent_tint).clamp(GVec3::ZERO, GVec3::ONE);
 			let vcol = Color32::from_rgba_unmultiplied(
 				(tint.x * 255.0) as u8,
 				(tint.y * 255.0) as u8,
@@ -1098,7 +1374,7 @@ impl Inox2dStudioApp {
 
 	fn mvp_cam(&self) -> Mat4 {
 		let cam = Camera {
-			position: gvec2(0.0, -35.0),
+			position: -self.puppet_center,
 			rotation: 0.0,
 			scale: gvec2(self.puppet_scale, self.puppet_scale),
 		};
@@ -1515,20 +1791,31 @@ impl Inox2dStudioApp {
 				}
 				if ui.button("Load Sample VTuber").clicked() {
 					if let Ok(s) = load_initial_session("--sample") {
-						self.session = s;
-						self.source_path = None;
-						self.last_saved_rev = self.session.revision;
-						self.selected_node = pick_default_selected_node(&self.session.model.puppet);
-						self.active_anim = pick_default_anim(&self.session.model.puppet);
-						self.selected_vertices.clear();
-						self.gpu_tex_dirty = true;
-						self.sync_watch_out();
-						self.fit_puppet_scale();
-						self.cached_rev = u64::MAX;
-						self.audit_rev = u64::MAX;
-						self.set_status(true, "Loaded built-in sample VTuber puppet");
+						self.load_session_into_app(s, None, "Loaded built-in sample VTuber puppet".to_owned());
 					}
 					ui.close_menu();
+				}
+				let example_models = find_example_models();
+				if !example_models.is_empty() {
+					ui.menu_button("Example Models", |ui| {
+						for (label, path) in &example_models {
+							if ui.button(label).clicked() {
+								self.open_model_from_path(path);
+								ui.close_menu();
+							}
+						}
+						ui.separator();
+						if ui.button("Built-in Sample VTuber").clicked() {
+							if let Ok(s) = load_initial_session("--sample") {
+								self.load_session_into_app(
+									s,
+									None,
+									"Loaded built-in sample VTuber puppet".to_owned(),
+								);
+							}
+							ui.close_menu();
+						}
+					});
 				}
 				ui.separator();
 				if ui.button("Save .inp (Ctrl+S)").clicked() {
@@ -1591,6 +1878,8 @@ impl Inox2dStudioApp {
 			ui.menu_button("View", |ui| {
 				ui.checkbox(&mut self.wireframe, "Show Render Wireframe");
 				ui.checkbox(&mut self.xray_mode, "X-Ray Geometric Diagnostic");
+				ui.checkbox(&mut self.exact_composite, "Exact FX (Composites & Masks)");
+				ui.checkbox(&mut self.live_physics, "Live Physics Preview");
 				ui.checkbox(&mut self.show_sel_overlay, "Selected Node Vector Overlay");
 				if ui.button("Fit Puppet to Stage (Z)").clicked() {
 					self.fit_puppet_scale();
@@ -1653,21 +1942,40 @@ impl Inox2dStudioApp {
 		});
 	}
 
+	fn model_display_name(&self) -> String {
+		if let Some(meta_name) = self
+			.session
+			.model
+			.puppet
+			.meta
+			.name
+			.as_deref()
+			.map(clean_display_name)
+			.filter(|s| !s.is_empty())
+		{
+			return meta_name.to_owned();
+		}
+		if let Some(stem) = self
+			.source_path
+			.as_ref()
+			.and_then(|p| p.file_stem())
+			.and_then(|s| s.to_str())
+			.map(clean_display_name)
+			.filter(|s| !s.is_empty())
+		{
+			return stem.to_owned();
+		}
+		"SampleVTuber".to_owned()
+	}
+
 	fn draw_context_bar(&mut self, ui: &mut egui::Ui) {
 		ui.horizontal(|ui| {
-			let base_name = self
-				.session
-				.model
-				.puppet
-				.meta
-				.name
-				.as_deref()
-				.unwrap_or("InochiSampleVTuber");
+			let base_name = self.model_display_name();
 			let dirty = self.session.revision != self.last_saved_rev;
 			let pname = if dirty {
 				format!("{base_name}*")
 			} else {
-				base_name.to_owned()
+				base_name
 			};
 			egui::Frame::none()
 				.fill(BG_WIDGET)
@@ -1681,7 +1989,8 @@ impl Inox2dStudioApp {
 			let sel_name = self
 				.selected_node
 				.and_then(|id| self.session.model.puppet.nodes.get_node(id))
-				.map(|n| n.name.as_str())
+				.map(|n| clean_display_name(&n.name))
+				.filter(|s| !s.is_empty())
 				.unwrap_or("Root");
 			ui.label(egui::RichText::new(format!("> {sel_name}")).color(TEXT_MUTED).size(11.5));
 			ui.separator();
@@ -1854,6 +2163,8 @@ impl Inox2dStudioApp {
 					self.inspector_state.tab = InspectorTab::Audit;
 				}
 
+				ui.checkbox(&mut self.live_physics, "Live Phys");
+				ui.checkbox(&mut self.exact_composite, "Exact FX");
 				ui.checkbox(&mut self.xray_mode, "X-Ray");
 				ui.checkbox(&mut self.wireframe, "Wireframe");
 			});
@@ -1902,7 +2213,7 @@ impl Inox2dStudioApp {
 		}
 		painter.rect_stroke(canvas_rect, 2.0, Stroke::new(1.0_f32, Color32::from_rgb(18, 18, 22)));
 
-		if self.xray_mode {
+		if self.xray_mode || self.use_exact_stage() {
 			if let Some(tex) = &self.stage_tex {
 				clip_painter.image(
 					tex.id(),
@@ -1910,6 +2221,8 @@ impl Inox2dStudioApp {
 					Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
 					Color32::WHITE,
 				);
+			} else if !self.xray_mode {
+				self.draw_puppet_gpu_meshes(&clip_painter, canvas_rect);
 			}
 		} else {
 			self.draw_puppet_gpu_meshes(&clip_painter, canvas_rect);
@@ -2378,11 +2691,20 @@ impl Inox2dStudioApp {
 					if let Some(p) = pos {
 						let nx = ((p.x - canvas_rect.center().x) / (canvas_rect.width() * 0.45)).clamp(-1.0, 1.0);
 						let ny = ((p.y - canvas_rect.center().y) / (canvas_rect.height() * 0.45)).clamp(-1.0, 1.0);
-						self.session.param_overrides.insert("Head:: Yaw-Pitch".to_owned(), gvec2(nx, ny));
-						self.session.param_overrides.insert("Head:: Roll".to_owned(), gvec2(nx * 0.35, 0.0));
-						self.session.param_overrides.insert("Eye:: Gaze".to_owned(), gvec2(nx, ny));
-						self.session.param_overrides.insert("Eye:: Left:: Gaze".to_owned(), gvec2(nx, ny));
-						self.session.param_overrides.insert("Eye:: Right:: Gaze".to_owned(), gvec2(nx, ny));
+						for (pname, val) in [
+							("Head:: Yaw-Pitch", gvec2(nx, ny)),
+							("Head:: Roll", gvec2(nx * 0.35, 0.0)),
+							("Body:: Yaw-Pitch", gvec2(nx * 0.35, ny * 0.35)),
+							("Eye:: Gaze", gvec2(nx, ny)),
+							("Eye:: Left:: Gaze", gvec2(nx, ny)),
+							("Eye:: Right:: Gaze", gvec2(nx, ny)),
+							("Eye:: Left:: Move", gvec2(nx, ny)),
+							("Eye:: Right:: Move", gvec2(nx, ny)),
+						] {
+							if self.session.model.puppet.params.contains_key(pname) {
+								self.session.param_overrides.insert(pname.to_owned(), val);
+							}
+						}
 					}
 				}
 				None => {}
@@ -2696,7 +3018,7 @@ impl Inox2dStudioApp {
 	}
 
 	fn draw_right_inspector(&mut self, ui: &mut egui::Ui) {
-		ui.horizontal(|ui| {
+		ui.horizontal_wrapped(|ui| {
 			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Properties, "Properties");
 			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Bindings, "Bindings");
 			let score = self.audit_cache["score"].as_u32().unwrap_or(0);
@@ -2707,6 +3029,7 @@ impl Inox2dStudioApp {
 				format!("Audit ({score})")
 			};
 			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Audit, audit_lbl);
+			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Booster, "Booster");
 		});
 		ui.separator();
 
@@ -2722,20 +3045,63 @@ impl Inox2dStudioApp {
 					);
 					self.apply_inspector_actions(actions);
 
+					let mut vec2_choices: Vec<String> = self
+						.session
+						.model
+						.puppet
+						.params
+						.iter()
+						.filter(|(_, p)| p.is_vec2)
+						.map(|(k, _)| k.clone())
+						.collect();
+					vec2_choices.sort();
+					for slot in 0..2 {
+						if !vec2_choices.is_empty() && !self.session.model.puppet.params.contains_key(&self.pad_params[slot]) {
+							let defaults = pick_default_pad_params(&self.session.model.puppet);
+							self.pad_params[slot] = defaults[slot].clone();
+						}
+					}
+
 					ui.add_space(6.0);
 					section_header(ui, "2D Parameter Pads", Some(("snap · dbl-click reset", TEXT_MUTED)));
 					ui.add_space(4.0);
 					ui.horizontal(|ui| {
-						self.draw_xy_pad(ui, "Head:: Yaw-Pitch", 124.0, ACCENT_BLUE);
-						ui.add_space(8.0);
-						self.draw_xy_pad(ui, "Mouth:: Viseme", 124.0, TIMELINE_VIOLET);
+						for (slot, pad_col) in [(0usize, ACCENT_BLUE), (1usize, TIMELINE_VIOLET)] {
+							ui.vertical(|ui| {
+								let combo_id = if slot == 0 { "xy_pad_param_0" } else { "xy_pad_param_1" };
+								egui::ComboBox::from_id_source(combo_id)
+									.selected_text(self.pad_params[slot].as_str())
+									.width(124.0)
+									.show_ui(ui, |ui| {
+										for cname in &vec2_choices {
+											ui.selectable_value(&mut self.pad_params[slot], cname.clone(), cname);
+										}
+									});
+								let pname = self.pad_params[slot].clone();
+								self.draw_xy_pad(ui, &pname, 124.0, pad_col);
+							});
+							if slot == 0 {
+								ui.add_space(8.0);
+							}
+						}
 					});
 					ui.horizontal_wrapped(|ui| {
 						for (label, vx, vy) in VISEME_PRESETS {
 							if ui.small_button(label).clicked() {
-								self.session.param_overrides.insert("Mouth:: Viseme".to_owned(), gvec2(vx, vy));
-								self.session.param_overrides.insert("Mouth:: Form".to_owned(), gvec2(vx, 0.0));
-								self.session.param_overrides.insert("Mouth:: Open".to_owned(), gvec2(vy, 0.0));
+								for (target, raw_val) in [
+									("Mouth:: Viseme", gvec2(vx, vy)),
+									("Mouth:: Shape", gvec2(vx, vy)),
+									("Mouth:: Form", gvec2(vx, 0.0)),
+									("Mouth:: Open", gvec2(vy, 0.0)),
+								] {
+									if let Some(p) = self.session.model.puppet.params.get(target) {
+										let clamped = gvec2(
+											raw_val.x.clamp(p.min.x, p.max.x),
+											raw_val.y.clamp(p.min.y, p.max.y),
+										);
+										self.session.param_overrides.insert(target.to_owned(), clamped);
+									}
+								}
 							}
 						}
 					});
@@ -2755,7 +3121,7 @@ impl Inox2dStudioApp {
 					pnames.sort_by(|a, b| a.0.cmp(&b.0));
 
 					for (pname, is_vec2, pmin, pmax, pdef) in pnames {
-						if pname == "Head:: Yaw-Pitch" || pname == "Mouth:: Viseme" {
+						if pname == self.pad_params[0] || pname == self.pad_params[1] {
 							continue;
 						}
 						let cur = self.session.param_overrides.get(&pname).copied().unwrap_or(pdef);
@@ -2803,6 +3169,14 @@ impl Inox2dStudioApp {
 				InspectorTab::Audit => {
 					let actions = draw_audit_tab(ui, &self.session, &self.audit_cache);
 					self.apply_inspector_actions(actions);
+				}
+				InspectorTab::Booster => {
+					booster_panel::draw_booster_tab(
+						ui,
+						&mut self.session.booster,
+						&mut self.booster_ui,
+						&mut self.status_msg,
+					);
 				}
 			}
 		});
@@ -3243,7 +3617,7 @@ impl Inox2dStudioApp {
 				let has_phys = comps.get::<SimplePhysics>(n.uuid).is_some();
 				(
 					n.uuid,
-					n.name.clone(),
+					clean_display_name(&n.name).to_owned(),
 					n.enabled,
 					n.zsort,
 					is_part,
@@ -3318,17 +3692,22 @@ impl Inox2dStudioApp {
 				} else {
 					ui.painter().circle_stroke(eye_center, 3.2, Stroke::new(1.1_f32, TEXT_MUTED));
 				}
-				ui.painter().text(
+				let label_clip = Rect::from_min_max(
+					pos2(row_rect.left() + 19.0, row_rect.top()),
+					pos2((row_rect.right() - 52.0).max(row_rect.left() + 24.0), row_rect.bottom()),
+				);
+				ui.painter().with_clip_rect(label_clip).text(
 					pos2(row_rect.left() + 21.0, row_rect.center().y),
 					Align2::LEFT_CENTER,
 					format!("{icon_lbl}{name}"),
 					egui::FontId::proportional(11.0),
 					if is_sel { Color32::WHITE } else { TEXT_PRIMARY },
 				);
+				let disp_z = format_clean_zsort(*zsort);
 				ui.painter().text(
 					pos2(row_rect.right() - 22.0, row_rect.center().y),
 					Align2::RIGHT_CENTER,
-					format!("z{:.0}", zsort),
+					format!("z{:.0}", disp_z),
 					egui::FontId::monospace(9.5),
 					TEXT_MUTED,
 				);
@@ -3594,6 +3973,7 @@ impl Inox2dStudioApp {
 
 impl eframe::App for Inox2dStudioApp {
 	fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+		let _ = self.session.booster.stop();
 		if self.session.revision == self.last_saved_rev {
 			self.autosave.clear_recovery();
 		}
@@ -3634,6 +4014,11 @@ impl eframe::App for Inox2dStudioApp {
 			}
 			self.apply_anim_at_playhead();
 			ctx.request_repaint();
+		} else if self.live_physics && self.screenshot_out.is_none() {
+			self.cached_sig = u64::MAX;
+			ctx.request_repaint();
+		} else if self.inspector_state.tab == InspectorTab::Booster && self.screenshot_out.is_none() {
+			ctx.request_repaint_after(Duration::from_millis(100));
 		}
 		self.last_tick = Instant::now();
 
@@ -3924,16 +4309,14 @@ impl eframe::App for Inox2dStudioApp {
 
 fn main() -> eframe::Result<()> {
 	let cli = Cli::parse();
-	let input_arg = if cli.sample { "--sample" } else { cli.input.as_str() };
-	let session = load_initial_session(input_arg).unwrap_or_else(|err| {
+	let (input_arg, source_path) = resolve_startup_input(&cli).unwrap_or_else(|err| {
+		eprintln!("Error resolving startup model: {err}");
+		std::process::exit(1);
+	});
+	let session = load_initial_session(&input_arg).unwrap_or_else(|err| {
 		eprintln!("Error loading '{input_arg}': {err}");
 		std::process::exit(1);
 	});
-	let source_path = if input_arg == "--sample" || input_arg == "sample" {
-		None
-	} else {
-		Some(PathBuf::from(input_arg))
-	};
 
 	if let Some(ref wpath) = cli.watch {
 		if !wpath.exists() {
@@ -4074,6 +4457,78 @@ mod tests {
 			if midori.is_file() {
 				app.open_model_from_path(&midori);
 				assert!(app.session.model.puppet.nodes.iter().count() >= 10);
+			}
+		}
+	}
+
+	#[test]
+	fn real_model_framing_dynamic_pads_and_clean_labels() {
+		assert_eq!(clean_display_name("Leg:: Right\0\0 "), "Leg:: Right");
+		assert_eq!(format_clean_zsort(-0.0), 0.0);
+		assert_eq!(format_clean_zsort(-0.02), 0.0);
+		assert_eq!(format_clean_zsort(-1.5), -1.5);
+
+		// Verify TransformStore::absolute offset is respected in world-space framing
+		let mut app = Inox2dStudioApp::new(
+			load_initial_session("--sample").unwrap(),
+			None,
+			None,
+			None,
+		);
+		let root_id = app.session.model.puppet.nodes.root_node_id;
+		let grp_id = app.session.model.puppet.next_node_uuid();
+		app.session.model.puppet.add_node(
+			root_id,
+			inox2d::node::InoxNode {
+				uuid: grp_id,
+				name: "OffsetGroup\0\0".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: inox2d::math::transform::TransformOffset {
+					translation: gvec3(0.0, 600.0, 0.0),
+					..Default::default()
+				},
+				lock_to_root: false,
+			},
+		);
+		let face_id = app
+			.session
+			.model
+			.puppet
+			.nodes
+			.iter()
+			.find(|n| n.name == "Face")
+			.map(|n| n.uuid);
+		if let Some(fid) = face_id {
+			let _ = app
+				.session
+				.model
+				.puppet
+				.nodes
+				.reparent(fid, grp_id);
+			app.session.model.puppet.reset_contexts();
+			app.fit_puppet_scale();
+			assert!(app.puppet_center.y > 100.0, "expected puppet_center shifted by parent TransformStore, got {:?}", app.puppet_center);
+		}
+
+		// Verify example-model discovery, framing, clean title & active 2D pads on Midori/Aka if present
+		let examples = find_example_models();
+		for (label, path) in examples {
+			if label.eq_ignore_ascii_case("Midori") || label.eq_ignore_ascii_case("Aka") {
+				app.open_model_from_path(&path);
+				assert!(!app.model_display_name().is_empty());
+				assert!(!app.model_display_name().contains('\0'));
+				assert!(app.puppet_scale > 0.05 && app.puppet_scale < 1.0, "{label} scale={}", app.puppet_scale);
+				assert!(
+					app.session.model.puppet.params.contains_key(&app.pad_params[0]),
+					"{label} missing pad_params[0]={}",
+					app.pad_params[0]
+				);
+				assert!(
+					app.session.model.puppet.params.contains_key(&app.pad_params[1]),
+					"{label} missing pad_params[1]={}",
+					app.pad_params[1]
+				);
 			}
 		}
 	}

@@ -5,6 +5,7 @@
 # Inochi2D project/model file
 *.inp
 *.inx
+*.psd
 
 # renderdoc capture file
 *.cap

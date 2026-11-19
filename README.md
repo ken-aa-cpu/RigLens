@@ -34,8 +34,8 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 | [`riglens-format`](riglens-format/) | Format-neutral rig IR (`RigDocument`), `Importer` / `Exporter` traits, `FormatRegistry`, `.rigjson` codec, and plugin conformance kit. |
 | [`inox2d`](inox2d/) | Core: `.inp`/`.inx` parser and serializer (`InpFormat` bridge), mesh-group / grid / path deformation, simple physics, animation, opacity store. |
 | [`inox2d-opengl`](inox2d-opengl/) | OpenGL renderer with live `.inp` hot-reload and WASM/WebGL support. |
-| [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer, rig auditor / auto-fixer, pure-Rust `.psd` import/export (`PsdFormat`), CLI, JSON-RPC 2.0 MCP server. |
-| [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): collapsible hierarchy & draw-order outliner, `GridDeformer` / `PathDeformer` / `MeshGroup` stage gizmos, clipping mask & binding keypoint grid editor, 10-point audit & load-warning diagnostics, multi-animation timeline, file browser dialogs, and crash-safe autosave recovery. |
+| [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer (composite stack, mask isolation, `ClipToLower` / `SliceFromLower` / `DestinationIn`), rig auditor / auto-fixer, pure-Rust `.psd` import/export (`PsdFormat`), CLI, JSON-RPC 2.0 MCP server (including `booster.*` live control commands). |
+| [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): hybrid `Exact FX` composite/mask preview + interactive GPU viewport, `Live Phys` playback, `File -> Example Models` (`--model midori\|aka\|sample`), collapsible outliner, `GridDeformer` / `PathDeformer` / `MeshGroup` stage gizmos, dynamic 2D parameter pads, 10-point audit & diagnostics, multi-animation timeline, file browser dialogs, autosave recovery, and integrated `Booster` M4 control panel. |
 | [`riglens-booster`](riglens-booster/) | Dual-channel GPU co-processor & 120Hz physics booster (`WindField`, coupled spring chains, VTube Studio Port 8001 WebSocket, Windows DX11 Spout2 bridge, `wgpu` XPBD soft-body, JFA 2D SDF 2.5D rim lighting & particles, M3 2D-Native DLSS alpha-aware super-resolution & dual-tier motion-vector frame generation). |
 | [`.agent/skills/inox2d-vtuber-rigger`](.agent/skills/inox2d-vtuber-rigger/SKILL.md) | Playbook for AI agents rigging VTuber puppets through the MCP server. |
 | [`docs/EXPORTER_PLUGINS.md`](docs/EXPORTER_PLUGINS.md) | Guide for writing custom Rust or `.rigjson`-based exporter plugins. |
@@ -69,12 +69,16 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 # Run tests (across all 6 workspace crates)
 cargo test -p riglens-format -p inox2d -p inox2d-mcp -p inox2d-opengl -p inox2d-gui -p riglens-booster
 
-# Open the built-in sample in the desktop studio
+# Open the default real example model (Midori/Aka if staged in assets/example-models/) or switch via --model
+cargo run -p inox2d-gui -- --model midori
+cargo run -p inox2d-gui -- --model aka
 cargo run -p inox2d-gui -- --sample
 
 # Live-sync the studio with the MCP server
 cargo run -p inox2d-gui -- live.inp --watch live.inp
 ```
+
+> Example `.inx` binaries (`Midori.inx`, `Aka.inx`) from `Inochi2D/example-models` are gitignored; place them in [`assets/example-models/`](assets/example-models/README.md) (or point `RIGLENS_EXAMPLE_MODELS` to their directory) for automatic loading and CC BY 4.0 attribution.
 
 ### CLI examples
 
@@ -120,7 +124,7 @@ cargo run --release -p riglens-booster -- run --spout-in VTubeStudioSpout --spou
 - [x] Co-processor M1 (`riglens-booster`): 120Hz coupled physics/wind engine, VTube Studio Public API (Port `8001`) WebSocket bridge, and Windows DX11 Spout2 shared-texture sender/receiver.
 - [x] Co-processor M2 (`riglens-booster`): `wgpu` GPU compute/render pipeline with screen-space XPBD soft-body mesh deformation, JFA 2D SDF normals & directional 2.5D rim lighting (including Windows screen-edge ambient sync), motion-driven GPU particles, and `gpu-bench`.
 - [x] Co-processor M3 (`riglens-booster`): **2D-Native DLSS** (`upscale_alpha_aware.wgsl` premultiplied-alpha Catmull-Rom super-resolution + edge sharpening, `flow_estimate.wgsl` + `MotionVectorField` dual-tier motion-vector frame generation via `frame_gen_warp.wgsl`).
-- [ ] Co-processor M4: launcher GUI (`inox2d-gui` / tray control) and MCP `booster.*` controls.
+- [x] Co-processor M4: integrated `Booster` tab & `BoosterController` in `inox2d-gui`, plus MCP `booster.*` controls (`booster.status`, `booster.list_spout`, `booster.configure`, `booster.start`, `booster.stop`).
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
 - [ ] Rename crates and publish documentation.
 

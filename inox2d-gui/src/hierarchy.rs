@@ -94,7 +94,7 @@ fn node_row_meta(puppet: &Puppet, node: &InoxNode, depth: usize, has_children: b
 	let zsort = puppet.node_zsort(node.uuid).unwrap_or(node.zsort);
 	TreeRow {
 		uuid: node.uuid,
-		name: node.name.clone(),
+		name: node.name.trim_end_matches('\0').to_owned(),
 		depth,
 		has_children,
 		is_collapsed,
@@ -286,16 +286,18 @@ pub fn draw_outliner_panel(
 						egui::FontId::proportional(11.0),
 						if is_sel { Color32::WHITE } else { TEXT_PRIMARY },
 					);
+					let disp_z = if row.zsort.abs() < 0.05 { 0.0 } else { row.zsort };
 					ui.painter().text(
 						pos2(up_r.left() - 5.0, row_rect.center().y),
 						Align2::RIGHT_CENTER,
-						format!("{:.1}", row.zsort),
+						format!("{:.1}", disp_z),
 						egui::FontId::monospace(9.5),
 						row.tag_color,
 					);
 				}
 
-				click_resp = click_resp.on_hover_text(format!("{} ({}) z={:.1}", row.name, row.tag, row.zsort));
+				let disp_z = if row.zsort.abs() < 0.05 { 0.0 } else { row.zsort };
+				click_resp = click_resp.on_hover_text(format!("{} ({}) z={:.1}", row.name, row.tag, disp_z));
 				if click_resp.clicked() {
 					actions.push(OutlinerAction::Select(row.uuid));
 				}

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use glam::{vec2, vec3, Mat4, Vec2, Vec4};
+use glam::{vec2, vec3, Mat4, Vec2, Vec3, Vec4};
 use image::{Rgba, RgbaImage};
 use inox2d::math::camera::Camera;
 use inox2d::model::Model;
@@ -20,6 +20,7 @@ pub struct RenderOptions {
 	pub width: u32,
 	pub height: u32,
 	pub scale: f32,
+	pub camera_pos: Vec2,
 	pub wireframe: bool,
 	pub dt: f32,
 	pub background: [u8; 4],
@@ -31,6 +32,7 @@ impl Default for RenderOptions {
 			width: 512,
 			height: 512,
 			scale: 1.0,
+			camera_pos: vec2(0.0, -35.0),
 			wireframe: false,
 			dt: 0.0,
 			background: [26, 28, 36, 255],
@@ -38,6 +40,7 @@ impl Default for RenderOptions {
 	}
 }
 
+#[derive(Clone)]
 struct MaskState {
 	active: bool,
 	has_normal_mask: bool,
@@ -48,7 +51,7 @@ struct MaskState {
 
 struct RenderState {
 	canvas: RgbaImage,
-	saved_canvas: Option<RgbaImage>,
+	canvas_stack: Vec<(RgbaImage, MaskState)>,
 	mask: MaskState,
 }
 
@@ -190,13 +193,57 @@ fn blend_channel(mode: BlendMode, s: f32, d: f32) -> f32 {
 
 fn blend_pixel(dst: &mut [u8; 4], src: [f32; 4], mode: BlendMode) {
 	let sa = src[3].clamp(0.0, 1.0);
-	if sa <= 0.001 {
-		return;
-	}
 	let dr = dst[0] as f32 / 255.0;
 	let dg = dst[1] as f32 / 255.0;
 	let db = dst[2] as f32 / 255.0;
 	let da = dst[3] as f32 / 255.0;
+
+	match mode {
+		BlendMode::ClipToLower => {
+			if sa <= 0.001 || da <= 0.001 {
+				return;
+			}
+			let or = src[0].clamp(0.0, 1.0) * sa + dr * (1.0 - sa);
+			let og = src[1].clamp(0.0, 1.0) * sa + dg * (1.0 - sa);
+			let ob = src[2].clamp(0.0, 1.0) * sa + db * (1.0 - sa);
+			dst[0] = (or * 255.0).clamp(0.0, 255.0) as u8;
+			dst[1] = (og * 255.0).clamp(0.0, 255.0) as u8;
+			dst[2] = (ob * 255.0).clamp(0.0, 255.0) as u8;
+			return;
+		}
+		BlendMode::SliceFromLower => {
+			if sa <= 0.001 {
+				return;
+			}
+			let eff_sa = sa * (1.0 - da);
+			let out_a = eff_sa + da;
+			if out_a <= 0.001 {
+				return;
+			}
+			let or = (src[0].clamp(0.0, 1.0) * eff_sa + dr * da) / out_a;
+			let og = (src[1].clamp(0.0, 1.0) * eff_sa + dg * da) / out_a;
+			let ob = (src[2].clamp(0.0, 1.0) * eff_sa + db * da) / out_a;
+			dst[0] = (or * 255.0).clamp(0.0, 255.0) as u8;
+			dst[1] = (og * 255.0).clamp(0.0, 255.0) as u8;
+			dst[2] = (ob * 255.0).clamp(0.0, 255.0) as u8;
+			dst[3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+			return;
+		}
+		BlendMode::DestinationIn => {
+			let out_a = (da * sa).clamp(0.0, 1.0);
+			if out_a <= 0.001 {
+				*dst = [0, 0, 0, 0];
+			} else {
+				dst[3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+			}
+			return;
+		}
+		_ => {}
+	}
+
+	if sa <= 0.001 {
+		return;
+	}
 
 	let sr = blend_channel(mode, src[0], dr);
 	let sg = blend_channel(mode, src[1], dg);
@@ -206,9 +253,9 @@ fn blend_pixel(dst: &mut [u8; 4], src: [f32; 4], mode: BlendMode) {
 	if out_a <= 1e-6 {
 		return;
 	}
-	let or = (sr * sa + dr * da * (1.0 - sa)) / out_a;
-	let og = (sg * sa + dg * da * (1.0 - sa)) / out_a;
-	let ob = (sb * sa + db * da * (1.0 - sa)) / out_a;
+	let or = (src[0] * sa * (1.0 - da) + dr * da * (1.0 - sa) + sr * sa * da) / out_a;
+	let og = (src[1] * sa * (1.0 - da) + dg * da * (1.0 - sa) + sg * sa * da) / out_a;
+	let ob = (src[2] * sa * (1.0 - da) + db * da * (1.0 - sa) + sb * sa * da) / out_a;
 
 	dst[0] = (or * 255.0).clamp(0.0, 255.0) as u8;
 	dst[1] = (og * 255.0).clamp(0.0, 255.0) as u8;
@@ -395,45 +442,90 @@ impl<'a> InoxRenderer for SoftwareRenderer<'a> {
 		_id: InoxNodeUuid,
 	) {
 		let mut st = self.state.borrow_mut();
-		let old = std::mem::replace(&mut st.canvas, RgbaImage::from_pixel(self.width, self.height, Rgba([0, 0, 0, 0])));
-		st.saved_canvas = Some(old);
+		let old_canvas = std::mem::replace(
+			&mut st.canvas,
+			RgbaImage::from_pixel(self.width, self.height, Rgba([0, 0, 0, 0])),
+		);
+		let old_mask = std::mem::replace(
+			&mut st.mask,
+			MaskState {
+				active: false,
+				has_normal_mask: false,
+				threshold: 0.5,
+				current_mode: MaskMode::Mask,
+				stencil: vec![0; (self.width * self.height) as usize],
+			},
+		);
+		st.canvas_stack.push((old_canvas, old_mask));
 	}
 
 	fn finish_composite_content(
 		&self,
-		_as_mask: bool,
+		as_mask: bool,
 		components: &CompositeComponents,
 		_render_ctx: &CompositeRenderCtx,
 		_id: InoxNodeUuid,
 	) {
 		let mut st = self.state.borrow_mut();
-		if let Some(mut parent) = st.saved_canvas.take() {
+		if let Some((mut parent, mut parent_mask)) = st.canvas_stack.pop() {
 			let layer = std::mem::replace(&mut st.canvas, RgbaImage::new(0, 0));
-			let op = components.drawable.blending.opacity;
+			let op = components.opacity.clamp(0.0, 1.0);
+			if as_mask {
+				for y in 0..self.height {
+					for x in 0..self.width {
+						let idx = (y * self.width + x) as usize;
+						let a = (layer.get_pixel(x, y).0[3] as f32 / 255.0) * op;
+						if a > parent_mask.threshold {
+							parent_mask.stencil[idx] = match parent_mask.current_mode {
+								MaskMode::Mask => 1,
+								MaskMode::Dodge => 0,
+							};
+						}
+					}
+				}
+				st.canvas = parent;
+				st.mask = parent_mask;
+				return;
+			}
 			let mode = components.drawable.blending.mode;
+			let tint = components.drawable.blending.tint.clamp(Vec3::ZERO, Vec3::ONE);
+			let screen_tint = components.drawable.blending.screen_tint.clamp(Vec3::ZERO, Vec3::ONE);
 			for y in 0..self.height {
 				for x in 0..self.width {
-					let sp = layer.get_pixel(x, y).0;
-					if sp[3] == 0 {
+					let idx = (y * self.width + x) as usize;
+					if parent_mask.active && parent_mask.stencil[idx] == 0 {
 						continue;
 					}
+					let sp = layer.get_pixel(x, y).0;
+					let a = sp[3] as f32 / 255.0;
+					if sp[3] == 0 && mode != BlendMode::DestinationIn {
+						continue;
+					}
+					let tr = sp[0] as f32 / 255.0;
+					let tg = sp[1] as f32 / 255.0;
+					let tb = sp[2] as f32 / 255.0;
+					let sr = 1.0 - (1.0 - tr) * (1.0 - screen_tint.x * a);
+					let sg = 1.0 - (1.0 - tg) * (1.0 - screen_tint.y * a);
+					let sb = 1.0 - (1.0 - tb) * (1.0 - screen_tint.z * a);
 					let src = [
-						sp[0] as f32 / 255.0,
-						sp[1] as f32 / 255.0,
-						sp[2] as f32 / 255.0,
-						(sp[3] as f32 / 255.0) * op,
+						(sr * tint.x).clamp(0.0, 1.0),
+						(sg * tint.y).clamp(0.0, 1.0),
+						(sb * tint.z).clamp(0.0, 1.0),
+						(a * op).clamp(0.0, 1.0),
 					];
 					blend_pixel(&mut parent.get_pixel_mut(x, y).0, src, mode);
 				}
 			}
 			st.canvas = parent;
+			st.mask = parent_mask;
 		}
 	}
 }
 
-/// Evaluate `model` at the given parameter overrides and render a frame to `RgbaImage`.
-pub fn render_frame(
+/// Evaluate `model` at the given parameter overrides and render a frame using caller-decoded textures.
+pub fn render_frame_with_textures(
 	model: &mut Model,
+	decoded: &[ShallowTexture],
 	params: &HashMap<String, Vec2>,
 	opts: &RenderOptions,
 ) -> Result<RgbaImage, String> {
@@ -455,9 +547,8 @@ pub fn render_frame(
 	}
 	model.puppet.end_frame(opts.dt);
 
-	let decoded = decode_model_textures(model.textures.iter());
 	let camera = Camera {
-		position: vec2(0.0, -35.0),
+		position: opts.camera_pos,
 		rotation: 0.0,
 		scale: vec2(opts.scale, opts.scale),
 	};
@@ -466,14 +557,14 @@ pub fn render_frame(
 
 	let renderer = SoftwareRenderer {
 		puppet: &model.puppet,
-		textures: &decoded,
+		textures: decoded,
 		mvp_cam,
 		width: opts.width,
 		height: opts.height,
 		wireframe: opts.wireframe,
 		state: RefCell::new(RenderState {
-			canvas: RgbaImage::from_pixel(opts.width, opts.height, Rgba(opts.background)),
-			saved_canvas: None,
+			canvas: RgbaImage::from_pixel(opts.width, opts.height, Rgba([0, 0, 0, 0])),
+			canvas_stack: Vec::new(),
 			mask: MaskState {
 				active: false,
 				has_normal_mask: false,
@@ -485,7 +576,37 @@ pub fn render_frame(
 	};
 
 	renderer.draw(&model.puppet);
-	Ok(renderer.state.into_inner().canvas)
+	let rendered = renderer.state.into_inner().canvas;
+	if opts.background[3] == 0 {
+		return Ok(rendered);
+	}
+	let mut out = RgbaImage::from_pixel(opts.width, opts.height, Rgba(opts.background));
+	for y in 0..opts.height {
+		for x in 0..opts.width {
+			let sp = rendered.get_pixel(x, y).0;
+			if sp[3] == 0 {
+				continue;
+			}
+			let src = [
+				sp[0] as f32 / 255.0,
+				sp[1] as f32 / 255.0,
+				sp[2] as f32 / 255.0,
+				sp[3] as f32 / 255.0,
+			];
+			blend_pixel(&mut out.get_pixel_mut(x, y).0, src, BlendMode::Normal);
+		}
+	}
+	Ok(out)
+}
+
+/// Evaluate `model` at the given parameter overrides and render a frame to `RgbaImage`.
+pub fn render_frame(
+	model: &mut Model,
+	params: &HashMap<String, Vec2>,
+	opts: &RenderOptions,
+) -> Result<RgbaImage, String> {
+	let decoded = decode_model_textures(model.textures.iter());
+	render_frame_with_textures(model, &decoded, params, opts)
 }
 
 /// Render a 3x3 contact sheet sweeping a 2D parameter across `[min..max]` in X and Y
@@ -514,6 +635,7 @@ pub fn render_grid(
 
 	let mut sheet = RgbaImage::from_pixel(total_w, total_h, Rgba([16, 18, 24, 255]));
 	let tile_scale = tile_size as f32 / 384.0;
+	let decoded = decode_model_textures(model.textures.iter());
 
 	for ry in 0..rows {
 		let ty = if rows == 1 { 0.0 } else { ry as f32 / 2.0 };
@@ -532,8 +654,9 @@ pub fn render_grid(
 				wireframe,
 				dt: 0.0,
 				background: [30, 33, 43, 255],
+				..RenderOptions::default()
 			};
-			let tile = render_frame(model, &frame_params, &opts)?;
+			let tile = render_frame_with_textures(model, &decoded, &frame_params, &opts)?;
 
 			let ox = gap + rx * (tile_size + gap);
 			let oy = gap + ry * (tile_size + gap);
@@ -606,6 +729,7 @@ pub fn render_anim_sheet(
 			wireframe,
 			dt,
 			background: [30, 33, 43, 255],
+			..RenderOptions::default()
 		};
 		let tile = render_frame(model, &frame_params, &opts)?;
 
@@ -676,6 +800,7 @@ pub fn render_anim_gif(
 			wireframe,
 			dt,
 			background: [26, 28, 36, 255],
+			..RenderOptions::default()
 		};
 		rendered.push(render_frame(model, &frame_params, &opts)?);
 	}
@@ -700,6 +825,7 @@ pub fn render_diff(
 		wireframe: false,
 		dt: 0.0,
 		background: [26, 28, 36, 255],
+		..RenderOptions::default()
 	};
 	let before_params: HashMap<String, Vec2> = params
 		.iter()
@@ -794,6 +920,7 @@ pub fn render_diagnostic(
 		wireframe: true,
 		dt: 0.0,
 		background: [20, 22, 30, 255],
+		..RenderOptions::default()
 	};
 	let mut img = render_frame(model, params, &opts)?;
 

@@ -21,6 +21,7 @@ pub enum InspectorTab {
 	Properties,
 	Bindings,
 	Audit,
+	Booster,
 }
 
 pub enum InspectorAction {
@@ -112,7 +113,7 @@ pub fn draw_properties_tab(
 
 	if state.rename_node_id != Some(id) {
 		state.rename_node_id = Some(id);
-		state.rename_buf = node.name.clone();
+		state.rename_buf = node.name.trim_end_matches('\0').to_owned();
 	}
 
 	let comps = &session.model.puppet.node_comps;
@@ -145,7 +146,7 @@ pub fn draw_properties_tab(
 		.puppet
 		.nodes
 		.get_node(cur_parent)
-		.map(|p| p.name.clone())
+		.map(|p| p.name.trim_end_matches('\0').to_owned())
 		.unwrap_or_else(|| "Root".to_owned());
 
 	let parent_candidates: Vec<(InoxNodeUuid, String)> = if is_root {
@@ -159,7 +160,7 @@ pub fn draw_properties_tab(
 			.filter(|cand| {
 				cand.uuid != id && !session.model.puppet.nodes.is_descendant(cand.uuid, id)
 			})
-			.map(|cand| (cand.uuid, cand.name.clone()))
+			.map(|cand| (cand.uuid, cand.name.trim_end_matches('\0').to_owned()))
 			.collect()
 	};
 
@@ -180,7 +181,7 @@ pub fn draw_properties_tab(
 				let nr = ui.add_sized([132.0, 18.0], egui::TextEdit::singleline(&mut state.rename_buf));
 				let commit_rename = (nr.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)))
 					&& !state.rename_buf.trim().is_empty()
-					&& state.rename_buf.trim() != node.name;
+					&& state.rename_buf.trim() != node.name.trim_end_matches('\0');
 				if commit_rename {
 					actions.push(InspectorAction::ExecCmd {
 						cmd: "node.configure",
@@ -203,7 +204,7 @@ pub fn draw_properties_tab(
 								actions.push(InspectorAction::ExecCmd {
 									cmd: "node.configure",
 									params: json::object! { node_uuid: id.0, parent_uuid: pid.0 },
-									ok_label: format!("Reparented '{}' -> '{}'", node.name, pname),
+									ok_label: format!("Reparented '{}' -> '{}'", node.name.trim_end_matches('\0'), pname),
 								});
 							}
 						}
@@ -399,7 +400,7 @@ pub fn draw_properties_tab(
 				.puppet
 				.nodes
 				.get_node(*src_id)
-				.map(|n| n.name.clone())
+				.map(|n| n.name.trim_end_matches('\0').to_owned())
 				.unwrap_or_else(|| format!("#{}", src_id.0));
 			ui.horizontal(|ui| {
 				ui.label(egui::RichText::new(&sname).size(11.0).color(TEXT_PRIMARY));
@@ -459,7 +460,7 @@ pub fn draw_properties_tab(
 			.nodes
 			.pre_order_iter()
 			.filter(|n| n.uuid != id && session.model.puppet.node_comps.get::<Drawable>(n.uuid).is_some())
-			.map(|n| (n.uuid, n.name.clone()))
+			.map(|n| (n.uuid, n.name.trim_end_matches('\0').to_owned()))
 			.collect();
 		if state
 			.mask_add_source
@@ -1004,7 +1005,7 @@ pub fn draw_audit_tab(
 				.puppet
 				.node_comps
 				.get::<RawNodeData>(n.uuid)
-				.map(|raw| (n.uuid, n.name.clone(), raw.type_name.clone(), raw.fields.len()))
+				.map(|raw| (n.uuid, n.name.trim_end_matches('\0').to_owned(), raw.type_name.clone(), raw.fields.len()))
 		})
 		.collect();
 	if !raw_nodes.is_empty() {

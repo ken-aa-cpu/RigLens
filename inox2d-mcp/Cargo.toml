@@ -8,6 +8,7 @@ description = "Creator rigging engine, headless renderer, CLI, and MCP server fo
 [dependencies]
 inox2d = { path = "../inox2d" }
 riglens-format = { path = "../riglens-format" }
+riglens-booster = { path = "../riglens-booster" }
 glam = "0.29"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 json = "0.12.4"

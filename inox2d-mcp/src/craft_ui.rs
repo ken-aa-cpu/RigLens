@@ -96,6 +96,7 @@ pub fn generate_rig_spec_card(model: &mut Model, out_png: &Path) -> Result<JsonV
 			wireframe: false,
 			dt: 0.0,
 			background: [0, 0, 0, 0],
+			..RenderOptions::default()
 		},
 	)?;
 	let preview_tex = encode_rgba_png(&preview);
