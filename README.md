@@ -36,6 +36,7 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 | [`inox2d-opengl`](inox2d-opengl/) | OpenGL renderer with live `.inp` hot-reload and WASM/WebGL support. |
 | [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer, rig auditor / auto-fixer, pure-Rust `.psd` import/export (`PsdFormat`), CLI, JSON-RPC 2.0 MCP server. |
 | [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): viewport, gizmos, parameter pads, timeline and curves. |
+| [`riglens-booster`](riglens-booster/) | Dual-channel co-processor & 120Hz physics booster (`WindField`, coupled spring chains, VTube Studio Port 8001 WebSocket client, pure-Rust Windows DX11 Spout2 bridge). |
 | [`.agent/skills/inox2d-vtuber-rigger`](.agent/skills/inox2d-vtuber-rigger/SKILL.md) | Playbook for AI agents rigging VTuber puppets through the MCP server. |
 | [`docs/EXPORTER_PLUGINS.md`](docs/EXPORTER_PLUGINS.md) | Guide for writing custom Rust or `.rigjson`-based exporter plugins. |
 
@@ -110,6 +111,8 @@ cargo run -p inox2d-mcp -- commands
 - [ ] P1 remaining nodes (`AnimatedPart`, `DynamicComposite`, `Driver`, `Shapes`, `Mask`) & verify files saved by current nijigenerate builds.
 - [x] Format-neutral rig model (`riglens-format`) and public **`Importer` / `Exporter` traits** + conformance kit so users can bind their own library and emit any format.
 - [x] P3 algorithm upgrades: nijilive-parity physics initialization & NaN/panic guards, 10-point rig auditor, and constrained Delaunay meshing with adaptive joint refinement.
+- [x] Co-processor M1 (`riglens-booster`): 120Hz coupled physics/wind engine, VTube Studio Public API (Port `8001`) WebSocket bridge, and Windows DX11 Spout2 shared-texture sender/receiver.
+- [ ] Co-processor M2–M4: `wgpu` XPBD soft-body mesh deformation, JFA 2D SDF rim lighting + particles, alpha-aware 2D super-res / motion-vector frame gen, and launcher UI.
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
 - [ ] Rename crates and publish documentation.
 
