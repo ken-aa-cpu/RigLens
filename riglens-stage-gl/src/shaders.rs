@@ -108,9 +108,11 @@ void main() {
 		return;
 	}
 	vec4 texColor = texture(albedo, texUVs);
-	vec3 screenOut = vec3(1.0) - ((vec3(1.0) - texColor.rgb) * (vec3(1.0) - screenColor * texColor.a));
+	float ta = clamp(texColor.a, 0.0, 1.0);
+	vec3 texStraight = (ta > 0.0005) ? clamp(texColor.rgb / ta, 0.0, 1.0) : vec3(0.0);
+	vec3 screenOut = vec3(1.0) - ((vec3(1.0) - texStraight) * (vec3(1.0) - screenColor));
 	vec3 straight = clamp(screenOut * multColor, 0.0, 1.0);
-	float sa = clamp(texColor.a * opacity, 0.0, 1.0);
+	float sa = clamp(ta * opacity, 0.0, 1.0);
 
 	if (blendMode == 0) {
 		outColor = vec4(straight * sa, sa);

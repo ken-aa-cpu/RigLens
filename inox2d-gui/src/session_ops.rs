@@ -85,8 +85,11 @@ impl Inox2dStudioApp {
 			&& ((max_pt.x - min_pt.x) > 8.0 || (max_pt.y - min_pt.y) > 8.0)
 		{
 			self.puppet_center = (min_pt + max_pt) * 0.5;
-			let span = (max_pt.x - min_pt.x).max(max_pt.y - min_pt.y).max(64.0);
-			self.puppet_scale = ((self.stage_res as f32 * 0.86) / span).clamp(0.05, 2.0);
+			let span_x = (max_pt.x - min_pt.x).max(64.0);
+			let span_y = (max_pt.y - min_pt.y).max(64.0);
+			let sx = (self.stage_viewport_size.x.max(200.0) * 0.86) / span_x;
+			let sy = (self.stage_viewport_size.y.max(200.0) * 0.86) / span_y;
+			self.puppet_scale = sx.min(sy).clamp(0.05, 4.0);
 		} else {
 			self.puppet_center = gvec2(0.0, 35.0);
 			self.puppet_scale = 0.85;
@@ -120,6 +123,7 @@ impl Inox2dStudioApp {
 		self.inspector_state.rename_node_id = None;
 		self.gpu_tex_dirty = true;
 		self.gl_geo = None;
+		self.needs_initial_fit = true;
 		self.model_gen = self.model_gen.wrapping_add(1);
 		self.sync_watch_out();
 		self.fit_puppet_scale();

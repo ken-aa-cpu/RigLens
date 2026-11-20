@@ -3,7 +3,11 @@ name = "inox2d-gui"
 version = "0.1.0"
 edition = "2021"
 license = "BSD-2-Clause"
-description = "Craft-style native Rust desktop studio (egui) for Inox2D / inox2d-mcp"
+repository = "https://github.com/ken-aa-cpu/RigLens"
+readme = "../README.md"
+keywords = ["inochi2d", "vtuber", "egui", "rigging", "studio"]
+categories = ["gui", "graphics"]
+description = "Craft-style native Rust desktop studio (egui) for RigLens / inox2d-mcp"
 
 [dependencies]
 inox2d = { path = "../inox2d" }

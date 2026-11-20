@@ -31,9 +31,12 @@ pub(crate) struct Cli {
 	/// Render several frames, capture a PNG screenshot of the studio window, and exit
 	#[arg(long)]
 	pub(crate) screenshot: Option<PathBuf>,
-	/// Start with interactive GPU FBO+Stencil stage instead of static CPU Exact FX
+	/// Start with interactive GPU FBO+Stencil stage (default)
 	#[arg(long)]
 	pub(crate) gpu_stage: bool,
+	/// Start with static CPU Exact FX reference renderer instead of GPU stage
+	#[arg(long)]
+	pub(crate) cpu_exact: bool,
 }
 
 pub(crate) const VISEME_PRESETS: [(&str, f32, f32); 6] = [

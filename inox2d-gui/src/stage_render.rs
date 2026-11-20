@@ -75,12 +75,20 @@ impl Inox2dStudioApp {
 		let mut h = DefaultHasher::new();
 		self.session.revision.hash(&mut h);
 		self.stage_res.hash(&mut h);
+		self.stage_viewport_size.x.to_bits().hash(&mut h);
+		self.stage_viewport_size.y.to_bits().hash(&mut h);
+		self.pixels_per_point.to_bits().hash(&mut h);
 		self.puppet_scale.to_bits().hash(&mut h);
 		self.puppet_center.x.to_bits().hash(&mut h);
 		self.puppet_center.y.to_bits().hash(&mut h);
 		self.wireframe.hash(&mut h);
 		self.xray_mode.hash(&mut h);
 		self.exact_composite.hash(&mut h);
+		if self.exact_composite || self.xray_mode {
+			self.view_zoom.to_bits().hash(&mut h);
+			self.view_pan.x.to_bits().hash(&mut h);
+			self.view_pan.y.to_bits().hash(&mut h);
+		}
 		self.live_physics.hash(&mut h);
 		self.stage_drag.is_some().hash(&mut h);
 		self.playing.hash(&mut h);
@@ -135,9 +143,23 @@ impl Inox2dStudioApp {
 		}
 
 		let start = Instant::now();
-		let pmap = self.filtered_params();
+		let mut pmap = self.filtered_params();
+		let booster_running = self.session.booster.is_running();
+		if booster_running {
+			let tel = self.session.booster.latest_telemetry();
+			let lo = &tel.last_output;
+			for (pname, val) in [
+				("Hair:: Sway", gvec2(lo.hair.x.clamp(-1.0, 1.0), lo.hair.y.clamp(-1.0, 1.0))),
+				("Breath", gvec2((0.5 + lo.body_bounce_y * 2.5).clamp(0.0, 1.0), 0.0)),
+			] {
+				if self.session.model.puppet.params.contains_key(pname) && !pmap.contains_key(pname) {
+					pmap.insert(pname.to_owned(), val);
+				}
+			}
+		}
 		let dt = if self.playing
 			|| self.live_physics
+			|| booster_running
 			|| self.tool == StudioTool::Physics
 			|| matches!(self.stage_drag, Some(StageDrag::Pose25D))
 		{
@@ -146,8 +168,21 @@ impl Inox2dStudioApp {
 			0.0
 		};
 
+		let vp_w = self.stage_viewport_size.x.max(64.0);
+		let vp_h = self.stage_viewport_size.y.max(64.0);
+		let phys_w = (vp_w * self.pixels_per_point).round() as u32;
+		let phys_h = (vp_h * self.pixels_per_point).round() as u32;
+		let max_side = phys_w.max(phys_h).max(1);
+		let cap = 1600u32;
+		let down = if max_side > cap { cap as f32 / max_side as f32 } else { 1.0 };
+		let render_w = ((phys_w as f32 * down).round() as u32).clamp(64, cap);
+		let render_h = ((phys_h as f32 * down).round() as u32).clamp(64, cap);
+		let eff = (self.puppet_scale * self.view_zoom).max(0.05);
+		let render_scale = eff * (render_w as f32 / vp_w);
+		let render_cam_pos = -self.puppet_center + gvec2(self.view_pan.x / eff, self.view_pan.y / eff);
+
 		if self.xray_mode {
-			if let Ok(img) = render_diagnostic(&mut self.session.model, &pmap, self.stage_res, self.stage_res, self.puppet_scale) {
+			if let Ok(img) = render_diagnostic(&mut self.session.model, &pmap, render_w, render_h, eff * (render_w as f32 / vp_w)) {
 				let (w, h) = img.dimensions();
 				let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
 				if let Some(tex) = self.stage_tex.as_mut() {
@@ -157,13 +192,11 @@ impl Inox2dStudioApp {
 				}
 			}
 		} else if use_exact {
-			let render_side = self.stage_res.max(720).min(720);
-			let render_scale = self.puppet_scale * (render_side as f32 / self.stage_res.max(1) as f32);
 			let opts = RenderOptions {
-				width: render_side,
-				height: render_side,
+				width: render_w,
+				height: render_h,
 				scale: render_scale,
-				camera_pos: -self.puppet_center,
+				camera_pos: render_cam_pos,
 				wireframe: self.wireframe,
 				dt,
 				background: [0, 0, 0, 0],
@@ -235,12 +268,16 @@ impl Inox2dStudioApp {
 	}
 
 	pub(crate) fn mvp_cam(&self) -> Mat4 {
+		let eff = (self.puppet_scale * self.view_zoom).max(0.05);
 		let cam = Camera {
-			position: -self.puppet_center,
+			position: -self.puppet_center + gvec2(self.view_pan.x / eff, self.view_pan.y / eff),
 			rotation: 0.0,
-			scale: gvec2(self.puppet_scale, self.puppet_scale),
+			scale: gvec2(eff, eff),
 		};
-		cam.matrix(gvec2(self.stage_res as f32, self.stage_res as f32))
+		cam.matrix(gvec2(
+			self.stage_viewport_size.x.max(64.0),
+			self.stage_viewport_size.y.max(64.0),
+		))
 	}
 
 	pub(crate) fn world_to_ui(&self, canvas_rect: Rect, world_pt: GVec2) -> egui::Pos2 {

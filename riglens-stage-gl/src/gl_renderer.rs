@@ -111,7 +111,7 @@ impl StageGlRenderer {
 		unsafe {
 			let programs = StagePrograms::new(gl)?;
 			let is_es = is_gles(gl);
-			let max_tex_size = gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).clamp(512, 4096);
+			let max_tex_size = gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).clamp(512, 8192);
 
 			let mesh_vao = gl.create_vertex_array()?;
 			let vbo_verts = gl.create_buffer()?;
@@ -203,8 +203,9 @@ impl StageGlRenderer {
 	}
 
 	unsafe fn ensure_targets(&mut self, gl: &glow::Context, w: i32, h: i32) {
-		let w = w.clamp(1, self.max_tex_size);
-		let h = h.clamp(1, self.max_tex_size);
+		// Render at 2x supersampled resolution (clamped to GPU max texture size) for crisp lineart & stencil masks
+		let w = (w.max(1) * 2).clamp(1, self.max_tex_size);
+		let h = (h.max(1) * 2).clamp(1, self.max_tex_size);
 		if self.target_size == (w, h) {
 			return;
 		}
@@ -240,8 +241,17 @@ impl StageGlRenderer {
 		}
 		for inp in inputs {
 			if let Ok(tex) = gl.create_texture() {
+				// Upload premultiplied RGBA8 + full mipmap pyramid to eliminate dark haloing and aliasing on minification
+				let mut premul = Vec::with_capacity(inp.pixels.len());
+				for px in inp.pixels.chunks_exact(4) {
+					let a = px[3] as u16;
+					premul.push(((px[0] as u16 * a + 127) / 255) as u8);
+					premul.push(((px[1] as u16 * a + 127) / 255) as u8);
+					premul.push(((px[2] as u16 * a + 127) / 255) as u8);
+					premul.push(px[3]);
+				}
 				gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
 				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
 				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
 				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
@@ -254,8 +264,9 @@ impl StageGlRenderer {
 					0,
 					glow::RGBA,
 					glow::UNSIGNED_BYTE,
-					Some(&inp.pixels),
+					Some(&premul),
 				);
+				gl.generate_mipmap(glow::TEXTURE_2D);
 				gl.bind_texture(glow::TEXTURE_2D, None);
 				self.textures.push(tex);
 			}

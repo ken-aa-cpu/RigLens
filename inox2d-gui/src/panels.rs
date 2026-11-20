@@ -116,7 +116,7 @@ impl Inox2dStudioApp {
 			ui.menu_button("View", |ui| {
 				ui.checkbox(&mut self.wireframe, "Show Render Wireframe");
 				ui.checkbox(&mut self.xray_mode, "X-Ray Geometric Diagnostic");
-				ui.checkbox(&mut self.exact_composite, "Exact FX (Composites & Masks)");
+				ui.checkbox(&mut self.exact_composite, "CPU Exact FX (Reference)");
 				ui.checkbox(&mut self.live_physics, "Live Physics Preview");
 				ui.checkbox(&mut self.show_sel_overlay, "Selected Node Vector Overlay");
 				if ui.button("Fit Puppet to Stage (Z)").clicked() {
@@ -402,7 +402,8 @@ impl Inox2dStudioApp {
 				}
 
 				ui.checkbox(&mut self.live_physics, "Live Phys");
-				ui.checkbox(&mut self.exact_composite, "Exact FX");
+				ui.checkbox(&mut self.exact_composite, "CPU Exact FX")
+					.on_hover_text("Optional CPU reference renderer (GPU FBO+Stencil stage with mipmaps & 2x SSAA is active by default)");
 				ui.checkbox(&mut self.xray_mode, "X-Ray");
 				ui.checkbox(&mut self.wireframe, "Wireframe");
 			});

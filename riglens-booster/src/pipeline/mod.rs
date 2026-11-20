@@ -498,6 +498,17 @@ impl BoosterController {
 		self.status()
 	}
 
+	/// Fast non-blocking check whether the background booster worker is alive and running.
+	pub fn is_running(&self) -> bool {
+		self.is_worker_running()
+			&& self.live.lock().map(|g| g.running).unwrap_or(false)
+	}
+
+	/// Snapshot latest physics & frame telemetry without enumerating system Spout2 senders.
+	pub fn latest_telemetry(&self) -> BoosterTelemetry {
+		self.telemetry.lock().map(|g| g.clone()).unwrap_or_default()
+	}
+
 	pub fn status(&self) -> BoosterStatus {
 		let worker_alive = self.is_worker_running();
 		let live = self.live.lock().map(|g| (g.running, g.vts_connected, g.gpu_adapter.clone(), g.last_error.clone())).unwrap_or_default();
@@ -595,5 +606,47 @@ mod tests {
 
 		let stopped = ctrl.stop();
 		assert!(!stopped.running, "expected controller stopped");
+	}
+
+	#[tokio::test]
+	async fn pipeline_with_live_gpu_processes_frames_and_exposes_telemetry() {
+		let mut src = MemoryFrameBus::new("gpu-in");
+		let dst = MemoryFrameBus::new("gpu-out");
+		let w = 64u32;
+		let h = 64u32;
+		let mut pixels = vec![0u8; (w * h * 4) as usize];
+		for y in 16..48 {
+			for x in 16..48 {
+				let i = ((y * w + x) as usize) * 4;
+				pixels[i] = 180;
+				pixels[i + 1] = 210;
+				pixels[i + 2] = 255;
+				pixels[i + 3] = 255;
+			}
+		}
+		let sample = FrameBuffer::new(w, h, PixelFormat::Rgba8, pixels).unwrap();
+		src.send_frame(&sample).unwrap();
+
+		let cfg = BoosterConfig {
+			tick_hz: 120.0,
+			enable_vts: false,
+			enable_gpu: true,
+			..Default::default()
+		};
+		let mut pipeline = BoosterPipeline::new(cfg, Some(Box::new(src)), Some(Box::new(dst.clone())));
+		let gpu_ready = pipeline.init_gpu().await.is_ok();
+		let stop = Arc::new(AtomicBool::new(false));
+		let shared = Arc::new(Mutex::new(BoosterTelemetry::default()));
+		let telemetry = pipeline.run_with_telemetry(stop, Some(3), Some(shared.clone())).await;
+
+		assert_eq!(telemetry.ticks, 3);
+		assert_eq!(telemetry.frames_forwarded, 3);
+		if gpu_ready {
+			assert_eq!(telemetry.gpu_frames_processed, 3);
+			assert!(telemetry.avg_gpu_ms >= 0.0);
+		}
+		let snap = shared.lock().unwrap().clone();
+		assert_eq!(snap.ticks, 3);
+		assert!(dst.clone().recv_frame().unwrap().is_some());
 	}
 }

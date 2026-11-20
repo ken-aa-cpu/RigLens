@@ -70,28 +70,44 @@ impl Inox2dStudioApp {
 
 		let resp = ui.allocate_rect(rect, Sense::click_and_drag());
 
-		// Handle scroll-wheel zoom
+		// Handle scroll-wheel zoom anchored around cursor
 		if resp.hovered() {
 			let scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
 			if scroll.abs() > 0.1 {
 				let factor = (1.0 + scroll * 0.0015).clamp(0.85, 1.18);
-				self.view_zoom = (self.view_zoom * factor).clamp(0.4, 3.5);
+				let new_zoom = (self.view_zoom * factor).clamp(0.25, 12.0);
+				if let Some(hp) = resp.hover_pos() {
+					let rel = hp - rect.center();
+					let ratio = new_zoom / self.view_zoom.max(0.05);
+					self.view_pan = rel - (rel - self.view_pan) * ratio;
+				}
+				self.view_zoom = new_zoom;
 			}
 		}
 
-		let card_side = (rect.width().min(rect.height()) - 32.0).max(220.0) * self.view_zoom;
-		let card_center = rect.center() + self.view_pan;
-		let canvas_rect = Rect::from_center_size(card_center, vec2(card_side, card_side));
-		let world_per_ui = (self.stage_res as f32 / canvas_rect.width().max(1.0)) / self.puppet_scale.max(0.05);
-		let px_per_world = 1.0 / world_per_ui.max(1e-4);
+		// Sync viewport size so Camera::matrix matches the full stage rect at 1:1 logical pixels
+		let new_vp = gvec2(rect.width().max(64.0), rect.height().max(64.0));
+		let vp_changed = (self.stage_viewport_size - new_vp).length_squared() > 1.0;
+		self.stage_viewport_size = new_vp;
+		if self.needs_initial_fit && rect.width() > 80.0 && rect.height() > 80.0 {
+			self.fit_puppet_scale();
+			self.needs_initial_fit = false;
+			self.cached_rev = u64::MAX;
+		} else if vp_changed && !self.live_physics {
+			self.cached_rev = u64::MAX;
+		}
 
-		// Stage checkerboard card
-		painter.rect_filled(canvas_rect, 2.0, Color32::from_rgb(24, 25, 30));
-		let clip_painter = ui.painter_at(canvas_rect.intersect(rect));
-		let tile = 16.0;
+		let canvas_rect = rect;
+		let px_per_world = (self.puppet_scale * self.view_zoom).max(0.05);
+		let world_per_ui = 1.0 / px_per_world;
+
+		// Full-viewport stage checkerboard
+		let clip_painter = ui.painter_at(canvas_rect);
+		clip_painter.rect_filled(canvas_rect, 0.0, Color32::from_rgb(24, 25, 30));
+		let tile = 20.0;
 		let cols = (canvas_rect.width() / tile).ceil() as i32;
 		let rows = (canvas_rect.height() / tile).ceil() as i32;
-		let c1 = Color32::from_rgb(31, 33, 40);
+		let c1 = Color32::from_rgb(30, 32, 39);
 		for r in 0..rows {
 			for c in 0..cols {
 				if (r + c) % 2 == 0 {
@@ -103,7 +119,6 @@ impl Inox2dStudioApp {
 				}
 			}
 		}
-		painter.rect_stroke(canvas_rect, 2.0, Stroke::new(1.0_f32, Color32::from_rgb(18, 18, 22)));
 
 		if self.xray_mode || self.use_exact_stage() {
 			if let Some(tex) = &self.stage_tex {

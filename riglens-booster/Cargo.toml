@@ -3,7 +3,11 @@ name = "riglens-booster"
 version = "0.1.0"
 edition = "2021"
 license = "BSD-2-Clause"
-description = "Dual-channel GPU co-processor & advanced physics booster (VTube Studio Port 8001 + Windows Spout2 zero-copy bridge) for RigLens and Live2D"
+repository = "https://github.com/ken-aa-cpu/RigLens"
+readme = "../README.md"
+keywords = ["vtuber", "wgpu", "spout2", "physics", "super-resolution"]
+categories = ["graphics", "multimedia::video"]
+description = "Dual-channel GPU co-processor & 120Hz physics booster (VTube Studio Port 8001 + Windows Spout2 zero-copy bridge) for RigLens and Live2D"
 
 [dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }

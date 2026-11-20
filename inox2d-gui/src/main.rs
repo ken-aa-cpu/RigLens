@@ -70,6 +70,9 @@ pub(crate) struct Inox2dStudioApp {
 	pub(crate) vertex_mode: VertexEditMode,
 
 	pub(crate) stage_res: u32,
+	pub(crate) stage_viewport_size: GVec2,
+	pub(crate) pixels_per_point: f32,
+	pub(crate) needs_initial_fit: bool,
 	pub(crate) puppet_scale: f32,
 	pub(crate) puppet_center: GVec2,
 	pub(crate) view_zoom: f32,
@@ -185,14 +188,17 @@ impl Inox2dStudioApp {
 			inspector_state: BindingEditorState::default(),
 			tool: StudioTool::Select,
 			vertex_mode: VertexEditMode::DeformKeypoint,
-			stage_res: 512,
+			stage_res: 1024,
+			stage_viewport_size: glam::vec2(660.0, 460.0),
+			pixels_per_point: 1.0,
+			needs_initial_fit: true,
 			puppet_scale: 0.92,
 			puppet_center: GVec2::ZERO,
 			view_zoom: 1.0,
 			view_pan: Vec2::ZERO,
 			wireframe: false,
 			xray_mode: false,
-			exact_composite: true,
+			exact_composite: false,
 			live_physics: false,
 			show_sel_overlay: true,
 			brush_param: brush_param.clone(),
@@ -259,6 +265,7 @@ impl eframe::App for Inox2dStudioApp {
 
 	fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 		self.frame_counter += 1;
+		self.pixels_per_point = ctx.pixels_per_point().max(1.0);
 		self.poll_watch_in();
 		self.handle_shortcuts(ctx);
 
@@ -271,8 +278,9 @@ impl eframe::App for Inox2dStudioApp {
 			);
 		}
 
+		let frame_dt = self.last_tick.elapsed().as_secs_f32().clamp(1.0 / 240.0, 0.05);
+		let booster_active = self.session.booster.is_running();
 		if self.playing {
-			let dt = self.last_tick.elapsed().as_secs_f32().min(0.1);
 			let anim_len = self
 				.session
 				.model
@@ -281,7 +289,7 @@ impl eframe::App for Inox2dStudioApp {
 				.get(self.active_anim.as_str())
 				.map(|a| a.length.max(1) as f32)
 				.unwrap_or(120.0);
-			self.playhead_frame += dt * 30.0;
+			self.playhead_frame += frame_dt * 30.0;
 			if self.playhead_frame > anim_len {
 				if self.loop_anim {
 					self.playhead_frame = 1.0 + (self.playhead_frame - 1.0).rem_euclid(anim_len);
@@ -292,7 +300,7 @@ impl eframe::App for Inox2dStudioApp {
 			}
 			self.apply_anim_at_playhead();
 			ctx.request_repaint();
-		} else if self.live_physics && self.screenshot_out.is_none() {
+		} else if (self.live_physics || booster_active) && self.screenshot_out.is_none() {
 			self.cached_sig = u64::MAX;
 			ctx.request_repaint();
 		} else if self.inspector_state.tab == InspectorTab::Booster && self.screenshot_out.is_none() {
@@ -621,7 +629,9 @@ fn main() -> eframe::Result<()> {
 				cli.watch,
 				cli.screenshot,
 			);
-			if cli.gpu_stage {
+			if cli.cpu_exact {
+				app.exact_composite = true;
+			} else if cli.gpu_stage {
 				app.exact_composite = false;
 			}
 			Ok(Box::new(app))
