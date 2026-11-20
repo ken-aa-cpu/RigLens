@@ -177,11 +177,15 @@ fn deserialize_simple_physics(obj: JsonObject) -> InoxParseResult<SimplePhysics>
 	})
 }
 
-fn deserialize_drawable(obj: JsonObject) -> InoxParseResult<Drawable> {
+fn deserialize_drawable_with_default(obj: JsonObject, require_blend_mode: bool) -> InoxParseResult<Drawable> {
 	Ok(Drawable {
 		blending: Blending {
 			mode: {
-				let name = obj.get_str("blend_mode")?;
+				let name = if require_blend_mode {
+					obj.get_str("blend_mode")?
+				} else {
+					obj.get_str("blend_mode").unwrap_or("Normal")
+				};
 				BlendMode::from_name(name).unwrap_or_else(|| {
 					tracing::warn!("unknown blend mode {name:?}, falling back to Normal");
 					BlendMode::default()
@@ -209,6 +213,14 @@ fn deserialize_drawable(obj: JsonObject) -> InoxParseResult<Drawable> {
 			}
 		},
 	})
+}
+
+fn deserialize_drawable(obj: JsonObject) -> InoxParseResult<Drawable> {
+	deserialize_drawable_with_default(obj, true)
+}
+
+fn deserialize_drawable_relaxed(obj: JsonObject) -> InoxParseResult<Drawable> {
+	deserialize_drawable_with_default(obj, false)
 }
 
 fn deserialize_mesh(obj: JsonObject) -> InoxParseResult<Mesh> {
@@ -376,6 +388,56 @@ impl Puppet {
 			"Composite" => {
 				self.node_comps.add(id, deserialize_drawable(data)?);
 				self.node_comps.add(id, Composite {});
+			}
+			"DynamicComposite" => {
+				self.node_comps.add(id, deserialize_drawable_relaxed(data)?);
+				self.node_comps.add(id, Composite {});
+				self.node_comps.add(
+					id,
+					DynamicComposite {
+						auto_resized: data.get_bool("auto_resized").unwrap_or(false),
+					},
+				);
+			}
+			"AnimatedPart" => {
+				self.node_comps.add(id, deserialize_drawable_relaxed(data)?);
+				if let Ok(tm) = deserialize_textured_mesh(data) {
+					self.node_comps.add(id, tm);
+				}
+				if let Ok(mesh_obj) = data.get_object("mesh") {
+					self.node_comps.add(id, vals("mesh", deserialize_mesh(mesh_obj))?);
+				}
+				self.node_comps.add(
+					id,
+					AnimatedPart {
+						frame_rate: data.get_f32("frame_rate").unwrap_or(24.0),
+						loop_anim: data.get_bool("loop").unwrap_or(true),
+					},
+				);
+			}
+			"Mask" => {
+				if data.0.get("blend_mode").is_some()
+					|| data.0.get("masks").is_some()
+					|| data.0.get("opacity").is_some()
+				{
+					self.node_comps.add(id, deserialize_drawable_relaxed(data)?);
+				}
+				if let Ok(mesh_obj) = data.get_object("mesh") {
+					self.node_comps.add(id, vals("mesh", deserialize_mesh(mesh_obj))?);
+				}
+				self.node_comps.add(id, MaskNode);
+			}
+			"Shapes" => {
+				let closed = data.get_bool("closed").unwrap_or(false);
+				let vertices = match data.get_list("vertices") {
+					Ok(vals) if !vals.is_empty() => deserialize_vec2s_flat(vals)?,
+					_ => Vec::new(),
+				};
+				self.node_comps.add(id, Shapes { closed, vertices });
+			}
+			"Driver" => {
+				let driver_type = data.get_str("driver_type").unwrap_or("Generic").to_owned();
+				self.node_comps.add(id, Driver { driver_type });
 			}
 			"SimplePhysics" => {
 				self.node_comps.add(id, deserialize_simple_physics(data)?);
@@ -556,6 +618,83 @@ fn managed_keys_for_type(ty: &str) -> Option<&'static [&'static str]> {
 			"mask_threshold",
 			"masks",
 			"opacity",
+		],
+		"DynamicComposite" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"blend_mode",
+			"tint",
+			"screenTint",
+			"mask_threshold",
+			"masks",
+			"opacity",
+			"auto_resized",
+		],
+		"AnimatedPart" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"mesh",
+			"textures",
+			"blend_mode",
+			"tint",
+			"screenTint",
+			"mask_threshold",
+			"masks",
+			"opacity",
+			"frame_rate",
+			"loop",
+		],
+		"Mask" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"mesh",
+			"blend_mode",
+			"tint",
+			"screenTint",
+			"mask_threshold",
+			"masks",
+			"opacity",
+		],
+		"Shapes" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"closed",
+			"vertices",
+		],
+		"Driver" => &[
+			"uuid",
+			"name",
+			"type",
+			"enabled",
+			"zsort",
+			"transform",
+			"lockToRoot",
+			"children",
+			"driver_type",
 		],
 		"SimplePhysics" => &[
 			"uuid",

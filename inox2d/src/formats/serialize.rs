@@ -5,9 +5,9 @@ use json::JsonValue;
 use crate::animation::PuppetAnimation;
 use crate::math::transform::TransformOffset;
 use crate::node::components::{
-	ExtraFields, GridDeformer, MeshExtraFields, PathDeformer, RawNodeData,
-	BlendMode, Composite, Drawable, MaskMode, Masks, Mesh, MeshGroup, PhysicsModel, PhysicsParamMapMode,
-	SimplePhysics, TexturedMesh,
+	AnimatedPart, BlendMode, Composite, Drawable, Driver, DynamicComposite, ExtraFields, GridDeformer, MaskMode,
+	MaskNode, Masks, Mesh, MeshExtraFields, MeshGroup, PathDeformer, PhysicsModel, PhysicsParamMapMode, RawNodeData,
+	Shapes, SimplePhysics, TexturedMesh,
 };
 use crate::node::InoxNodeUuid;
 use crate::params::{Binding, BindingValues, Param};
@@ -233,6 +233,11 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 	let has_tm = puppet.node_comps.get::<TexturedMesh>(id);
 	let has_mesh = puppet.node_comps.get::<Mesh>(id);
 	let has_comp = puppet.node_comps.get::<Composite>(id);
+	let has_dyn_comp = puppet.node_comps.get::<DynamicComposite>(id);
+	let has_anim_part = puppet.node_comps.get::<AnimatedPart>(id);
+	let has_mask_node = puppet.node_comps.get::<MaskNode>(id);
+	let has_shapes = puppet.node_comps.get::<Shapes>(id);
+	let has_driver = puppet.node_comps.get::<Driver>(id);
 	let has_phys = puppet.node_comps.get::<SimplePhysics>(id);
 	let has_mg = puppet.node_comps.get::<MeshGroup>(id);
 	let has_grid = puppet.node_comps.get::<GridDeformer>(id);
@@ -242,6 +247,10 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 
 	let ty: &str = if let Some(raw) = has_raw {
 		raw.type_name.as_str()
+	} else if has_anim_part.is_some() {
+		"AnimatedPart"
+	} else if has_mask_node.is_some() {
+		"Mask"
 	} else if has_tm.is_some() && has_mesh.is_some() {
 		"Part"
 	} else if has_mg.is_some() && has_mesh.is_some() {
@@ -250,8 +259,14 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 		"GridDeformer"
 	} else if has_path.is_some() {
 		"PathDeformer"
+	} else if has_dyn_comp.is_some() {
+		"DynamicComposite"
 	} else if has_comp.is_some() {
 		"Composite"
+	} else if has_shapes.is_some() {
+		"Shapes"
+	} else if has_driver.is_some() {
+		"Driver"
 	} else if has_phys.is_some() {
 		"SimplePhysics"
 	} else {
@@ -279,6 +294,53 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 		"Composite" => {
 			if let Some(d) = has_drawable {
 				serialize_drawable(d, &mut obj);
+			}
+		}
+		"DynamicComposite" => {
+			if let Some(d) = has_drawable {
+				serialize_drawable(d, &mut obj);
+			}
+			if let Some(dc) = has_dyn_comp {
+				obj.insert("auto_resized", JsonValue::Boolean(dc.auto_resized));
+			}
+		}
+		"AnimatedPart" => {
+			if let Some(d) = has_drawable {
+				serialize_drawable(d, &mut obj);
+			}
+			if let Some(tm) = has_tm {
+				obj.insert("textures", serialize_textured_mesh(tm));
+			}
+			if let Some(mesh) = has_mesh {
+				obj.insert("mesh", serialize_mesh(mesh));
+			}
+			if let Some(ap) = has_anim_part {
+				obj.insert("frame_rate", JsonValue::from(ap.frame_rate));
+				obj.insert("loop", JsonValue::Boolean(ap.loop_anim));
+			}
+		}
+		"Mask" => {
+			if let Some(d) = has_drawable {
+				serialize_drawable(d, &mut obj);
+			}
+			if let Some(mesh) = has_mesh {
+				obj.insert("mesh", serialize_mesh(mesh));
+			}
+		}
+		"Shapes" => {
+			if let Some(s) = has_shapes {
+				obj.insert("closed", JsonValue::Boolean(s.closed));
+				let mut verts = Vec::with_capacity(s.vertices.len() * 2);
+				for v in &s.vertices {
+					verts.push(JsonValue::from(v.x));
+					verts.push(JsonValue::from(v.y));
+				}
+				obj.insert("vertices", JsonValue::Array(verts));
+			}
+		}
+		"Driver" => {
+			if let Some(drv) = has_driver {
+				obj.insert("driver_type", JsonValue::String(drv.driver_type.clone()));
 			}
 		}
 		"SimplePhysics" => {

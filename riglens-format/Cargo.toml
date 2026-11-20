@@ -3,6 +3,10 @@ name = "riglens-format"
 version = "0.1.0"
 edition = "2021"
 license = "BSD-2-Clause"
+repository = "https://github.com/ken-aa-cpu/RigLens"
+readme = "../README.md"
+keywords = ["inochi2d", "vtuber", "rigging", "serialization", "ir"]
+categories = ["encoding", "graphics"]
 description = "Format-neutral 2D puppet rig IR and pluggable Importer/Exporter interfaces for RigLens"
 
 [dependencies]

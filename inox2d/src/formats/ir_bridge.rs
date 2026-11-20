@@ -5,11 +5,12 @@ use std::sync::Arc;
 use glam::{vec2, vec3, Vec2};
 use image::ImageFormat;
 use riglens_format::{
-	BindingGrid, BindingTarget, BlendData, CompositeData, Diagnostic, ExportOptions, ExportReport, Exporter,
-	FormatCapabilities, FormatError, GridDeformerData, ImportOptions, ImportReport, Importer, MaskData, MaskEntry,
-	MeshData, MeshGroupData, NodeKind, PartData, PathDeformerData, PhysicsWorld, RigAnimation, RigAnimationLane,
-	RigBinding, RigDocument, RigKeyframe, RigMeta, RigNode, RigParam, RigTransform, RigUsageRights, SimplePhysicsData,
-	TextureBlob, TextureEncoding, TextureSlots, VendorExtension, IR_SCHEMA_VERSION,
+	AnimatedPartData, BindingGrid, BindingTarget, BlendData, CompositeData, Diagnostic, DriverData,
+	DynamicCompositeData, ExportOptions, ExportReport, Exporter, FormatCapabilities, FormatError, GridDeformerData,
+	ImportOptions, ImportReport, Importer, MaskData, MaskEntry, MaskNodeData, MeshData, MeshGroupData, NodeKind,
+	PartData, PathDeformerData, PhysicsWorld, RigAnimation, RigAnimationLane, RigBinding, RigDocument, RigKeyframe,
+	RigMeta, RigNode, RigParam, RigTransform, RigUsageRights, ShapesData, SimplePhysicsData, TextureBlob,
+	TextureEncoding, TextureSlots, VendorExtension, IR_SCHEMA_VERSION,
 };
 
 use crate::animation::{AnimationLane, Keyframe, PuppetAnimation};
@@ -20,9 +21,9 @@ use crate::math::matrix::Matrix2d;
 use crate::math::transform::TransformOffset;
 use crate::model::{Model, ModelTexture, VendorData};
 use crate::node::components::{
-	BlendMode, Blending, Composite, Drawable, ExtraFields, GridDeformer, GridFormation, Mask, MaskMode, Masks, Mesh,
-	MeshExtraFields, MeshGroup, PathDeformer, PhysicsModel, PhysicsParamMapMode, PhysicsProps, RawNodeData,
-	SimplePhysics, TexturedMesh,
+	AnimatedPart, BlendMode, Blending, Composite, Drawable, Driver, DynamicComposite, ExtraFields, GridDeformer,
+	GridFormation, Mask, MaskMode, MaskNode, Masks, Mesh, MeshExtraFields, MeshGroup, PathDeformer, PhysicsModel,
+	PhysicsParamMapMode, PhysicsProps, RawNodeData, Shapes, SimplePhysics, TexturedMesh,
 };
 use crate::node::{InoxNode, InoxNodeUuid};
 use crate::params::{AxisPoints, Binding, BindingValues, Param, ParamUuid};
@@ -244,6 +245,33 @@ pub fn model_to_ir(model: &Model) -> RigDocument {
 					type_name: raw.type_name.clone(),
 					fields: json_obj_to_map(&raw.fields),
 				}
+			} else if let Some(ap) = comps.get::<AnimatedPart>(n.uuid) {
+				let (blending, masks) = comps
+					.get::<Drawable>(n.uuid)
+					.map(drawable_to_ir)
+					.unwrap_or_default();
+				let mesh = comps.get::<Mesh>(n.uuid).map(|m| mesh_to_ir(m, mesh_extras));
+				let textures = comps.get::<TexturedMesh>(n.uuid).map(|tm| TextureSlots {
+					albedo: tm.tex_albedo.0 as u32,
+					emissive: (tm.tex_emissive.0 != 0).then_some(tm.tex_emissive.0 as u32),
+					bumpmap: (tm.tex_bumpmap.0 != 0).then_some(tm.tex_bumpmap.0 as u32),
+				});
+				NodeKind::AnimatedPart(AnimatedPartData {
+					blending,
+					masks,
+					mesh,
+					textures,
+					frame_rate: ap.frame_rate,
+					loop_anim: ap.loop_anim,
+				})
+			} else if comps.get::<MaskNode>(n.uuid).is_some() {
+				let mesh = comps.get::<Mesh>(n.uuid).map(|m| mesh_to_ir(m, mesh_extras));
+				let drawable_pair = comps.get::<Drawable>(n.uuid).map(drawable_to_ir);
+				let (blending, masks) = match drawable_pair {
+					Some((b, m)) => (Some(b), m),
+					None => (None, None),
+				};
+				NodeKind::Mask(MaskNodeData { mesh, blending, masks })
 			} else if let (Some(tm), Some(mesh)) = (comps.get::<TexturedMesh>(n.uuid), comps.get::<Mesh>(n.uuid)) {
 				let (blending, masks) = comps
 					.get::<Drawable>(n.uuid)
@@ -280,12 +308,31 @@ pub fn model_to_ir(model: &Model) -> RigDocument {
 					dynamic: path.dynamic,
 					physics_only: path.physics_only,
 				})
+			} else if let Some(dc) = comps.get::<DynamicComposite>(n.uuid) {
+				let (blending, masks) = comps
+					.get::<Drawable>(n.uuid)
+					.map(drawable_to_ir)
+					.unwrap_or_default();
+				NodeKind::DynamicComposite(DynamicCompositeData {
+					blending,
+					masks,
+					auto_resized: dc.auto_resized,
+				})
 			} else if comps.get::<Composite>(n.uuid).is_some() {
 				let (blending, masks) = comps
 					.get::<Drawable>(n.uuid)
 					.map(drawable_to_ir)
 					.unwrap_or_default();
 				NodeKind::Composite(CompositeData { blending, masks })
+			} else if let Some(sh) = comps.get::<Shapes>(n.uuid) {
+				NodeKind::Shapes(ShapesData {
+					closed: sh.closed,
+					vertices: sh.vertices.iter().map(|v| [v.x, v.y]).collect(),
+				})
+			} else if let Some(drv) = comps.get::<Driver>(n.uuid) {
+				NodeKind::Driver(DriverData {
+					driver_type: drv.driver_type.clone(),
+				})
 			} else if let Some(sp) = comps.get::<SimplePhysics>(n.uuid) {
 				NodeKind::SimplePhysics(SimplePhysicsData {
 					param_id: sp.param.0,
@@ -524,6 +571,74 @@ fn attach_node_components(puppet: &mut Puppet, n: &RigNode) -> Result<(), Format
 			let d = ir_to_drawable(&c.blending, c.masks.as_ref(), &mut puppet.diagnostics, n.id)?;
 			puppet.node_comps.add(id, d);
 			puppet.node_comps.add(id, Composite {});
+		}
+		NodeKind::DynamicComposite(dc) => {
+			let d = ir_to_drawable(&dc.blending, dc.masks.as_ref(), &mut puppet.diagnostics, n.id)?;
+			puppet.node_comps.add(id, d);
+			puppet.node_comps.add(id, Composite {});
+			puppet.node_comps.add(
+				id,
+				DynamicComposite {
+					auto_resized: dc.auto_resized,
+				},
+			);
+		}
+		NodeKind::AnimatedPart(ap) => {
+			let d = ir_to_drawable(&ap.blending, ap.masks.as_ref(), &mut puppet.diagnostics, n.id)?;
+			puppet.node_comps.add(id, d);
+			if let Some(tex) = &ap.textures {
+				puppet.node_comps.add(
+					id,
+					TexturedMesh {
+						tex_albedo: TextureId(tex.albedo as usize),
+						tex_emissive: TextureId(tex.emissive.unwrap_or(0) as usize),
+						tex_bumpmap: TextureId(tex.bumpmap.unwrap_or(0) as usize),
+					},
+				);
+			}
+			if let Some(mesh) = &ap.mesh {
+				if !mesh.extras.is_empty() {
+					puppet.node_comps.add(id, MeshExtraFields(map_to_json_obj(&mesh.extras)));
+				}
+				puppet.node_comps.add(id, ir_to_mesh(mesh));
+			}
+			puppet.node_comps.add(
+				id,
+				AnimatedPart {
+					frame_rate: ap.frame_rate,
+					loop_anim: ap.loop_anim,
+				},
+			);
+		}
+		NodeKind::Mask(m) => {
+			if let Some(blending) = &m.blending {
+				let d = ir_to_drawable(blending, m.masks.as_ref(), &mut puppet.diagnostics, n.id)?;
+				puppet.node_comps.add(id, d);
+			}
+			if let Some(mesh) = &m.mesh {
+				if !mesh.extras.is_empty() {
+					puppet.node_comps.add(id, MeshExtraFields(map_to_json_obj(&mesh.extras)));
+				}
+				puppet.node_comps.add(id, ir_to_mesh(mesh));
+			}
+			puppet.node_comps.add(id, MaskNode);
+		}
+		NodeKind::Shapes(s) => {
+			puppet.node_comps.add(
+				id,
+				Shapes {
+					closed: s.closed,
+					vertices: s.vertices.iter().map(|v| vec2(v[0], v[1])).collect(),
+				},
+			);
+		}
+		NodeKind::Driver(drv) => {
+			puppet.node_comps.add(
+				id,
+				Driver {
+					driver_type: drv.driver_type.clone(),
+				},
+			);
 		}
 		NodeKind::MeshGroup(mg) => {
 			puppet.node_comps.add(

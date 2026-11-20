@@ -195,6 +195,51 @@ pub struct CompositeData {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DynamicCompositeData {
+	pub blending: BlendData,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub masks: Option<MaskData>,
+	#[serde(default)]
+	pub auto_resized: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnimatedPartData {
+	pub blending: BlendData,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub masks: Option<MaskData>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub mesh: Option<MeshData>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub textures: Option<TextureSlots>,
+	pub frame_rate: f32,
+	pub loop_anim: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaskNodeData {
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub mesh: Option<MeshData>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub blending: Option<BlendData>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub masks: Option<MaskData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShapesData {
+	pub closed: bool,
+	#[serde(default)]
+	pub vertices: Vec<[f32; 2]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DriverData {
+	#[serde(default)]
+	pub driver_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshGroupData {
 	pub mesh: MeshData,
 	pub dynamic: bool,
@@ -238,6 +283,11 @@ pub enum NodeKind {
 	Group,
 	Part(PartData),
 	Composite(CompositeData),
+	DynamicComposite(DynamicCompositeData),
+	AnimatedPart(AnimatedPartData),
+	Mask(MaskNodeData),
+	Shapes(ShapesData),
+	Driver(DriverData),
 	MeshGroup(MeshGroupData),
 	GridDeformer(GridDeformerData),
 	PathDeformer(PathDeformerData),
@@ -422,6 +472,8 @@ impl RigDocument {
 
 			let mesh_opt = match &n.kind {
 				NodeKind::Part(p) => Some(&p.mesh),
+				NodeKind::AnimatedPart(ap) => ap.mesh.as_ref(),
+				NodeKind::Mask(m) => m.mesh.as_ref(),
 				NodeKind::MeshGroup(mg) => Some(&mg.mesh),
 				_ => None,
 			};

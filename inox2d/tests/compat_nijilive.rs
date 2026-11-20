@@ -63,22 +63,83 @@ fn type_and_fields(puppet: &inox2d::puppet::Puppet) -> Vec<(String, String, Stri
 #[test]
 fn unknown_node_types_survive_round_trip() {
 	let children = [
-		node(4, "Shp", "Shapes", r#","shape":"circle""#, &part(5, "InShape", "Normal")),
-		node(6, "Msk", "Mask", r#","inverted":false"#, ""),
-		node(8, "Anim", "AnimatedPart", r#","sheet":{"rows":2,"cols":2}"#, ""),
-		node(9, "Dyn", "DynamicComposite", r#","opacity":1.0"#, ""),
-		node(11, "Drv", "Driver", r#","param_id":1"#, ""),
+		node(4, "Fx", "CustomPluginFx", r#","intensity":0.75"#, &part(5, "InShape", "Normal")),
+		node(6, "Cl", "ClothSpring", r#","stiffness":0.4"#, ""),
+		node(8, "Tr", "TrailEmitter", r#","samples":16"#, ""),
 	]
 	.join(",");
 	let (a, b) = roundtrip(&build_inp(&children));
 
 	let before = type_and_fields(&a.puppet);
 	let after = type_and_fields(&b.puppet);
-	assert_eq!(before.len(), 5, "all five unknown nodes captured");
+	assert_eq!(before.len(), 3, "all three unknown plugin nodes captured");
 	assert_eq!(before, after, "type names and payload fields must be unchanged");
-	assert!(a.puppet.diagnostics.len() >= 5, "loading must report each unsupported node");
+	assert!(a.puppet.diagnostics.len() >= 3, "loading must report each unsupported node");
 	// Children of an unknown node are still loaded.
 	assert!(b.puppet.nodes.iter().any(|n| n.name == "InShape"));
+}
+
+#[test]
+fn p1_remaining_node_types_round_trip_and_render() {
+	use inox2d::formats::ir_bridge::{ir_to_model, model_to_ir};
+	use inox2d::node::components::{
+		AnimatedPart, Composite, Driver, DynamicComposite, MaskNode, RawNodeData, Shapes, TexturedMesh,
+	};
+
+	let anim_extra = r#","blend_mode":"Normal","opacity":0.9,"frame_rate":12.0,"loop":false,"textures":[0],"mesh":{"verts":[0,0,10,0,0,10],"uvs":[0,0,1,0,0,1],"indices":[0,1,2],"origin":[0,0]},"sheet":{"rows":2,"cols":2}"#;
+	let mask_extra = r#","inverted":false,"mesh":{"verts":[0,0,8,0,0,8],"uvs":[0,0,1,0,0,1],"indices":[0,1,2],"origin":[0,0]}"#;
+	let dyn_extra = r#","blend_mode":"Multiply","opacity":0.8,"auto_resized":true"#;
+	let shp_extra = r#","closed":true,"vertices":[0,0,10,0,10,10],"shape":"polygon""#;
+	let drv_extra = r#","driver_type":"ParamBridge","param_id":7"#;
+
+	let children = [
+		node(4, "Shp", "Shapes", shp_extra, &part(5, "InShape", "Normal")),
+		node(6, "Msk", "Mask", mask_extra, ""),
+		node(8, "Anim", "AnimatedPart", anim_extra, ""),
+		node(9, "Dyn", "DynamicComposite", dyn_extra, &part(10, "InDyn", "Normal")),
+		node(11, "Drv", "Driver", drv_extra, ""),
+	]
+	.join(",");
+	let (mut a, mut b) = roundtrip(&build_inp(&children));
+
+	assert!(
+		!a.puppet.nodes.iter().any(|n| a.puppet.node_comps.get::<RawNodeData>(n.uuid).is_some()),
+		"all 5 P1 node types must parse as typed components, not RawNodeData: {:?}",
+		a.puppet.diagnostics
+	);
+	assert!(a.puppet.diagnostics.is_empty(), "unexpected diagnostics: {:?}", a.puppet.diagnostics);
+
+	// Verify IR RigDocument roundtrip preserves all 5 node types + extras cleanly.
+	let ir = model_to_ir(&a);
+	let mut c = ir_to_model(&ir).expect("ir_to_model");
+
+	for puppet in [&mut a.puppet, &mut b.puppet, &mut c.puppet] {
+		let find = |name: &str| puppet.nodes.iter().find(|n| n.name == name).unwrap().uuid;
+
+		let shp = puppet.node_comps.get::<Shapes>(find("Shp")).expect("Shapes");
+		assert!(shp.closed);
+		assert_eq!(shp.vertices.len(), 3);
+
+		assert!(puppet.node_comps.get::<MaskNode>(find("Msk")).is_some());
+
+		let ap_id = find("Anim");
+		let ap = puppet.node_comps.get::<AnimatedPart>(ap_id).expect("AnimatedPart");
+		assert!((ap.frame_rate - 12.0).abs() < 1e-4);
+		assert!(!ap.loop_anim);
+		assert!(puppet.node_comps.get::<TexturedMesh>(ap_id).is_some());
+
+		let dc_id = find("Dyn");
+		assert!(puppet.node_comps.get::<Composite>(dc_id).is_some());
+		let dc = puppet.node_comps.get::<DynamicComposite>(dc_id).expect("DynamicComposite");
+		assert!(dc.auto_resized);
+
+		let drv = puppet.node_comps.get::<Driver>(find("Drv")).expect("Driver");
+		assert_eq!(drv.driver_type, "ParamBridge");
+
+		puppet.init_all();
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+	}
 }
 
 #[test]

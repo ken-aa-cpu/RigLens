@@ -7,10 +7,11 @@ pub mod plugin;
 pub mod rig_json;
 
 pub use ir::{
-	BindingGrid, BindingTarget, BlendData, CompositeData, Diagnostic, GridDeformerData, MaskData, MaskEntry, MeshData,
-	MeshGroupData, NodeKind, PartData, PathDeformerData, PhysicsWorld, RigAnimation, RigAnimationLane, RigBinding,
-	RigDocument, RigKeyframe, RigMeta, RigNode, RigParam, RigTransform, RigUsageRights, Severity, SimplePhysicsData,
-	TextureBlob, TextureEncoding, TextureSlots, VendorExtension, IR_SCHEMA_VERSION,
+	AnimatedPartData, BindingGrid, BindingTarget, BlendData, CompositeData, Diagnostic, DriverData,
+	DynamicCompositeData, GridDeformerData, MaskData, MaskEntry, MaskNodeData, MeshData, MeshGroupData, NodeKind,
+	PartData, PathDeformerData, PhysicsWorld, RigAnimation, RigAnimationLane, RigBinding, RigDocument, RigKeyframe,
+	RigMeta, RigNode, RigParam, RigTransform, RigUsageRights, Severity, ShapesData, SimplePhysicsData, TextureBlob,
+	TextureEncoding, TextureSlots, VendorExtension, IR_SCHEMA_VERSION,
 };
 pub use plugin::{
 	check_export_compatibility, export_checked, ExportOptions, ExportReport, Exporter, FormatCapabilities, FormatError,

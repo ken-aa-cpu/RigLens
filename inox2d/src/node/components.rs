@@ -45,6 +45,45 @@ pub struct ExtraFields(pub json::object::Object);
 #[derive(Clone, Debug)]
 pub struct MeshExtraFields(pub json::object::Object);
 
+/// Marker + metadata for nijilive `DynamicComposite` nodes (auto-resized offscreen composite).
+#[derive(Clone, Debug, Default)]
+pub struct DynamicComposite {
+	pub auto_resized: bool,
+}
+
+/// Metadata for nijilive `AnimatedPart` nodes (renders as `Part` with frame animation metadata).
+#[derive(Clone, Debug)]
+pub struct AnimatedPart {
+	pub frame_rate: f32,
+	pub loop_anim: bool,
+}
+
+impl Default for AnimatedPart {
+	fn default() -> Self {
+		Self {
+			frame_rate: 24.0,
+			loop_anim: true,
+		}
+	}
+}
+
+/// Marker for nijilive `Mask` nodes (vector/mesh stencil mask source).
+#[derive(Clone, Debug, Default)]
+pub struct MaskNode;
+
+/// Vector/contour shape node (`Shapes` in nijilive).
+#[derive(Clone, Debug, Default)]
+pub struct Shapes {
+	pub closed: bool,
+	pub vertices: Vec<Vec2>,
+}
+
+/// Generic parameter/behavior driver node (`Driver` in nijilive).
+#[derive(Clone, Debug, Default)]
+pub struct Driver {
+	pub driver_type: String,
+}
+
 /* --- COMPOSITE --- */
 
 /// If has this as a component, the node should composite all children
