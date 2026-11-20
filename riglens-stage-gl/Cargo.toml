@@ -1,0 +1,12 @@
+[package]
+name = "riglens-stage-gl"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+description = "OpenGL FBO Composite and Stencil Mask stage renderer for egui_glow / Inox2D"
+
+[dependencies]
+egui = "0.28"
+egui_glow = "0.28"
+glam = "0.29"
+inox2d = { path = "../inox2d" }

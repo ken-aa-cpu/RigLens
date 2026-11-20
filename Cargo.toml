@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "riglens-format",
     "riglens-booster",
+    "riglens-stage-gl",
     "inox2d",
     "inox2d-opengl",
     "inox2d-mcp",

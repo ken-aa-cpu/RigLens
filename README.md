@@ -34,9 +34,10 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 | [`riglens-format`](riglens-format/) | Format-neutral rig IR (`RigDocument`), `Importer` / `Exporter` traits, `FormatRegistry`, `.rigjson` codec, and plugin conformance kit. |
 | [`inox2d`](inox2d/) | Core: `.inp`/`.inx` parser and serializer (`InpFormat` bridge), mesh-group / grid / path deformation, simple physics, animation, opacity store. |
 | [`inox2d-opengl`](inox2d-opengl/) | OpenGL renderer with live `.inp` hot-reload and WASM/WebGL support. |
+| [`riglens-stage-gl`](riglens-stage-gl/) | Native OpenGL (`glow` 0.13) interactive stage renderer for `inox2d-gui`: offscreen FBO `Composite`, 8-bit `Stencil` masking (`Mask`/`Dodge`), and all 19 `BlendMode`s with zero CPU readback. |
 | [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer (composite stack, mask isolation, `ClipToLower` / `SliceFromLower` / `DestinationIn`), rig auditor / auto-fixer, pure-Rust `.psd` import/export (`PsdFormat`), CLI, JSON-RPC 2.0 MCP server (including `booster.*` live control commands). |
-| [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): hybrid `Exact FX` composite/mask preview + interactive GPU viewport, `Live Phys` playback, `File -> Example Models` (`--model midori\|aka\|sample`), collapsible outliner, `GridDeformer` / `PathDeformer` / `MeshGroup` stage gizmos, dynamic 2D parameter pads, 10-point audit & diagnostics, multi-animation timeline, file browser dialogs, autosave recovery, and integrated `Booster` M4 control panel. |
-| [`riglens-booster`](riglens-booster/) | Dual-channel GPU co-processor & 120Hz physics booster (`WindField`, coupled spring chains, VTube Studio Port 8001 WebSocket, Windows DX11 Spout2 bridge, `wgpu` XPBD soft-body, JFA 2D SDF 2.5D rim lighting & particles, M3 2D-Native DLSS alpha-aware super-resolution & dual-tier motion-vector frame generation). |
+| [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): GPU FBO/Stencil interactive viewport (`--gpu-stage` / `Exact FX`), `Live Phys` playback, `File -> Example Models` (`--model midori\|aka\|sample`), collapsible outliner, `GridDeformer` / `PathDeformer` / `MeshGroup` stage gizmos, dynamic 2D parameter pads (`+Y = Up`), 10-point audit & diagnostics, multi-animation timeline, file browser dialogs, autosave recovery, and integrated `Booster` M4 control panel. |
+| [`riglens-booster`](riglens-booster/) | Dual-channel GPU co-processor & 120Hz physics booster (`WindField`, coupled spring chains, VTube Studio Port 8001 WebSocket, Windows DX11 Spout2 bridge, `wgpu` XPBD soft-body, JFA 2D SDF 2.5D rim lighting & particles with DXGI Desktop Duplication `ScreenSync`, M3 2D-Native DLSS alpha-aware super-resolution & dual-tier motion-vector frame generation). |
 | [`.agent/skills/inox2d-vtuber-rigger`](.agent/skills/inox2d-vtuber-rigger/SKILL.md) | Playbook for AI agents rigging VTuber puppets through the MCP server. |
 | [`docs/EXPORTER_PLUGINS.md`](docs/EXPORTER_PLUGINS.md) | Guide for writing custom Rust or `.rigjson`-based exporter plugins. |
 
@@ -66,11 +67,12 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 ## Quick start
 
 ```sh
-# Run tests (across all 6 workspace crates)
-cargo test -p riglens-format -p inox2d -p inox2d-mcp -p inox2d-opengl -p inox2d-gui -p riglens-booster
+# Run tests (across all 7 workspace crates)
+cargo test -p riglens-format -p inox2d -p inox2d-mcp -p inox2d-opengl -p riglens-stage-gl -p inox2d-gui -p riglens-booster
 
 # Open the default real example model (Midori/Aka if staged in assets/example-models/) or switch via --model
 cargo run -p inox2d-gui -- --model midori
+cargo run -p inox2d-gui -- --model midori --gpu-stage
 cargo run -p inox2d-gui -- --model aka
 cargo run -p inox2d-gui -- --sample
 
@@ -120,9 +122,9 @@ cargo run --release -p riglens-booster -- run --spout-in VTubeStudioSpout --spou
 - [ ] P1 remaining nodes (`AnimatedPart`, `DynamicComposite`, `Driver`, `Shapes`, `Mask`) & verify files saved by current nijigenerate builds.
 - [x] Format-neutral rig model (`riglens-format`) and public **`Importer` / `Exporter` traits** + conformance kit so users can bind their own library and emit any format.
 - [x] P3 algorithm upgrades: nijilive-parity physics initialization & NaN/panic guards, 10-point rig auditor, and constrained Delaunay meshing with adaptive joint refinement.
-- [x] P4 desktop editor (`inox2d-gui` + shared command layer): hierarchical node tree & draw-order outliner, stage editing for `GridDeformer` / `PathDeformer` / `MeshGroup`, clipping mask & binding keypoint editor (`mirror`, scalar CRUD), 10-point audit & Phase 0 load-warning diagnostics panel, multi-animation timeline, pure-Rust Open/Save/Export dialogs, and autosave crash recovery.
+- [x] P4 desktop editor (`inox2d-gui` + `riglens-stage-gl` + shared command layer): hierarchical node tree & draw-order outliner, native OpenGL FBO `Composite` & 8-bit `Stencil` masking stage viewport (`--gpu-stage` + `Exact FX`), stage editing for `GridDeformer` / `PathDeformer` / `MeshGroup`, clipping mask & binding keypoint editor (`mirror`, scalar CRUD), dynamic 2D parameter pads (`+Y = Up`), 10-point audit & Phase 0 load-warning diagnostics panel, multi-animation timeline, pure-Rust Open/Save/Export dialogs, and autosave crash recovery.
 - [x] Co-processor M1 (`riglens-booster`): 120Hz coupled physics/wind engine, VTube Studio Public API (Port `8001`) WebSocket bridge, and Windows DX11 Spout2 shared-texture sender/receiver.
-- [x] Co-processor M2 (`riglens-booster`): `wgpu` GPU compute/render pipeline with screen-space XPBD soft-body mesh deformation, JFA 2D SDF normals & directional 2.5D rim lighting (including Windows screen-edge ambient sync), motion-driven GPU particles, and `gpu-bench`.
+- [x] Co-processor M2 (`riglens-booster`): `wgpu` GPU compute/render pipeline with screen-space XPBD soft-body mesh deformation, JFA 2D SDF normals & directional 2.5D rim lighting (with DXGI Desktop Duplication + GDI fallback Windows `ScreenSync`), motion-driven GPU particles, and `gpu-bench`.
 - [x] Co-processor M3 (`riglens-booster`): **2D-Native DLSS** (`upscale_alpha_aware.wgsl` premultiplied-alpha Catmull-Rom super-resolution + edge sharpening, `flow_estimate.wgsl` + `MotionVectorField` dual-tier motion-vector frame generation via `frame_gen_warp.wgsl`).
 - [x] Co-processor M4: integrated `Booster` tab & `BoosterController` in `inox2d-gui`, plus MCP `booster.*` controls (`booster.status`, `booster.list_spout`, `booster.configure`, `booster.start`, `booster.stop`).
 - [ ] Act as an MCP *client* companion for editors that already expose MCP (e.g. nijigenerate).
