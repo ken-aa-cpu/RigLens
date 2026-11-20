@@ -28,6 +28,7 @@ use inox2d::node::components::{Mesh, SimplePhysics, TexturedMesh};
 use inox2d::node::InoxNodeUuid;
 use inox2d::texture::ShallowTexture;
 use inox2d_mcp::engine::{ModelSnapshot, Session};
+use inox2d_mcp::rig::DeformBrushMode;
 use json::JsonValue;
 use riglens_stage_gl::{SharedGlStage, StageGeometry, StageTextureInput};
 
@@ -86,6 +87,7 @@ pub(crate) struct Inox2dStudioApp {
 	pub(crate) show_sel_overlay: bool,
 
 	pub(crate) brush_param: String,
+	pub(crate) brush_mode: DeformBrushMode,
 	pub(crate) brush_radius_ratio: f32,
 	pub(crate) pad_params: [String; 2],
 
@@ -206,6 +208,7 @@ impl Inox2dStudioApp {
 			live_physics: false,
 			show_sel_overlay: true,
 			brush_param: brush_param.clone(),
+			brush_mode: DeformBrushMode::Grab,
 			brush_radius_ratio: 0.45,
 			pad_params,
 			stage_drag: None,

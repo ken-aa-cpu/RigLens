@@ -138,8 +138,8 @@ pub fn command_registry() -> &'static [CommandSpec] {
 		},
 		CommandSpec {
 			id: "deform.brush",
-			description: "Apply a Gaussian soft-brush deform to a parameter keyframe via semantic anchor or local coordinates",
-			params_schema: r#"{"node_uuid?":1,"node_name?":"Mouth","param":"Head:: Yaw-Pitch","kx?":1.0,"ky?":0.0,"anchor?":"center","local_xy?":[0.0,0.0],"radius_ratio?":0.45,"dx":4.0,"dy":-2.0}"#,
+			description: "Apply a multi-mode soft deform brush (grab, smooth, bulge, twist) onto a parameter keyframe",
+			params_schema: r#"{"node_uuid?":1,"node_name?":"Mouth","param":"Head:: Yaw-Pitch","mode?":"grab|smooth|bulge|twist","kx?":1.0,"ky?":0.0,"anchor?":"center","local_xy?":[0.0,0.0],"radius_ratio?":0.45,"dx":4.0,"dy":-2.0}"#,
 		},
 		CommandSpec {
 			id: "deform.set_vertices",
@@ -310,6 +310,16 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			id: "deform.mirror_keypoint",
 			description: "Copy or X-mirror a Deform keypoint across the node's local center X",
 			params_schema: r#"{"node_uuid?":1,"node_name?":"Face","param":"Head:: Yaw-Pitch","src_ix":0,"src_iy":1,"dst_ix":2,"dst_iy":1,"mirror_x?":true}"#,
+		},
+		CommandSpec {
+			id: "param.synthesize_corners",
+			description: "Synthesize 2D corner keypoints from cardinal X/Y axes (Live2D Cubism bilinear additive synthesis)",
+			params_schema: r#"{"param":"Head:: Yaw-Pitch","node_uuid?":1,"node_name?":"Face"}"#,
+		},
+		CommandSpec {
+			id: "deform.weld_seam",
+			description: "Glue-style cross-node seam welding between two adjacent Part/Deformer meshes at a parameter keypoint",
+			params_schema: r#"{"node_a_name":"Face","node_b_name":"Neck","param?":"Head:: Yaw-Pitch","kx?":0.0,"ky?":0.0,"max_dist_px?":14.0,"weight?":0.5}"#,
 		},
 		CommandSpec {
 			id: "anim.create",

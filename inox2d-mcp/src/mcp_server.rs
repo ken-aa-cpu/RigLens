@@ -131,6 +131,7 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("node_name", json::object! { type: "string" });
 				props.insert("node_uuid", json::object! { type: "integer" });
 				props.insert("param", json::object! { type: "string" });
+				props.insert("mode", json::object! { type: "string", description: "grab | smooth | bulge | twist" });
 				props.insert("kx", json::object! { type: "number" });
 				props.insert("ky", json::object! { type: "number" });
 				props.insert("anchor", json::object! { type: "string" });
@@ -294,6 +295,20 @@ fn mcp_tools_list() -> JsonValue {
 				props.insert("dst_ix", json::object! { type: "integer" });
 				props.insert("dst_iy", json::object! { type: "integer" });
 				props.insert("mirror_x", json::object! { type: "boolean" });
+			} else if spec.id == "param.synthesize_corners" {
+				props.insert("param", json::object! { type: "string" });
+				props.insert("node_uuid", json::object! { type: "integer" });
+				props.insert("node_name", json::object! { type: "string" });
+			} else if spec.id == "deform.weld_seam" {
+				props.insert("node_a_name", json::object! { type: "string" });
+				props.insert("node_b_name", json::object! { type: "string" });
+				props.insert("node_a_uuid", json::object! { type: "integer" });
+				props.insert("node_b_uuid", json::object! { type: "integer" });
+				props.insert("param", json::object! { type: "string" });
+				props.insert("kx", json::object! { type: "number" });
+				props.insert("ky", json::object! { type: "number" });
+				props.insert("max_dist_px", json::object! { type: "number" });
+				props.insert("weight", json::object! { type: "number" });
 			} else if spec.id == "anim.create" {
 				props.insert("name", json::object! { type: "string" });
 				props.insert("length", json::object! { type: "integer" });

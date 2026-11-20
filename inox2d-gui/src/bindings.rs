@@ -49,6 +49,7 @@ pub struct BindingEditorState {
 	pub mask_add_source: Option<InoxNodeUuid>,
 	pub rename_buf: String,
 	pub rename_node_id: Option<InoxNodeUuid>,
+	pub copied_kp: Option<(InoxNodeUuid, String, usize, usize)>,
 }
 
 impl Default for BindingEditorState {
@@ -64,6 +65,7 @@ impl Default for BindingEditorState {
 			mask_add_source: None,
 			rename_buf: String::new(),
 			rename_node_id: None,
+			copied_kp: None,
 		}
 	}
 }
@@ -758,6 +760,30 @@ pub fn draw_bindings_tab(
 				}
 			}
 			if deform_b.is_some() {
+				if ui.small_button("Copy KP").clicked() {
+					state.copied_kp = Some((node_id, state.selected_param.clone(), cix, ciy));
+				}
+				if let Some((src_id, ref src_param, src_ix, src_iy)) = state.copied_kp.clone() {
+					if src_id == node_id
+						&& src_param == &state.selected_param
+						&& (src_ix, src_iy) != (cix, ciy)
+						&& ui.small_button(format!("Paste ({src_ix},{src_iy})")).clicked()
+					{
+						actions.push(InspectorAction::ExecCmd {
+							cmd: "deform.mirror_keypoint",
+							params: json::object! {
+								node_uuid: node_id.0,
+								param: state.selected_param.as_str(),
+								src_ix: src_ix,
+								src_iy: src_iy,
+								dst_ix: cix,
+								dst_iy: ciy,
+								mirror_x: false
+							},
+							ok_label: format!("Copied Deform KP ({src_ix},{src_iy}) -> ({cix},{ciy})"),
+						});
+					}
+				}
 				if ui.small_button("Clear KP").clicked() {
 					actions.push(InspectorAction::ExecCmd {
 						cmd: "param.clear_binding_keypoint",
@@ -780,6 +806,22 @@ pub fn draw_bindings_tab(
 							kind: "Deform"
 						},
 						ok_label: "Removed Deform binding".to_owned(),
+					});
+				}
+			}
+			if x_len >= 2 && y_len >= 2 && !node_bindings.is_empty() {
+				if ui
+					.small_button("Synthesize Corners")
+					.on_hover_text("Live2D-style bilinear synthesis of 4 corner keypoints from cardinal X/Y axes")
+					.clicked()
+				{
+					actions.push(InspectorAction::ExecCmd {
+						cmd: "param.synthesize_corners",
+						params: json::object! {
+							node_uuid: node_id.0,
+							param: state.selected_param.as_str()
+						},
+						ok_label: format!("Synthesized 2D corners for '{}'", state.selected_param),
 					});
 				}
 			}

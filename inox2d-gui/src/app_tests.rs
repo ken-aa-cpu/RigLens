@@ -5,7 +5,7 @@ use glam::{vec2 as gvec2, vec3 as gvec3};
 use inox2d::node::components::RawNodeData;
 use inox2d_mcp::audit::audit_rig;
 
-use crate::stage::{pose25d_norm_from_screen, xy_pad_norm_from_pointer, xy_pad_screen_from_norm};
+use crate::stage::{find_folded_triangles, pose25d_norm_from_screen, xy_pad_norm_from_pointer, xy_pad_screen_from_norm};
 use crate::stage_render::StageOverlay;
 use crate::startup::{clean_display_name, find_example_models, format_clean_zsort, load_initial_session};
 
@@ -215,4 +215,17 @@ fn xy_pad_and_pose25d_y_up_convention() {
 	// Moving pointer below stage center -> negative ny (head/gaze down)
 	let (_, py_down) = pose25d_norm_from_screen(egui::pos2(400.0, 570.0), stage_rect);
 	assert!((py_down + 1.0).abs() < 1e-5);
+
+	// Foldover detector catches flipped/inverted triangles relative to majority winding
+	let pts = vec![
+		pos2(0.0, 0.0),
+		pos2(40.0, 0.0),
+		pos2(0.0, 40.0),
+		pos2(40.0, 40.0),
+		pos2(15.0, 10.0), // pushed right across left edge, flipping triangle (2, 4, 0)
+	];
+	let indices = vec![0, 1, 2, 1, 3, 2, 2, 4, 0];
+	let folded = find_folded_triangles(&pts, &indices);
+	assert_eq!(folded.len(), 1);
+	assert_eq!(folded[0], [2, 4, 0]);
 }

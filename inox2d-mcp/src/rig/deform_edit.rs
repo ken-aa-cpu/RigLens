@@ -1,7 +1,7 @@
 use glam::{vec2, Vec2};
 use inox2d::math::interp::InterpolateMode;
 use inox2d::math::matrix::Matrix2d;
-use inox2d::node::components::{GridDeformer, Mesh, PathDeformer};
+use inox2d::node::components::{GridDeformer, Mesh, PathDeformer, TransformStore};
 use inox2d::node::InoxNodeUuid;
 use inox2d::params::{AxisPoints, Binding, BindingValues};
 use inox2d::puppet::Puppet;
@@ -117,6 +117,87 @@ pub fn node_deform_rest_vertices(puppet: &Puppet, node_id: InoxNodeUuid) -> Resu
 	))
 }
 
+/// Sculpting brush mode matching mainstream 2D rig editors (Grab / Smooth / Bulge / Twist).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeformBrushMode {
+	#[default]
+	Grab,
+	Smooth,
+	Bulge,
+	Twist,
+}
+
+impl DeformBrushMode {
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Grab => "grab",
+			Self::Smooth => "smooth",
+			Self::Bulge => "bulge",
+			Self::Twist => "twist",
+		}
+	}
+
+	pub fn label(self) -> &'static str {
+		match self {
+			Self::Grab => "Grab",
+			Self::Smooth => "Smooth",
+			Self::Bulge => "Bulge",
+			Self::Twist => "Twist",
+		}
+	}
+
+	pub fn parse(s: &str) -> Self {
+		match s.trim().to_ascii_lowercase().as_str() {
+			"smooth" | "relax" => Self::Smooth,
+			"bulge" | "pinch" | "inflate" => Self::Bulge,
+			"twist" | "rotate" => Self::Twist,
+			_ => Self::Grab,
+		}
+	}
+}
+
+fn node_vertex_neighbors(puppet: &Puppet, node_id: InoxNodeUuid, vert_count: usize) -> Vec<Vec<usize>> {
+	let mut adj = vec![Vec::<usize>::new(); vert_count];
+	let mut add_edge = |a: usize, b: usize| {
+		if a < vert_count && b < vert_count && a != b {
+			if !adj[a].contains(&b) {
+				adj[a].push(b);
+			}
+			if !adj[b].contains(&a) {
+				adj[b].push(a);
+			}
+		}
+	};
+	if let Some(mesh) = puppet.node_comps.get::<Mesh>(node_id) {
+		for tri in mesh.indices.chunks_exact(3) {
+			let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+			add_edge(a, b);
+			add_edge(b, c);
+			add_edge(c, a);
+		}
+	} else if let Some(grid) = puppet.node_comps.get::<GridDeformer>(node_id) {
+		let cols = grid.cols();
+		let rows = grid.rows();
+		for r in 0..rows {
+			for c in 0..cols {
+				let i = r * cols + c;
+				if c + 1 < cols {
+					add_edge(i, i + 1);
+				}
+				if r + 1 < rows {
+					add_edge(i, i + cols);
+				}
+			}
+		}
+	} else if let Some(path) = puppet.node_comps.get::<PathDeformer>(node_id) {
+		for i in 0..path.vertices.len().saturating_sub(1) {
+			add_edge(i, i + 1);
+		}
+	}
+	adj
+}
+
+/// Apply a Grab deform brush (backwards-compatible wrapper for [`apply_deform_brush_mode`]).
 pub fn apply_deform_brush(
 	puppet: &mut Puppet,
 	node_id: InoxNodeUuid,
@@ -127,7 +208,37 @@ pub fn apply_deform_brush(
 	radius_ratio: f32,
 	delta: Vec2,
 ) -> Result<(usize, usize, usize), String> {
+	apply_deform_brush_mode(
+		puppet,
+		node_id,
+		param_name,
+		param_val,
+		anchor,
+		local_xy,
+		radius_ratio,
+		delta,
+		DeformBrushMode::Grab,
+	)
+}
+
+/// Apply a multi-mode soft deform brush (`Grab`, `Smooth`, `Bulge`, `Twist`) with smooth cubic falloff.
+pub fn apply_deform_brush_mode(
+	puppet: &mut Puppet,
+	node_id: InoxNodeUuid,
+	param_name: &str,
+	param_val: Vec2,
+	anchor: Option<&str>,
+	local_xy: Option<Vec2>,
+	radius_ratio: f32,
+	delta: Vec2,
+	mode: DeformBrushMode,
+) -> Result<(usize, usize, usize), String> {
 	let verts = node_deform_rest_vertices(puppet, node_id)?;
+	let neighbors = if mode == DeformBrushMode::Smooth {
+		node_vertex_neighbors(puppet, node_id, verts.len())
+	} else {
+		Vec::new()
+	};
 
 	let (b_idx, ix, iy) = ensure_deform_binding_keypoint(puppet, node_id, param_name, param_val, verts.len())?;
 
@@ -157,6 +268,7 @@ pub fn apply_deform_brush(
 
 	let radius = (size.length() * radius_ratio.clamp(0.05, 3.0)).max(2.0);
 	let sigma2 = 2.0 * (radius * 0.5).powi(2);
+	let inv_r2 = 1.0 / (radius * radius);
 
 	let param = puppet
 		.params
@@ -165,13 +277,73 @@ pub fn apply_deform_brush(
 	let mut affected = 0usize;
 	if let BindingValues::Deform(ref mut mat) = param.bindings[b_idx].values {
 		if let Some(cell) = mat.get_mut(ix, iy) {
-			for (vi, &v) in verts.iter().enumerate() {
-				let d2 = (v - brush_center).length_squared();
-				let w = (-d2 / sigma2).exp();
-				if w > 0.02 {
-					if let Some(slot) = cell.get_mut(vi) {
-						*slot += delta * w;
-						affected += 1;
+			match mode {
+				DeformBrushMode::Grab => {
+					for (vi, &v) in verts.iter().enumerate() {
+						let d2 = (v - brush_center).length_squared();
+						let w = (-d2 / sigma2).exp();
+						if w > 0.02 {
+							if let Some(slot) = cell.get_mut(vi) {
+								*slot += delta * w;
+								affected += 1;
+							}
+						}
+					}
+				}
+				DeformBrushMode::Smooth => {
+					let prev = cell.clone();
+					let strength = (delta.length().clamp(1.0, 14.0) / radius).clamp(0.10, 0.55);
+					for (vi, &v) in verts.iter().enumerate() {
+						let nbrs = &neighbors[vi];
+						if nbrs.is_empty() {
+							continue;
+						}
+						let cur_pos = v + prev[vi];
+						let t2 = ((cur_pos - brush_center).length_squared() * inv_r2).clamp(0.0, 1.0);
+						let w = (1.0 - t2) * (1.0 - t2);
+						if w > 0.01 {
+							let mut sum = Vec2::ZERO;
+							for &ni in nbrs {
+								sum += verts[ni] + prev[ni];
+							}
+							let avg = sum / (nbrs.len() as f32);
+							cell[vi] += (avg - cur_pos) * (strength * w);
+							affected += 1;
+						}
+					}
+				}
+				DeformBrushMode::Bulge => {
+					let mag = delta.x - delta.y;
+					for (vi, &v) in verts.iter().enumerate() {
+						let cur_pos = v + cell.get(vi).copied().unwrap_or(Vec2::ZERO);
+						let rel = cur_pos - brush_center;
+						let t2 = (rel.length_squared() * inv_r2).clamp(0.0, 1.0);
+						let w = (1.0 - t2) * (1.0 - t2);
+						if w > 0.01 && rel.length_squared() > 1e-4 {
+							let dir = rel.normalize();
+							if let Some(slot) = cell.get_mut(vi) {
+								*slot += dir * (mag * w);
+								affected += 1;
+							}
+						}
+					}
+				}
+				DeformBrushMode::Twist => {
+					let angle = ((delta.x - delta.y) / radius).clamp(-0.6, 0.6);
+					for (vi, &v) in verts.iter().enumerate() {
+						let cur_pos = v + cell.get(vi).copied().unwrap_or(Vec2::ZERO);
+						let rel = cur_pos - brush_center;
+						let t2 = (rel.length_squared() * inv_r2).clamp(0.0, 1.0);
+						let w = (1.0 - t2) * (1.0 - t2);
+						if w > 0.01 {
+							let a = angle * w;
+							let (s, c) = a.sin_cos();
+							let rotated = vec2(rel.x * c - rel.y * s, rel.x * s + rel.y * c);
+							if let Some(slot) = cell.get_mut(vi) {
+								*slot += rotated - rel;
+								affected += 1;
+							}
+						}
 					}
 				}
 			}
@@ -477,4 +649,267 @@ pub fn mirror_deform_keypoint(
 		*flag = true;
 	}
 	Ok(verts.len())
+}
+
+/// Synthesize non-cardinal 2D corner keypoints from orthogonal cross axes using additive
+/// Live2D-style corner synthesis: `Corner(ix, iy) = AxisX(ix, cy) + AxisY(cx, iy) - Center(cx, cy)`.
+pub fn synthesize_2d_corners(
+	puppet: &mut Puppet,
+	param_name: &str,
+	target_node: Option<InoxNodeUuid>,
+) -> Result<(usize, usize), String> {
+	let param = puppet
+		.params
+		.get_mut(param_name)
+		.ok_or_else(|| format!("Parameter '{param_name}' missing"))?;
+	let x_len = param.axis_points.x.len();
+	let y_len = param.axis_points.y.len();
+	if x_len < 2 || y_len < 2 {
+		return Err(format!(
+			"Parameter '{param_name}' must be at least 2x2 to synthesize corners (got {x_len}x{y_len})"
+		));
+	}
+
+	let span = param.max - param.min;
+	let def_nx = if span.x.abs() > 1e-6 {
+		((param.defaults.x - param.min.x) / span.x).clamp(0.0, 1.0)
+	} else {
+		0.5
+	};
+	let def_ny = if span.y.abs() > 1e-6 {
+		((param.defaults.y - param.min.y) / span.y).clamp(0.0, 1.0)
+	} else {
+		0.5
+	};
+	let cx = param
+		.axis_points
+		.x
+		.iter()
+		.enumerate()
+		.min_by(|a, b| (a.1 - def_nx).abs().total_cmp(&(b.1 - def_nx).abs()))
+		.map(|(i, _)| i)
+		.unwrap_or(0);
+	let cy = param
+		.axis_points
+		.y
+		.iter()
+		.enumerate()
+		.min_by(|a, b| (a.1 - def_ny).abs().total_cmp(&(b.1 - def_ny).abs()))
+		.map(|(i, _)| i)
+		.unwrap_or(0);
+
+	let mut bindings_updated = 0usize;
+	let mut cells_synthesized = 0usize;
+
+	for binding in &mut param.bindings {
+		if target_node.is_some_and(|nid| binding.node != nid) {
+			continue;
+		}
+		let mut touched_binding = false;
+		for iy in 0..y_len {
+			for ix in 0..x_len {
+				if ix == cx || iy == cy {
+					continue;
+				}
+				let set_x = binding.is_set.get(ix, cy).copied().unwrap_or(false);
+				let set_y = binding.is_set.get(cx, iy).copied().unwrap_or(false);
+				if !set_x && !set_y {
+					continue;
+				}
+				match &mut binding.values {
+					BindingValues::Deform(mat) => {
+						let row_c = mat.get(ix, cy).cloned().unwrap_or_default();
+						let col_c = mat.get(cx, iy).cloned().unwrap_or_default();
+						let ctr = mat.get(cx, cy).cloned().unwrap_or_default();
+						if let Some(dst) = mat.get_mut(ix, iy) {
+							let n = dst.len().min(row_c.len()).min(col_c.len());
+							for vi in 0..n {
+								let c = ctr.get(vi).copied().unwrap_or(Vec2::ZERO);
+								dst[vi] = row_c[vi] + col_c[vi] - c;
+							}
+							touched_binding = true;
+							cells_synthesized += 1;
+						}
+					}
+					other => {
+						let kind = binding_kind_name(other);
+						if let Some(mat) = scalar_matrix_mut(other, kind) {
+							let vx = mat.get(ix, cy).copied().unwrap_or(0.0);
+							let vy = mat.get(cx, iy).copied().unwrap_or(0.0);
+							let vc = mat.get(cx, cy).copied().unwrap_or(0.0);
+							let mut val = vx + vy - vc;
+							if kind == "Opacity" {
+								val = val.clamp(0.0, 1.0);
+							} else if kind == "TransformSX" || kind == "TransformSY" {
+								val = val.max(0.01);
+							}
+							if let Some(dst) = mat.get_mut(ix, iy) {
+								*dst = val;
+								touched_binding = true;
+								cells_synthesized += 1;
+							}
+						}
+					}
+				}
+				if touched_binding {
+					if let Some(flag) = binding.is_set.get_mut(ix, iy) {
+						*flag = true;
+					}
+				}
+			}
+		}
+		if touched_binding {
+			bindings_updated += 1;
+		}
+	}
+
+	Ok((bindings_updated, cells_synthesized))
+}
+
+/// Live2D Glue-style cross-node seam welding at a parameter keypoint: finds vertex pairs between
+/// `node_a` and `node_b` within `max_dist_px` in world space and pulls them toward their weighted
+/// midpoint `mix(world_a, world_b, weight)` in each node's local `Deform` binding.
+pub fn weld_seam_vertices(
+	puppet: &mut Puppet,
+	node_a: InoxNodeUuid,
+	node_b: InoxNodeUuid,
+	param_name: &str,
+	param_val: Vec2,
+	max_dist_px: f32,
+	weight: f32,
+) -> Result<(usize, usize, usize), String> {
+	if node_a == node_b {
+		return Err("node_a and node_b must be distinct nodes".to_owned());
+	}
+	if puppet.render_ctx.is_none() {
+		puppet.init_all();
+	}
+	puppet.begin_frame();
+	if let Some(pctx) = puppet.param_ctx.as_mut() {
+		let _ = pctx.set(param_name, param_val);
+	}
+	puppet.end_frame(0.0);
+
+	let verts_a = node_deform_rest_vertices(puppet, node_a)?;
+	let verts_b = node_deform_rest_vertices(puppet, node_b)?;
+	let origin_a = puppet
+		.node_comps
+		.get::<Mesh>(node_a)
+		.map(|m| m.origin)
+		.unwrap_or(Vec2::ZERO);
+	let origin_b = puppet
+		.node_comps
+		.get::<Mesh>(node_b)
+		.map(|m| m.origin)
+		.unwrap_or(Vec2::ZERO);
+	let abs_a = puppet
+		.node_comps
+		.get::<TransformStore>(node_a)
+		.map(|t| t.absolute)
+		.unwrap_or(glam::Mat4::IDENTITY);
+	let abs_b = puppet
+		.node_comps
+		.get::<TransformStore>(node_b)
+		.map(|t| t.absolute)
+		.unwrap_or(glam::Mat4::IDENTITY);
+
+	let (ba, ix, iy) = ensure_deform_binding_keypoint(puppet, node_a, param_name, param_val, verts_a.len())?;
+	let (bb, _, _) = ensure_deform_binding_keypoint(puppet, node_b, param_name, param_val, verts_b.len())?;
+
+	let offs_a = {
+		let param = puppet.params.get(param_name).unwrap();
+		if let BindingValues::Deform(ref m) = param.bindings[ba].values {
+			m.get(ix, iy).cloned().unwrap_or_else(|| vec![Vec2::ZERO; verts_a.len()])
+		} else {
+			vec![Vec2::ZERO; verts_a.len()]
+		}
+	};
+	let offs_b = {
+		let param = puppet.params.get(param_name).unwrap();
+		if let BindingValues::Deform(ref m) = param.bindings[bb].values {
+			m.get(ix, iy).cloned().unwrap_or_else(|| vec![Vec2::ZERO; verts_b.len()])
+		} else {
+			vec![Vec2::ZERO; verts_b.len()]
+		}
+	};
+
+	let world_a: Vec<Vec2> = verts_a
+		.iter()
+		.enumerate()
+		.map(|(i, &v)| {
+			let d = offs_a.get(i).copied().unwrap_or(Vec2::ZERO);
+			abs_a
+				.transform_point3(glam::vec3(v.x - origin_a.x + d.x, v.y - origin_a.y + d.y, 0.0))
+				.truncate()
+		})
+		.collect();
+	let world_b: Vec<Vec2> = verts_b
+		.iter()
+		.enumerate()
+		.map(|(i, &v)| {
+			let d = offs_b.get(i).copied().unwrap_or(Vec2::ZERO);
+			abs_b
+				.transform_point3(glam::vec3(v.x - origin_b.x + d.x, v.y - origin_b.y + d.y, 0.0))
+				.truncate()
+		})
+		.collect();
+
+	let inv_a = abs_a.inverse();
+	let inv_b = abs_b.inverse();
+	let w = weight.clamp(0.0, 1.0);
+	let max_d2 = max_dist_px.max(0.5).powi(2);
+
+	let mut delta_a = vec![Vec2::ZERO; verts_a.len()];
+	let mut delta_b = vec![Vec2::ZERO; verts_b.len()];
+	let mut count_b = vec![0u32; verts_b.len()];
+	let mut pairs = 0usize;
+
+	for (ia, &wa) in world_a.iter().enumerate() {
+		let mut best: Option<(usize, f32)> = None;
+		for (ib, &wb) in world_b.iter().enumerate() {
+			let d2 = (wa - wb).length_squared();
+			if d2 <= max_d2 && best.is_none_or(|(_, bd2)| d2 < bd2) {
+				best = Some((ib, d2));
+			}
+		}
+		if let Some((ib, _)) = best {
+			let wb = world_b[ib];
+			let target_w = wa.lerp(wb, w);
+			let target_la = inv_a.transform_point3(target_w.extend(0.0)).truncate() + origin_a;
+			let target_lb = inv_b.transform_point3(target_w.extend(0.0)).truncate() + origin_b;
+			let cur_la = verts_a[ia] + offs_a[ia];
+			let cur_lb = verts_b[ib] + offs_b[ib];
+			delta_a[ia] = target_la - cur_la;
+			delta_b[ib] += target_lb - cur_lb;
+			count_b[ib] += 1;
+			pairs += 1;
+		}
+	}
+
+	let param = puppet
+		.params
+		.get_mut(param_name)
+		.ok_or_else(|| format!("Parameter '{param_name}' missing"))?;
+	if let BindingValues::Deform(ref mut mat) = param.bindings[ba].values {
+		if let Some(cell) = mat.get_mut(ix, iy) {
+			for (i, d) in delta_a.into_iter().enumerate() {
+				if let Some(slot) = cell.get_mut(i) {
+					*slot += d;
+				}
+			}
+		}
+	}
+	if let BindingValues::Deform(ref mut mat) = param.bindings[bb].values {
+		if let Some(cell) = mat.get_mut(ix, iy) {
+			for (i, d) in delta_b.into_iter().enumerate() {
+				if count_b[i] > 0 {
+					if let Some(slot) = cell.get_mut(i) {
+						*slot += d / (count_b[i] as f32);
+					}
+				}
+			}
+		}
+	}
+
+	Ok((ix, iy, pairs))
 }

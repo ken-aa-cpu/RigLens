@@ -1232,3 +1232,124 @@ fn mcp_booster_commands_configure_start_status_and_stop() {
 	let stop_res = session.exec("booster.stop", &json::object! {}).unwrap();
 	assert_eq!(stop_res["running"].as_bool(), Some(false));
 }
+
+#[test]
+fn brush_modes_and_synthesize_corners_work_deterministically() {
+	use glam::vec2;
+	use inox2d::params::BindingValues;
+
+	let mut session = Session::new_sample();
+
+	for mode in ["grab", "smooth", "bulge", "twist"] {
+		let res = session
+			.exec(
+				"deform.brush",
+				&json::object! {
+					node_name: "Face",
+					param: "Head:: Yaw-Pitch",
+					mode: mode,
+					kx: 1.0,
+					ky: 0.0,
+					anchor: "center",
+					radius_ratio: 0.55,
+					dx: 8.0,
+					dy: 0.0
+				},
+			)
+			.unwrap();
+		assert_eq!(res["mode"].as_str(), Some(mode));
+		assert!(res["affected_vertices"].as_usize().unwrap_or(0) > 0);
+	}
+
+	// Create clean 3x3 param with known cardinal X/Y values and synthesize corners
+	session
+		.exec(
+			"param.create",
+			&json::object! {
+				name: "Synth:: Test",
+				is_vec2: true,
+				min: [-1.0, -1.0],
+				max: [1.0, 1.0],
+				defaults: [0.0, 0.0],
+				axis_x: [0.0, 0.5, 1.0],
+				axis_y: [0.0, 0.5, 1.0]
+			},
+		)
+		.unwrap();
+
+	session
+		.exec(
+			"param.set_binding_keypoint",
+			&json::object! { node_name: "Face", param: "Synth:: Test", kind: "TransformTX", ix: 1, iy: 1, value: 2.0 },
+		)
+		.unwrap();
+	session
+		.exec(
+			"param.set_binding_keypoint",
+			&json::object! { node_name: "Face", param: "Synth:: Test", kind: "TransformTX", ix: 2, iy: 1, value: 12.0 },
+		)
+		.unwrap();
+	session
+		.exec(
+			"param.set_binding_keypoint",
+			&json::object! { node_name: "Face", param: "Synth:: Test", kind: "TransformTX", ix: 1, iy: 2, value: 5.0 },
+		)
+		.unwrap();
+
+	session
+		.exec(
+			"deform.set_vertices",
+			&json::object! { node_name: "Face", param: "Synth:: Test", kx: -1.0, ky: 0.0, indices: [0], dx: -6.0, dy: 1.0 },
+		)
+		.unwrap();
+	session
+		.exec(
+			"deform.set_vertices",
+			&json::object! { node_name: "Face", param: "Synth:: Test", kx: 0.0, ky: 1.0, indices: [0], dx: 2.0, dy: 9.0 },
+		)
+		.unwrap();
+
+	let syn = session
+		.exec("param.synthesize_corners", &json::object! { param: "Synth:: Test", node_name: "Face" })
+		.unwrap();
+	assert!(syn["bindings_updated"].as_usize().unwrap_or(0) >= 2);
+	assert!(syn["cells_synthesized"].as_usize().unwrap_or(0) >= 2);
+
+	let p = session.model.puppet.params.get("Synth:: Test").unwrap();
+	let tx_b = p
+		.bindings
+		.iter()
+		.find(|b| matches!(b.values, BindingValues::TransformTX(_)))
+		.unwrap();
+	if let BindingValues::TransformTX(ref mat) = tx_b.values {
+		// Corner (2, 2) = 12 + 5 - 2 = 15.0
+		assert!((mat.get(2, 2).copied().unwrap_or(0.0) - 15.0).abs() < 1e-4);
+	}
+	let def_b = p
+		.bindings
+		.iter()
+		.find(|b| matches!(b.values, BindingValues::Deform(_)))
+		.unwrap();
+	if let BindingValues::Deform(ref mat) = def_b.values {
+		// Corner (0, 2) vertex 0 = (-6, 1) + (2, 9) - (0, 0) = (-4, 10)
+		let v0 = mat.get(0, 2).unwrap()[0];
+		assert!((v0 - vec2(-4.0, 10.0)).length() < 1e-4);
+	}
+
+	// Cross-node Glue-style seam weld between Torso and Hair_Back at generous radius
+	let weld = session
+		.exec(
+			"deform.weld_seam",
+			&json::object! {
+				node_a_name: "Torso",
+				node_b_name: "Face",
+				param: "Head:: Yaw-Pitch",
+				kx: 0.0,
+				ky: 0.0,
+				max_dist_px: 120.0,
+				weight: 0.5
+			},
+		)
+		.unwrap();
+	assert!(weld["welded_pairs"].as_usize().unwrap_or(0) > 0);
+}

@@ -9,11 +9,11 @@ use json::JsonValue;
 use crate::audit::{analyze_anatomy, audit_rig, auto_fix_rig};
 use crate::rig::{
 	add_pendulum_physics, add_standard_vtuber_params, apply_blink_binding, apply_breath_binding,
-	apply_brow_binding, apply_deform_brush, apply_head_perspective_binding, apply_head_roll_binding,
+	apply_brow_binding, apply_deform_brush_mode, apply_head_perspective_binding, apply_head_roll_binding,
 	apply_mouth_form_binding, apply_mouth_visemes_2d, apply_opacity_binding, apply_vertex_deform_delta,
 	auto_rig_vtuber, clear_binding_keypoint, configure_pendulum_physics, create_idle_animation, ensure_param,
 	mirror_deform_keypoint, remove_animation_keyframe, remove_param_binding, set_animation_keyframe,
-	set_scalar_binding_keypoint,
+	set_scalar_binding_keypoint, synthesize_2d_corners, weld_seam_vertices, DeformBrushMode,
 };
 
 use super::Session;
@@ -224,7 +224,11 @@ impl Session {
 				let radius_ratio = params["radius_ratio"].as_f32().unwrap_or(0.45);
 				let dx = params["dx"].as_f32().unwrap_or(0.0);
 				let dy = params["dy"].as_f32().unwrap_or(0.0);
-				let (ix, iy, affected) = apply_deform_brush(
+				let mode = params["mode"]
+					.as_str()
+					.map(DeformBrushMode::parse)
+					.unwrap_or(DeformBrushMode::Grab);
+				let (ix, iy, affected) = apply_deform_brush_mode(
 					&mut self.model.puppet,
 					id,
 					param_name,
@@ -233,12 +237,14 @@ impl Session {
 					local_xy,
 					radius_ratio,
 					vec2(dx, dy),
+					mode,
 				)?;
 				self.model.puppet.reset_contexts();
 				self.revision += 1;
 				Ok(json::object! {
 					node_uuid: id.0,
 					param: param_name,
+					mode: mode.as_str(),
 					grid_cell: [ix, iy],
 					affected_vertices: affected
 				})
@@ -550,6 +556,56 @@ impl Session {
 					param: param_name,
 					mirrored_vertices: verts,
 					mirror_x: mirror_x
+				})
+			}
+			"param.synthesize_corners" => {
+				let param_name = params["param"]
+					.as_str()
+					.ok_or_else(|| "Missing 'param'".to_owned())?;
+				let target_node = if !params["node_uuid"].is_null() || !params["node_name"].is_null() {
+					Some(self.resolve_node(params, "node_uuid", "node_name")?)
+				} else {
+					None
+				};
+				let (bindings_updated, cells_synthesized) =
+					synthesize_2d_corners(&mut self.model.puppet, param_name, target_node)?;
+				self.model.puppet.reset_contexts();
+				if cells_synthesized > 0 {
+					self.revision += 1;
+				}
+				Ok(json::object! {
+					param: param_name,
+					bindings_updated: bindings_updated,
+					cells_synthesized: cells_synthesized
+				})
+			}
+			"deform.weld_seam" => {
+				let id_a = self.resolve_node(params, "node_a_uuid", "node_a_name")?;
+				let id_b = self.resolve_node(params, "node_b_uuid", "node_b_name")?;
+				let param_name = params["param"].as_str().unwrap_or("Head:: Yaw-Pitch");
+				let kx = params["kx"].as_f32().unwrap_or(0.0);
+				let ky = params["ky"].as_f32().unwrap_or(0.0);
+				let max_dist_px = params["max_dist_px"].as_f32().unwrap_or(14.0);
+				let weight = params["weight"].as_f32().unwrap_or(0.5);
+				let (ix, iy, pairs) = weld_seam_vertices(
+					&mut self.model.puppet,
+					id_a,
+					id_b,
+					param_name,
+					vec2(kx, ky),
+					max_dist_px,
+					weight,
+				)?;
+				self.model.puppet.reset_contexts();
+				if pairs > 0 {
+					self.revision += 1;
+				}
+				Ok(json::object! {
+					node_a_uuid: id_a.0,
+					node_b_uuid: id_b.0,
+					param: param_name,
+					grid_cell: [ix, iy],
+					welded_pairs: pairs
 				})
 			}
 			"anim.create" => {

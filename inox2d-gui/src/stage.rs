@@ -7,8 +7,8 @@ use inox2d_mcp::rig::{apply_vertex_deform_delta, configure_pendulum_physics, ret
 use crate::icons::StudioTool;
 use crate::stage_render::StageOverlay;
 use crate::theme::{
-	ACCENT_BLUE, AUDIT_WARN_AMBER, BG_DOCK, BG_INPUT, BG_STAGE, BORDER, TEXT_MUTED, TIMELINE_EMERALD,
-	TIMELINE_VIOLET,
+	ACCENT_BLUE, AUDIT_ERR_ROSE, AUDIT_WARN_AMBER, BG_DOCK, BG_INPUT, BG_STAGE, BORDER, TEXT_MUTED,
+	TIMELINE_EMERALD, TIMELINE_VIOLET,
 };
 use crate::Inox2dStudioApp;
 
@@ -38,6 +38,42 @@ pub(crate) enum StageDrag {
 	},
 	Pose25D,
 	HandPan,
+}
+
+/// Detect flipped or collapsed triangles relative to the mesh's dominant winding orientation.
+pub(crate) fn find_folded_triangles(pts: &[egui::Pos2], indices: &[u32]) -> Vec<[usize; 3]> {
+	let mut pos = 0usize;
+	let mut neg = 0usize;
+	for tri in indices.chunks_exact(3) {
+		let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+		if a < pts.len() && b < pts.len() && c < pts.len() {
+			let ab = pts[b] - pts[a];
+			let ac = pts[c] - pts[a];
+			let area2 = ab.x * ac.y - ab.y * ac.x;
+			if area2 > 0.1 {
+				pos += 1;
+			} else if area2 < -0.1 {
+				neg += 1;
+			}
+		}
+	}
+	if pos == 0 && neg == 0 {
+		return Vec::new();
+	}
+	let expected_sign = if pos >= neg { 1.0_f32 } else { -1.0_f32 };
+	let mut folded = Vec::new();
+	for tri in indices.chunks_exact(3) {
+		let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+		if a < pts.len() && b < pts.len() && c < pts.len() {
+			let ab = pts[b] - pts[a];
+			let ac = pts[c] - pts[a];
+			let area2 = ab.x * ac.y - ab.y * ac.x;
+			if area2 * expected_sign <= 0.05 {
+				folded.push([a, b, c]);
+			}
+		}
+	}
+	folded
 }
 
 /// Maps stage pointer coordinates to normalized 2.5D pose space (`[-1, 1]`),
@@ -165,6 +201,20 @@ impl Inox2dStudioApp {
 									clip_painter.line_segment([pts[a], pts[b]], wire_stroke);
 									clip_painter.line_segment([pts[b], pts[c]], wire_stroke);
 									clip_painter.line_segment([pts[c], pts[a]], wire_stroke);
+								}
+							}
+						}
+						if matches!(self.tool, StudioTool::VertexSubselect | StudioTool::DeformBrush) || self.xray_mode {
+							let folded = find_folded_triangles(pts, indices);
+							if !folded.is_empty() {
+								let fill = Color32::from_rgba_unmultiplied(244, 63, 94, 96);
+								let edge = Stroke::new(1.3_f32, AUDIT_ERR_ROSE);
+								for [a, b, c] in folded {
+									clip_painter.add(egui::Shape::convex_polygon(
+										vec![pts[a], pts[b], pts[c]],
+										fill,
+										edge,
+									));
 								}
 							}
 						}
@@ -478,9 +528,18 @@ impl Inox2dStudioApp {
 				}
 				Some(StageDrag::MoveNode) => {
 					if let Some(id) = self.selected_node {
+						let constrained = if shift_held {
+							if delta.x.abs() >= delta.y.abs() {
+								vec2(delta.x, 0.0)
+							} else {
+								vec2(0.0, delta.y)
+							}
+						} else {
+							delta
+						};
 						if let Some(n) = self.session.model.puppet.nodes.get_node_mut(id) {
-							n.trans_offset.translation.x += delta.x * world_per_ui;
-							n.trans_offset.translation.y += delta.y * world_per_ui;
+							n.trans_offset.translation.x += constrained.x * world_per_ui;
+							n.trans_offset.translation.y += constrained.y * world_per_ui;
 							self.session.revision += 1;
 							self.cached_rev = u64::MAX;
 						}
@@ -498,8 +557,17 @@ impl Inox2dStudioApp {
 				}
 				Some(StageDrag::VertexMove) => {
 					if let Some(id) = self.selected_node {
-						if delta.length_sq() > 0.01 && !self.selected_vertices.is_empty() {
-							let local_delta = gvec2(delta.x * world_per_ui, delta.y * world_per_ui);
+						let constrained = if shift_held {
+							if delta.x.abs() >= delta.y.abs() {
+								vec2(delta.x, 0.0)
+							} else {
+								vec2(0.0, delta.y)
+							}
+						} else {
+							delta
+						};
+						if constrained.length_sq() > 0.01 && !self.selected_vertices.is_empty() {
+							let local_delta = gvec2(constrained.x * world_per_ui, constrained.y * world_per_ui);
 							let indices: Vec<u32> = self.selected_vertices.iter().copied().collect();
 							match self.vertex_mode {
 								VertexEditMode::DeformKeypoint => {
@@ -566,6 +634,7 @@ impl Inox2dStudioApp {
 									&json::object! {
 										node_uuid: id.0,
 										param: self.brush_param.as_str(),
+										mode: self.brush_mode.as_str(),
 										kx: pval.x,
 										ky: pval.y,
 										local_xy: [local_xy.x, local_xy.y],

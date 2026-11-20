@@ -3,6 +3,7 @@ use glam::{vec2 as gvec2, Vec2 as GVec2};
 use inox2d::node::components::{SimplePhysics, TexturedMesh};
 use inox2d::node::InoxNodeUuid;
 use inox2d_mcp::engine::command_registry;
+use inox2d_mcp::rig::DeformBrushMode;
 
 use crate::bindings::{draw_audit_tab, draw_bindings_tab, draw_properties_tab, InspectorAction, InspectorTab};
 use crate::booster_panel;
@@ -309,11 +310,20 @@ impl Inox2dStudioApp {
 					);
 				}
 				StudioTool::DeformBrush => {
+					for mode in [
+						DeformBrushMode::Grab,
+						DeformBrushMode::Smooth,
+						DeformBrushMode::Bulge,
+						DeformBrushMode::Twist,
+					] {
+						ui.selectable_value(&mut self.brush_mode, mode, mode.label());
+					}
+					ui.separator();
 					let mut param_keys: Vec<String> = self.session.model.puppet.params.keys().cloned().collect();
 					param_keys.sort();
 					egui::ComboBox::from_id_source("ctx_brush_param")
 						.selected_text(self.brush_param.as_str())
-						.width(140.0)
+						.width(132.0)
 						.show_ui(ui, |ui| {
 							for k in param_keys {
 								ui.selectable_value(&mut self.brush_param, k.clone(), k);
@@ -548,6 +558,14 @@ impl Inox2dStudioApp {
 						self.selected_node = None;
 					}
 					self.selected_vertices.clear();
+				}
+				OutlinerAction::RunDelaunay(id) => {
+					self.selected_node = Some(id);
+					self.exec_cmd(
+						"mesh.auto_delaunay",
+						json::object! { node_uuid: id.0, step_px: 20.0 },
+						"Rebuilt Part mesh via Bowyer-Watson Delaunay",
+					);
 				}
 			}
 		}

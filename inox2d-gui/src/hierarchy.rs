@@ -42,6 +42,7 @@ pub enum OutlinerAction {
 	AddGridDeformer,
 	AddPathDeformer,
 	AddMeshGroup,
+	RunDelaunay(InoxNodeUuid),
 	DeleteNode(InoxNodeUuid),
 }
 
@@ -301,6 +302,52 @@ pub fn draw_outliner_panel(
 				if click_resp.clicked() {
 					actions.push(OutlinerAction::Select(row.uuid));
 				}
+				click_resp.context_menu(|ui| {
+					ui.label(egui::RichText::new(&row.name).strong().size(11.0));
+					ui.separator();
+					if ui.button(if row.enabled { "Hide Node" } else { "Show Node" }).clicked() {
+						actions.push(OutlinerAction::ToggleEnabled(row.uuid, !row.enabled));
+						ui.close_menu();
+					}
+					if ui.button("Bring Forward (z - 1)").clicked() {
+						actions.push(OutlinerAction::SetZSort(row.uuid, row.zsort - 1.0));
+						ui.close_menu();
+					}
+					if ui.button("Send Back (z + 1)").clicked() {
+						actions.push(OutlinerAction::SetZSort(row.uuid, row.zsort + 1.0));
+						ui.close_menu();
+					}
+					if puppet.node_comps.get::<TexturedMesh>(row.uuid).is_some() {
+						ui.separator();
+						if ui.button("Rebuild Delaunay Mesh").clicked() {
+							actions.push(OutlinerAction::RunDelaunay(row.uuid));
+							ui.close_menu();
+						}
+					}
+					ui.separator();
+					if ui.button("Wrap in GridDeformer").clicked() {
+						actions.push(OutlinerAction::Select(row.uuid));
+						actions.push(OutlinerAction::AddGridDeformer);
+						ui.close_menu();
+					}
+					if ui.button("Wrap in PathDeformer").clicked() {
+						actions.push(OutlinerAction::Select(row.uuid));
+						actions.push(OutlinerAction::AddPathDeformer);
+						ui.close_menu();
+					}
+					if ui.button("Wrap in MeshGroup").clicked() {
+						actions.push(OutlinerAction::Select(row.uuid));
+						actions.push(OutlinerAction::AddMeshGroup);
+						ui.close_menu();
+					}
+					if row.uuid != puppet.nodes.root_node_id {
+						ui.separator();
+						if ui.button("Delete Node").clicked() {
+							actions.push(OutlinerAction::DeleteNode(row.uuid));
+							ui.close_menu();
+						}
+					}
+				});
 			}
 		});
 
