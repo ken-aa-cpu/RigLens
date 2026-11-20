@@ -19,6 +19,7 @@ use inox2d_mcp::formats::default_registry;
 use inox2d_mcp::headless_render::{
 	render_anim_gif, render_anim_sheet, render_diagnostic, render_frame, render_grid, RenderOptions,
 };
+use inox2d_mcp::mcp_client::McpStdioClient;
 use inox2d_mcp::psd::{export_model_to_psd, import_psd_to_model_with_mode, parse_psd_bytes};
 use inox2d_mcp::rig::{auto_rig_vtuber, build_sample_vtuber_model};
 use json::JsonValue;
@@ -213,6 +214,20 @@ enum Commands {
 		/// Auto-save modified .inp atomically whenever an MCP tool mutates the puppet
 		#[arg(long)]
 		watch: Option<PathBuf>,
+	},
+	/// Connect as an MCP companion client to an external editor MCP server (e.g. nijigenerate)
+	McpConnect {
+		/// External MCP server executable (e.g. nijigenerate or another MCP binary)
+		program: String,
+		/// Optional remote tool name to invoke after listing capabilities
+		#[arg(long)]
+		call: Option<String>,
+		/// JSON object arguments for --call
+		#[arg(long, default_value = "{}")]
+		args_json: String,
+		/// Arguments forwarded to the spawned MCP server executable
+		#[arg(last = true)]
+		server_args: Vec<String>,
 	},
 }
 
@@ -636,6 +651,41 @@ fn run() -> Result<(), String> {
 					}
 				}
 			}
+		}
+		Commands::McpConnect {
+			program,
+			call,
+			args_json,
+			server_args,
+		} => {
+			let mut stdio = McpStdioClient::spawn(&program, &server_args)?;
+			let client = stdio.client_mut();
+			let server_info = client.initialize("inox2d-mcp", env!("CARGO_PKG_VERSION"))?;
+			let tools = client.list_tools()?;
+			let call_result = if let Some(tool_name) = call {
+				let parsed_args = json::parse(&args_json)
+					.map_err(|e| format!("Invalid --args-json: {e}"))?;
+				Some(client.call_tool(&tool_name, parsed_args)?)
+			} else {
+				None
+			};
+			let tools_json: Vec<JsonValue> = tools
+				.into_iter()
+				.map(|t| {
+					json::object! {
+						name: t.name,
+						description: t.description
+					}
+				})
+				.collect();
+			let mut out = json::object! {
+				server: server_info,
+				tools: tools_json
+			};
+			if let Some(res) = call_result {
+				out.insert("call_result", res).ok();
+			}
+			println!("{}", json::stringify_pretty(out, 2));
 		}
 	}
 	Ok(())

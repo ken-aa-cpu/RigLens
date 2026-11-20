@@ -3,7 +3,11 @@ name = "inox2d-mcp"
 version = "0.1.0"
 edition = "2021"
 license = "BSD-2-Clause"
-description = "Creator rigging engine, headless renderer, CLI, and MCP server for Inochi2D (inox2d)"
+repository = "https://github.com/ken-aa-cpu/RigLens"
+readme = "../README.md"
+keywords = ["inochi2d", "vtuber", "mcp", "psd", "rigging"]
+categories = ["command-line-utilities", "graphics"]
+description = "Creator rigging engine, headless renderer, CLI, and MCP server/client companion for RigLens / inox2d"
 
 [dependencies]
 inox2d = { path = "../inox2d" }
