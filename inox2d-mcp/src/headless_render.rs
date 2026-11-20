@@ -58,6 +58,7 @@ struct RenderState {
 struct SoftwareRenderer<'a> {
 	puppet: &'a Puppet,
 	textures: &'a [ShallowTexture],
+	tex_is_premul: Vec<bool>,
 	mvp_cam: Mat4,
 	width: u32,
 	height: u32,
@@ -93,21 +94,30 @@ fn edge_fn(a: Vec2, b: Vec2, c: Vec2) -> f32 {
 fn sample_bilinear(tex: &ShallowTexture, uv: Vec2) -> [f32; 4] {
 	let w = tex.width();
 	let h = tex.height();
-	if w == 0 || h == 0 {
+	if w == 0 || h == 0 || !uv.is_finite() {
 		return [0.0; 4];
 	}
-	let u = uv.x.clamp(0.0, 1.0) * (w as f32 - 1.0);
-	let v = uv.y.clamp(0.0, 1.0) * (h as f32 - 1.0);
-	let x0 = (u.floor() as u32).min(w - 1);
-	let y0 = (v.floor() as u32).min(h - 1);
-	let x1 = (x0 + 1).min(w - 1);
-	let y1 = (y0 + 1).min(h - 1);
+	// Software GL_CLAMP_TO_BORDER([0,0,0,0]) so meshes with padded OOB UVs don't streak edge pixels.
+	let wf = w as f32;
+	let hf = h as f32;
+	let u = uv.x * wf - 0.5;
+	let v = uv.y * hf - 0.5;
+	if u < -1.0 || v < -1.0 || u > wf || v > hf {
+		return [0.0; 4];
+	}
+	let x0 = u.floor() as i32;
+	let y0 = v.floor() as i32;
+	let x1 = x0 + 1;
+	let y1 = y0 + 1;
 	let fx = u - x0 as f32;
 	let fy = v - y0 as f32;
 
 	let px = tex.pixels();
-	let fetch = |x: u32, y: u32| -> [f32; 4] {
-		let idx = ((y * w + x) * 4) as usize;
+	let fetch = |x: i32, y: i32| -> [f32; 4] {
+		if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+			return [0.0; 4];
+		}
+		let idx = ((y as u32 * w + x as u32) * 4) as usize;
 		if idx + 3 < px.len() {
 			[
 				px[idx] as f32 / 255.0,
@@ -384,7 +394,7 @@ impl<'a> InoxRenderer for SoftwareRenderer<'a> {
 						let b1 = w1 / area;
 						let b2 = w2 / area;
 						let uv = uv0 * b0 + uv1 * b1 + uv2 * b2;
-						let tc = sample_bilinear(tex, uv);
+						let mut tc = sample_bilinear(tex, uv);
 
 						let idx = (py * w + px) as usize;
 						if as_mask {
@@ -401,11 +411,21 @@ impl<'a> InoxRenderer for SoftwareRenderer<'a> {
 							continue;
 						}
 
-						// Apply screenTint + tint + opacity (matches basic.frag)
-						let a = tc[3];
-						let sr = 1.0 - (1.0 - tc[0]) * (1.0 - screen_tint.x * a);
-						let sg = 1.0 - (1.0 - tc[1]) * (1.0 - screen_tint.y * a);
-						let sb = 1.0 - (1.0 - tc[2]) * (1.0 - screen_tint.z * a);
+						let a = tc[3].clamp(0.0, 1.0);
+						if a <= 0.0005 {
+							continue;
+						}
+						let is_premul = self.tex_is_premul.get(components.texture.tex_albedo.0).copied().unwrap_or(false);
+						if is_premul {
+							tc[0] = (tc[0] / a).clamp(0.0, 1.0);
+							tc[1] = (tc[1] / a).clamp(0.0, 1.0);
+							tc[2] = (tc[2] / a).clamp(0.0, 1.0);
+						}
+
+						// Apply screenTint + tint + opacity on straight RGB before blend_pixel
+						let sr = 1.0 - (1.0 - tc[0]) * (1.0 - screen_tint.x);
+						let sg = 1.0 - (1.0 - tc[1]) * (1.0 - screen_tint.y);
+						let sb = 1.0 - (1.0 - tc[2]) * (1.0 - screen_tint.z);
 						let col = [
 							(sr * tint.x).clamp(0.0, 1.0),
 							(sg * tint.y).clamp(0.0, 1.0),
@@ -555,9 +575,28 @@ pub fn render_frame_with_textures(
 	let viewport = vec2(opts.width as f32, opts.height as f32);
 	let mvp_cam = camera.matrix(viewport);
 
+	let tex_is_premul: Vec<bool> = decoded
+		.iter()
+		.map(|t| {
+			let mut has_semi = false;
+			let mut exceeds = false;
+			for px in t.pixels().chunks_exact(4) {
+				if px[3] > 0 && px[3] < 255 {
+					has_semi = true;
+				}
+				if px[3] > 0 && (px[0] > px[3] || px[1] > px[3] || px[2] > px[3]) {
+					exceeds = true;
+					break;
+				}
+			}
+			has_semi && !exceeds
+		})
+		.collect();
+
 	let renderer = SoftwareRenderer {
 		puppet: &model.puppet,
 		textures: decoded,
+		tex_is_premul,
 		mvp_cam,
 		width: opts.width,
 		height: opts.height,

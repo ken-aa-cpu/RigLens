@@ -91,6 +91,13 @@ impl Inox2dStudioApp {
 		self.stage_viewport_size = new_vp;
 		if self.needs_initial_fit && rect.width() > 80.0 && rect.height() > 80.0 {
 			self.fit_puppet_scale();
+			if let Some(z) = self.initial_zoom.take() {
+				self.view_zoom = z.clamp(0.25, 12.0);
+			}
+			if self.initial_focus_y.abs() > 1e-3 {
+				self.puppet_center.y += self.initial_focus_y;
+				self.initial_focus_y = 0.0;
+			}
 			self.needs_initial_fit = false;
 			self.cached_rev = u64::MAX;
 		} else if vp_changed && !self.live_physics {

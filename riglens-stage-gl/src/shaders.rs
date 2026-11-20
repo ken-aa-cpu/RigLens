@@ -109,15 +109,17 @@ void main() {
 	}
 	vec4 texColor = texture(albedo, texUVs);
 	float ta = clamp(texColor.a, 0.0, 1.0);
-	vec3 texStraight = (ta > 0.0005) ? clamp(texColor.rgb / ta, 0.0, 1.0) : vec3(0.0);
-	vec3 screenOut = vec3(1.0) - ((vec3(1.0) - texStraight) * (vec3(1.0) - screenColor));
-	vec3 straight = clamp(screenOut * multColor, 0.0, 1.0);
 	float sa = clamp(ta * opacity, 0.0, 1.0);
 
 	if (blendMode == 0) {
-		outColor = vec4(straight * sa, sa);
+		// Exact match to inox2d-opengl basic.frag on premultiplied RGBA8 textures
+		vec3 screenPremul = vec3(1.0) - ((vec3(1.0) - texColor.rgb) * (vec3(1.0) - screenColor * ta));
+		outColor = vec4(clamp(screenPremul * multColor, 0.0, 1.0) * opacity, sa);
 		return;
 	}
+	vec3 texStraight = (ta > 0.0005) ? clamp(texColor.rgb / ta, 0.0, 1.0) : vec3(0.0);
+	vec3 screenOut = vec3(1.0) - ((vec3(1.0) - texStraight) * (vec3(1.0) - screenColor));
+	vec3 straight = clamp(screenOut * multColor, 0.0, 1.0);
 	vec4 dst = texelFetch(backdrop, ivec2(gl_FragCoord.xy), 0);
 	outColor = apply_backdrop_blend(blendMode, straight, sa, dst);
 }

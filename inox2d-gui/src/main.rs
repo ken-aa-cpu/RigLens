@@ -73,6 +73,8 @@ pub(crate) struct Inox2dStudioApp {
 	pub(crate) stage_viewport_size: GVec2,
 	pub(crate) pixels_per_point: f32,
 	pub(crate) needs_initial_fit: bool,
+	pub(crate) initial_zoom: Option<f32>,
+	pub(crate) initial_focus_y: f32,
 	pub(crate) puppet_scale: f32,
 	pub(crate) puppet_center: GVec2,
 	pub(crate) view_zoom: f32,
@@ -192,6 +194,8 @@ impl Inox2dStudioApp {
 			stage_viewport_size: glam::vec2(660.0, 460.0),
 			pixels_per_point: 1.0,
 			needs_initial_fit: true,
+			initial_zoom: None,
+			initial_focus_y: 0.0,
 			puppet_scale: 0.92,
 			puppet_center: GVec2::ZERO,
 			view_zoom: 1.0,
@@ -634,6 +638,8 @@ fn main() -> eframe::Result<()> {
 			} else if cli.gpu_stage {
 				app.exact_composite = false;
 			}
+			app.initial_zoom = cli.zoom;
+			app.initial_focus_y = cli.focus_y;
 			Ok(Box::new(app))
 		}),
 	)

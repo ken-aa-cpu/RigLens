@@ -31,6 +31,12 @@ pub(crate) struct Cli {
 	/// Render several frames, capture a PNG screenshot of the studio window, and exit
 	#[arg(long)]
 	pub(crate) screenshot: Option<PathBuf>,
+	/// Optional initial camera zoom multiplier (e.g. 4.0 to inspect face close-up)
+	#[arg(long)]
+	pub(crate) zoom: Option<f32>,
+	/// Optional initial vertical camera pan offset in world units (negative = look higher toward head)
+	#[arg(long, default_value_t = 0.0)]
+	pub(crate) focus_y: f32,
 	/// Start with interactive GPU FBO+Stencil stage (default)
 	#[arg(long)]
 	pub(crate) gpu_stage: bool,

@@ -241,20 +241,47 @@ impl StageGlRenderer {
 		}
 		for inp in inputs {
 			if let Ok(tex) = gl.create_texture() {
-				// Upload premultiplied RGBA8 + full mipmap pyramid to eliminate dark haloing and aliasing on minification
-				let mut premul = Vec::with_capacity(inp.pixels.len());
-				for px in inp.pixels.chunks_exact(4) {
-					let a = px[3] as u16;
-					premul.push(((px[0] as u16 * a + 127) / 255) as u8);
-					premul.push(((px[1] as u16 * a + 127) / 255) as u8);
-					premul.push(((px[2] as u16 * a + 127) / 255) as u8);
-					premul.push(px[3]);
-				}
+				// Inochi2D .inp/.inx textures are typically premultiplied RGBA8 (rgb <= a everywhere),
+				// whereas synthetic/PSD straight-alpha inputs can have rgb > a on soft edges.
+				// Only premultiply straight-alpha inputs so already-premultiplied .inx soft shadows aren't darkened.
+				let is_straight = inp
+					.pixels
+					.chunks_exact(4)
+					.any(|px| px[3] > 0 && (px[0] > px[3] || px[1] > px[3] || px[2] > px[3]));
+				let upload_storage: Vec<u8>;
+				let upload_pixels: &[u8] = if is_straight {
+					upload_storage = inp
+						.pixels
+						.chunks_exact(4)
+						.flat_map(|px| {
+							let a = px[3] as u16;
+							[
+								((px[0] as u16 * a + 127) / 255) as u8,
+								((px[1] as u16 * a + 127) / 255) as u8,
+								((px[2] as u16 * a + 127) / 255) as u8,
+								px[3],
+							]
+						})
+						.collect();
+					&upload_storage
+				} else {
+					&inp.pixels
+				};
 				gl.bind_texture(glow::TEXTURE_2D, Some(tex));
 				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
 				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+				if !self.is_es {
+					gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_BORDER as i32);
+					gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_BORDER as i32);
+					gl.tex_parameter_f32_slice(
+						glow::TEXTURE_2D,
+						glow::TEXTURE_BORDER_COLOR,
+						&[0.0, 0.0, 0.0, 0.0],
+					);
+				} else {
+					gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+					gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+				}
 				gl.tex_image_2d(
 					glow::TEXTURE_2D,
 					0,
@@ -264,7 +291,7 @@ impl StageGlRenderer {
 					0,
 					glow::RGBA,
 					glow::UNSIGNED_BYTE,
-					Some(&premul),
+					Some(upload_pixels),
 				);
 				gl.generate_mipmap(glow::TEXTURE_2D);
 				gl.bind_texture(glow::TEXTURE_2D, None);
