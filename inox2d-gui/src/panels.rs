@@ -24,22 +24,30 @@ use crate::{Inox2dStudioApp, WorkspaceMode};
 impl Inox2dStudioApp {
 	pub(crate) fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
 		egui::menu::bar(ui, |ui| {
-			ui.menu_button("File", |ui| {
-				if ui.button("Welcome Screen...").clicked() {
+			let lbl_file = self.i18n.t("menu.file").to_owned();
+			let lbl_welcome = self.i18n.t("menu.file.welcome").to_owned();
+			let lbl_imp_proj = self.i18n.t("menu.file.import_psd_project").to_owned();
+			let lbl_open_no = self.i18n.t("menu.file.open_no_project").to_owned();
+			let lbl_open_vault = self.i18n.t("menu.file.open_vault").to_owned();
+			let lbl_save = self.i18n.t("menu.file.save").to_owned();
+			let lbl_save_as = self.i18n.t("menu.file.save_as").to_owned();
+
+			ui.menu_button(lbl_file, |ui| {
+				if ui.button(lbl_welcome).clicked() {
 					self.show_welcome = true;
 					ui.close_menu();
 				}
-				if ui.button("Import PSD (Protected Project)...").clicked() {
+				if ui.button(lbl_imp_proj).clicked() {
 					self.pending_psd_project_import = true;
 					self.open_file_dialog(FileDialogMode::OpenModel);
 					ui.close_menu();
 				}
-				if ui.button("Open / Import (No-Project)... (Ctrl+O)").clicked() {
+				if ui.button(lbl_open_no).clicked() {
 					self.pending_psd_project_import = false;
 					self.open_file_dialog(FileDialogMode::OpenModel);
 					ui.close_menu();
 				}
-				if ui.button("Open Backup Vault (備份區)").clicked() {
+				if ui.button(lbl_open_vault).clicked() {
 					let root = default_projects_root();
 					if let Err(e) = open_folder_in_os(&root) {
 						self.set_status(false, e);
@@ -78,7 +86,7 @@ impl Inox2dStudioApp {
 					});
 				}
 				ui.separator();
-				if ui.button("Save .inp (Ctrl+S)").clicked() {
+				if ui.button(lbl_save).clicked() {
 					if let Some(p) = self.watch_path.clone().or_else(|| self.source_path.clone()) {
 						self.save_model_to_path(&p);
 					} else {
@@ -86,7 +94,7 @@ impl Inox2dStudioApp {
 					}
 					ui.close_menu();
 				}
-				if ui.button("Save .inp As...").clicked() {
+				if ui.button(lbl_save_as).clicked() {
 					self.open_file_dialog(FileDialogMode::SaveInpAs);
 					ui.close_menu();
 				}
@@ -118,16 +126,20 @@ impl Inox2dStudioApp {
 				}
 			});
 
-			ui.menu_button("Edit", |ui| {
-				if ui.button("Undo (Ctrl+Z)").clicked() {
+			let lbl_edit = self.i18n.t("menu.edit").to_owned();
+			let lbl_undo = self.i18n.t("menu.edit.undo").to_owned();
+			let lbl_redo = self.i18n.t("menu.edit.redo").to_owned();
+			let lbl_reset_pose = self.i18n.t("menu.edit.reset_pose").to_owned();
+			ui.menu_button(lbl_edit, |ui| {
+				if ui.button(lbl_undo).clicked() {
 					self.exec_cmd("edit.undo", json::object! {}, "Undid last edit");
 					ui.close_menu();
 				}
-				if ui.button("Redo (Ctrl+Y)").clicked() {
+				if ui.button(lbl_redo).clicked() {
 					self.exec_cmd("edit.redo", json::object! {}, "Redid edit");
 					ui.close_menu();
 				}
-				if ui.button("Reset Parameter Pose").clicked() {
+				if ui.button(lbl_reset_pose).clicked() {
 					self.session.param_overrides.clear();
 					self.cached_rev = u64::MAX;
 					self.set_status(true, "Reset parameter pose to neutral");
@@ -135,12 +147,26 @@ impl Inox2dStudioApp {
 				}
 			});
 
-			ui.menu_button("View", |ui| {
+			let lbl_view = self.i18n.t("menu.view").to_owned();
+			let lbl_lang_menu = self.i18n.t("menu.view.language").to_owned();
+			let langs = self.i18n.available_languages();
+			let cur_lang = self.i18n.current_lang().to_owned();
+			ui.menu_button(lbl_view, |ui| {
 				ui.checkbox(&mut self.wireframe, "Show Render Wireframe");
 				ui.checkbox(&mut self.xray_mode, "X-Ray Geometric Diagnostic");
 				ui.checkbox(&mut self.exact_composite, "CPU Exact FX (Reference)");
 				ui.checkbox(&mut self.live_physics, "Live Physics Preview");
 				ui.checkbox(&mut self.show_sel_overlay, "Selected Node Vector Overlay");
+				ui.menu_button(lbl_lang_menu, |ui| {
+					for (code, name) in langs {
+						let selected = code == cur_lang;
+						if ui.selectable_label(selected, name).clicked() {
+							self.i18n.set_language(&code);
+							self.save_user_settings();
+							ui.close_menu();
+						}
+					}
+				});
 				if ui.button("Fit Puppet to Stage (Z)").clicked() {
 					self.fit_puppet_scale();
 					self.cached_rev = u64::MAX;
@@ -148,7 +174,8 @@ impl Inox2dStudioApp {
 				}
 			});
 
-			ui.menu_button("Rig", |ui| {
+			let lbl_rig = self.i18n.t("menu.rig").to_owned();
+			ui.menu_button(lbl_rig, |ui| {
 				if ui.button("Auto-Rig Full Puppet (EN/ZH Semantics)").clicked() {
 					self.exec_cmd("rig.auto_rig_vtuber", json::object! {}, "Auto-rigged puppet layers");
 					ui.close_menu();
@@ -163,7 +190,8 @@ impl Inox2dStudioApp {
 				}
 			});
 
-			ui.menu_button("Audit", |ui| {
+			let lbl_audit = self.i18n.t("menu.audit").to_owned();
+			ui.menu_button(lbl_audit, |ui| {
 				if ui.button("Run 10-Point Rig Audit").clicked() {
 					self.audit_rev = u64::MAX;
 					self.refresh_audit();
@@ -178,7 +206,8 @@ impl Inox2dStudioApp {
 				}
 			});
 
-			ui.menu_button("Overlays", |ui| {
+			let lbl_overlays = self.i18n.t("menu.overlays").to_owned();
+			ui.menu_button(lbl_overlays, |ui| {
 				for kind in ["blush", "gloom", "tears", "angry", "shock"] {
 					if ui.button(format!("+ Synthesize {kind} Overlay")).clicked() {
 						self.exec_cmd(
@@ -191,15 +220,17 @@ impl Inox2dStudioApp {
 				}
 			});
 
-			if ui.button("Commands (Ctrl+K)").clicked() {
+			let lbl_commands = self.i18n.t("menu.commands").to_owned();
+			if ui.button(lbl_commands).clicked() {
 				self.cmd_palette_open = true;
 				self.cmd_query.clear();
 			}
 
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 				let is_pro = self.workspace_mode == WorkspaceMode::Pro;
+				let lbl_pro = self.i18n.t("mode.pro").to_owned();
 				let pro_btn = egui::Button::new(
-					egui::RichText::new("Pro")
+					egui::RichText::new(lbl_pro)
 						.size(11.0)
 						.color(if is_pro { Color32::WHITE } else { TEXT_MUTED }),
 				)
@@ -209,8 +240,9 @@ impl Inox2dStudioApp {
 				}
 
 				let is_quick = !is_pro;
+				let lbl_quick = self.i18n.t("mode.quick").to_owned();
 				let quick_btn = egui::Button::new(
-					egui::RichText::new("Quick")
+					egui::RichText::new(lbl_quick)
 						.size(11.0)
 						.color(if is_quick { Color32::WHITE } else { TEXT_MUTED }),
 				)
@@ -225,8 +257,9 @@ impl Inox2dStudioApp {
 
 				if is_quick {
 					ui.separator();
+					let lbl_outliner = self.i18n.t("bar.outliner").to_owned();
 					let out_btn = egui::Button::new(
-						egui::RichText::new("Outliner")
+						egui::RichText::new(lbl_outliner)
 							.size(10.5)
 							.color(if self.quick_show_outliner { Color32::WHITE } else { TEXT_MUTED }),
 					)
@@ -235,8 +268,9 @@ impl Inox2dStudioApp {
 						self.quick_show_outliner = !self.quick_show_outliner;
 					}
 
+					let lbl_phys = self.i18n.t("bar.live_phys").to_owned();
 					let phys_btn = egui::Button::new(
-						egui::RichText::new("Live Phys")
+						egui::RichText::new(lbl_phys)
 							.size(10.5)
 							.color(if self.live_physics { Color32::WHITE } else { TEXT_MUTED }),
 					)
@@ -245,15 +279,20 @@ impl Inox2dStudioApp {
 						self.live_physics = !self.live_physics;
 					}
 
-					let play_lbl = if self.playing { "Pause" } else { "Play Idle" };
+					let play_lbl = if self.playing {
+						self.i18n.t("bar.pause").to_owned()
+					} else {
+						self.i18n.t("bar.play_idle").to_owned()
+					};
 					if ui.small_button(play_lbl).clicked() {
 						self.playing = !self.playing;
 					}
 				}
 
 				ui.separator();
+				let lbl_fx = self.i18n.t("bar.booster_fx").to_owned();
 				let fx_btn = egui::Button::new(
-					egui::RichText::new("Booster FX")
+					egui::RichText::new(lbl_fx)
 						.size(10.5)
 						.color(if self.booster_live_fx { Color32::WHITE } else { TEXT_MUTED }),
 				)
@@ -667,20 +706,24 @@ impl Inox2dStudioApp {
 	}
 
 	pub(crate) fn draw_right_inspector(&mut self, ui: &mut egui::Ui) {
+		let tab_props = self.i18n.t("tab.properties").to_owned();
+		let tab_binds = self.i18n.t("tab.bindings").to_owned();
+		let tab_audit = self.i18n.t("tab.audit").to_owned();
+		let tab_booster = self.i18n.t("tab.booster").to_owned();
 		ui.horizontal_wrapped(|ui| {
-			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Properties, "Properties");
+			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Properties, tab_props);
 			if self.workspace_mode == WorkspaceMode::Pro {
-				ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Bindings, "Bindings");
+				ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Bindings, tab_binds);
 			}
 			let score = self.audit_cache["score"].as_u32().unwrap_or(0);
 			let warns = self.session.model.puppet.diagnostics.len();
 			let audit_lbl = if warns > 0 {
-				format!("Audit ({score}) !{warns}")
+				format!("{tab_audit} ({score}) !{warns}")
 			} else {
-				format!("Audit ({score})")
+				format!("{tab_audit} ({score})")
 			};
 			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Audit, audit_lbl);
-			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Booster, "Booster");
+			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Booster, tab_booster);
 		});
 		ui.separator();
 
@@ -902,60 +945,69 @@ impl Inox2dStudioApp {
 	pub(crate) fn draw_welcome_screen(&mut self, ctx: &egui::Context) {
 		let projects_root = default_projects_root();
 		let projects = list_projects(&projects_root);
+		let langs = self.i18n.available_languages();
+		let mut next_lang: Option<String> = None;
 
-		egui::Window::new("Welcome to RigLens Editor")
+		let title = self.i18n.t("welcome.title").to_owned();
+		let subtitle = self.i18n.t("welcome.subtitle").to_owned();
+		let lbl_lang = self.i18n.t("welcome.language").to_owned();
+		let lbl_cur_lang = self.i18n.current_display_name().to_owned();
+		let cur_code = self.i18n.current_lang().to_owned();
+		let lbl_import_proj = self.i18n.t("welcome.import_psd_project").to_owned();
+		let hint_import_proj = self.i18n.t("welcome.import_psd_hint").to_owned();
+		let lbl_open_no = self.i18n.t("welcome.open_no_project").to_owned();
+		let hint_open_no = self.i18n.t("welcome.open_no_project_hint").to_owned();
+		let lbl_new_sample = self.i18n.t("welcome.new_sample").to_owned();
+		let lbl_vault = self.i18n.t("welcome.backup_vault").to_owned();
+		let hint_vault = self.i18n.t("welcome.backup_vault_hint").to_owned();
+		let lbl_existing = self.i18n.t("welcome.existing_projects").to_owned();
+		let lbl_no_proj = self.i18n.t("welcome.no_projects").to_owned();
+		let lbl_open_btn = self.i18n.t("welcome.open_btn").to_owned();
+		let lbl_folder_btn = self.i18n.t("welcome.folder_btn").to_owned();
+		let lbl_continue = self.i18n.t("welcome.continue_stage").to_owned();
+
+		egui::Window::new(title)
+			.id(egui::Id::new("welcome_riglens_window"))
 			.collapsible(false)
 			.resizable(false)
 			.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-			.fixed_size(egui::vec2(560.0, 440.0))
+			.fixed_size(egui::vec2(580.0, 440.0))
 			.show(ctx, |ui| {
 				ui.horizontal(|ui| {
 					ui.heading("RigLens Editor");
 					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 						egui::ComboBox::from_id_source("welcome_lang_combo")
-							.selected_text(self.ui_lang.as_str())
+							.selected_text(lbl_cur_lang)
 							.width(135.0)
 							.show_ui(ui, |ui| {
-								for lang in ["繁體中文 (預告)", "English", "日本語 (Coming Soon)"] {
-									ui.selectable_value(&mut self.ui_lang, lang.to_owned(), lang);
+								for (code, display) in langs {
+									if ui.selectable_label(code == cur_code, display).clicked() {
+										next_lang = Some(code);
+									}
 								}
 							});
-						ui.label(egui::RichText::new("Language:").size(11.0).color(TEXT_MUTED));
+						ui.label(egui::RichText::new(lbl_lang).size(11.0).color(TEXT_MUTED));
 					});
 				});
-				ui.label(
-					egui::RichText::new("Protected Project Workspace (production/ + untouched PSD vault/) or Scratch Mode")
-						.size(11.5)
-						.color(TEXT_MUTED),
-				);
+				ui.label(egui::RichText::new(subtitle).size(11.5).color(TEXT_MUTED));
 				ui.add_space(10.0);
 
 				ui.horizontal_wrapped(|ui| {
 					let proj_btn = egui::Button::new(
-						egui::RichText::new("Import PSD (Protected Project)")
-							.strong()
-							.color(Color32::WHITE),
+						egui::RichText::new(lbl_import_proj).strong().color(Color32::WHITE),
 					)
 					.fill(BTN_ACTIVE);
-					if ui
-						.add(proj_btn)
-						.on_hover_text("Creates production/ for edits & copies original PSD untouched into vault/")
-						.clicked()
-					{
+					if ui.add(proj_btn).on_hover_text(hint_import_proj).clicked() {
 						self.pending_psd_project_import = true;
 						self.open_file_dialog(FileDialogMode::OpenModel);
 					}
 
-					if ui
-						.button("Open File (No-Project)")
-						.on_hover_text("Open .inp / .inx / .psd / .rigjson directly without creating a project folder")
-						.clicked()
-					{
+					if ui.button(lbl_open_no).on_hover_text(hint_open_no).clicked() {
 						self.pending_psd_project_import = false;
 						self.open_file_dialog(FileDialogMode::OpenModel);
 					}
 
-					if ui.button("New Sample VTuber").clicked() {
+					if ui.button(lbl_new_sample).clicked() {
 						if let Ok(s) = load_initial_session("--sample") {
 							self.active_project = None;
 							self.show_welcome = false;
@@ -964,14 +1016,10 @@ impl Inox2dStudioApp {
 					}
 
 					let vault_btn = egui::Button::new(
-						egui::RichText::new("備份區 (Backup Vault)").color(Color32::WHITE),
+						egui::RichText::new(lbl_vault).color(Color32::WHITE),
 					)
 					.fill(TIMELINE_VIOLET);
-					if ui
-						.add(vault_btn)
-						.on_hover_text("Open RigLensProjects root folder to recover original PSDs from any project vault/")
-						.clicked()
-					{
+					if ui.add(vault_btn).on_hover_text(hint_vault).clicked() {
 						if let Err(e) = open_folder_in_os(&projects_root) {
 							self.set_status(false, e);
 						} else {
@@ -989,14 +1037,10 @@ impl Inox2dStudioApp {
 				);
 				ui.separator();
 
-				section_header(ui, "EXISTING PROTECTED PROJECTS", None);
+				section_header(ui, &lbl_existing, None);
 				egui::ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
 					if projects.is_empty() {
-						ui.label(
-							egui::RichText::new("No protected projects yet. Use 'Import PSD (Protected Project)' to create one.")
-								.size(11.0)
-								.color(TEXT_MUTED),
-						);
+						ui.label(egui::RichText::new(lbl_no_proj).size(11.0).color(TEXT_MUTED));
 					} else {
 						for proj in projects {
 							ui.horizontal(|ui| {
@@ -1005,11 +1049,11 @@ impl Inox2dStudioApp {
 									ui.label(egui::RichText::new("[vault PSD]").monospace().size(10.0).color(AUDIT_OK_GREEN));
 								}
 								ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-									if ui.small_button("Folder").clicked() {
+									if ui.small_button(&lbl_folder_btn).clicked() {
 										let _ = open_folder_in_os(&proj.root_dir);
 									}
 									if let Some(ref inp_path) = proj.working_inp {
-										if ui.small_button("Open").clicked() {
+										if ui.small_button(&lbl_open_btn).clicked() {
 											let ws = crate::project::ProjectWorkspace {
 												name: proj.name.clone(),
 												root_dir: proj.root_dir.clone(),
@@ -1031,10 +1075,16 @@ impl Inox2dStudioApp {
 
 				ui.add_space(8.0);
 				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-					if ui.button("Continue to Stage (No-Project)").clicked() {
+					if ui.button(lbl_continue).clicked() {
 						self.show_welcome = false;
 					}
 				});
 			});
+
+		if let Some(code) = next_lang {
+			if self.i18n.set_language(&code) {
+				self.save_user_settings();
+			}
+		}
 	}
 }

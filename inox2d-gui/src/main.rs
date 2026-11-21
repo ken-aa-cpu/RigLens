@@ -5,10 +5,12 @@ mod bindings;
 mod booster_panel;
 mod dialogs;
 mod hierarchy;
+mod i18n;
 mod icons;
 mod panels;
 mod project;
 mod session_ops;
+mod settings;
 mod shortcuts;
 mod stage;
 mod stage_render;
@@ -61,7 +63,7 @@ pub(crate) struct Inox2dStudioApp {
 	pub(crate) show_welcome: bool,
 	pub(crate) active_project: Option<project::ProjectWorkspace>,
 	pub(crate) pending_psd_project_import: bool,
-	pub(crate) ui_lang: String,
+	pub(crate) i18n: i18n::I18n,
 	pub(crate) session: Session,
 	pub(crate) source_path: Option<PathBuf>,
 	pub(crate) watch_path: Option<PathBuf>,
@@ -193,7 +195,7 @@ impl Inox2dStudioApp {
 			show_welcome: false,
 			active_project: None,
 			pending_psd_project_import: false,
-			ui_lang: "繁體中文 (預告)".to_owned(),
+			i18n: i18n::I18n::new("en"),
 			session,
 			source_path,
 			watch_path,
@@ -292,6 +294,22 @@ impl Inox2dStudioApp {
 		} else {
 			self.set_status(true, "Switched to Pro Rigger & Timeline mode (F2 for Quick)");
 		}
+		self.save_user_settings();
+	}
+
+	pub(crate) fn save_user_settings(&self) {
+		if self.screenshot_out.is_some() {
+			return;
+		}
+		let mode_str = match self.workspace_mode {
+			WorkspaceMode::Quick => "quick",
+			WorkspaceMode::Pro => "pro",
+		};
+		let cfg = settings::UserSettings {
+			language: self.i18n.current_lang().to_owned(),
+			workspace_mode: mode_str.to_owned(),
+		};
+		let _ = settings::save_settings_to(&settings::settings_path(), &cfg);
 	}
 }
 
@@ -696,6 +714,11 @@ fn main() -> eframe::Result<()> {
 			app.initial_zoom = cli.zoom;
 			app.initial_focus_y = cli.focus_y;
 			app.show_welcome = open_welcome;
+			let saved = settings::load_settings_from(&settings::settings_path());
+			app.i18n.set_language(&saved.language);
+			if saved.workspace_mode.eq_ignore_ascii_case("pro") {
+				app.workspace_mode = WorkspaceMode::Pro;
+			}
 			Ok(Box::new(app))
 		}),
 	)

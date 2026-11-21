@@ -10,6 +10,7 @@ use riglens_format::{ExportOptions, ImportOptions};
 
 use crate::psd::{
 	export_model_to_psd, import_psd_to_model_with_mode, parse_psd_bytes, photocraft_convert, photocraft_inspect,
+	sync_psd_textures_into_model,
 };
 use crate::rig::build_sample_vtuber_model;
 
@@ -83,6 +84,19 @@ impl Session {
 					width: width,
 					height: height,
 					bytes: psd_bytes.len()
+				})
+			}
+			"psd.sync_textures" => {
+				let path = params["path"]
+					.as_str()
+					.ok_or_else(|| "Missing 'path'".to_owned())?;
+				let bytes = fs::read(Path::new(path)).map_err(|e| format!("Failed to read '{path}': {e}"))?;
+				let psd = parse_psd_bytes(&bytes)?;
+				let updated_parts = sync_psd_textures_into_model(&mut self.model, &psd)?;
+				self.revision += 1;
+				Ok(json::object! {
+					path: path,
+					updated_parts: updated_parts
 				})
 			}
 			"format.list" => {

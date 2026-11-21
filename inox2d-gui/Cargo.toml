@@ -9,6 +9,10 @@ keywords = ["inochi2d", "vtuber", "egui", "rigging", "studio"]
 categories = ["gui", "graphics"]
 description = "Craft-style native Rust desktop studio (egui) for RigLens / inox2d-mcp"
 
+[[bin]]
+name = "riglens-editor"
+path = "src/main.rs"
+
 [dependencies]
 inox2d = { path = "../inox2d" }
 inox2d-mcp = { path = "../inox2d-mcp" }

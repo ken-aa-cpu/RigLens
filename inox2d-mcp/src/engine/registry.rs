@@ -32,6 +32,11 @@ pub fn command_registry() -> &'static [CommandSpec] {
 			params_schema: r#"{"path":"string","width?":1024,"height?":1024}"#,
 		},
 		CommandSpec {
+			id: "psd.sync_textures",
+			description: "Re-import updated RGBA layer textures from a revised .psd into matching parts without losing bindings",
+			params_schema: r#"{"path":"string"}"#,
+		},
+		CommandSpec {
 			id: "format.list",
 			description: "List all registered format importers and exporters with their capabilities",
 			params_schema: "{}",
