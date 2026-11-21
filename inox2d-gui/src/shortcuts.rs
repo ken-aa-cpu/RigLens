@@ -6,7 +6,7 @@ use inox2d_mcp::rig::{apply_vertex_deform_delta, retriangulate_points_preserving
 use crate::dialogs::FileDialogMode;
 use crate::icons::StudioTool;
 use crate::stage::VertexEditMode;
-use crate::Inox2dStudioApp;
+use crate::{Inox2dStudioApp, WorkspaceMode};
 
 impl Inox2dStudioApp {
 	pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -41,6 +41,15 @@ impl Inox2dStudioApp {
 		});
 		if ctrl_y {
 			self.exec_cmd("edit.redo", json::object! {}, "Redid edit");
+		}
+
+		let f2_pressed = ctx.input(|i| i.key_pressed(Key::F2));
+		if f2_pressed {
+			let next = match self.workspace_mode {
+				WorkspaceMode::Quick => WorkspaceMode::Pro,
+				WorkspaceMode::Pro => WorkspaceMode::Quick,
+			};
+			self.set_workspace_mode(next);
 		}
 
 		let f6_pressed = ctx.input(|i| i.key_pressed(Key::F6));

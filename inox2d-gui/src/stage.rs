@@ -163,7 +163,7 @@ impl Inox2dStudioApp {
 			}
 		}
 
-		if self.xray_mode || self.use_exact_stage() {
+		if self.xray_mode || self.use_exact_stage() || self.booster_live_fx {
 			if let Some(tex) = &self.stage_tex {
 				clip_painter.image(
 					tex.id(),

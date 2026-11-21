@@ -243,6 +243,7 @@ fn meshgroup_deform_propagation_and_animation_roundtrip() {
 				x: vec![0.0, 1.0],
 				y: vec![0.0],
 			},
+			additive: false,
 			bindings: vec![Binding {
 				node: mg_id,
 				is_set,

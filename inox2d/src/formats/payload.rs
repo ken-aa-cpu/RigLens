@@ -774,6 +774,7 @@ fn deserialize_params(vals: &[json::JsonValue]) -> InoxParseResult<HashMap<Strin
 
 fn deserialize_param(obj: JsonObject) -> InoxParseResult<(String, Param)> {
 	let name = obj.get_str("name")?.to_owned();
+	let additive = obj.get_bool("blend_shape_additive").unwrap_or(false);
 	Ok((
 		name.clone(),
 		Param {
@@ -784,6 +785,7 @@ fn deserialize_param(obj: JsonObject) -> InoxParseResult<(String, Param)> {
 			max: obj.get_vec2("max")?,
 			defaults: obj.get_vec2("defaults")?,
 			axis_points: deserialize_axis_points(obj.get_list("axis_points")?)?,
+			additive,
 			bindings: deserialize_bindings(obj.get_list("bindings")?)?,
 		},
 	))

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use egui::{Color32, Margin, Rect, Rounding, Stroke, Vec2, Visuals};
+use egui::{Color32, FontData, FontDefinitions, FontFamily, Margin, Rect, Rounding, Stroke, Vec2, Visuals};
 
 // Exact Craft-series (AniCraft / FigCraft / PhotoCraft) color palette
 pub const BG_MENU: Color32 = Color32::from_rgb(20, 20, 23);
@@ -68,6 +68,37 @@ pub fn configure_craft_theme(ctx: &egui::Context) {
 	style.spacing.window_margin = Margin::same(8.0);
 	style.spacing.slider_width = 104.0;
 	ctx.set_style(style);
+
+	install_cjk_fallback_fonts(ctx);
+}
+
+fn install_cjk_fallback_fonts(ctx: &egui::Context) {
+	let candidates: &[(&str, &str)] = &[
+		("cjk_msjh", r"C:\Windows\Fonts\msjh.ttc"),
+		("cjk_malgun", r"C:\Windows\Fonts\malgun.ttf"),
+		("cjk_meiryo", r"C:\Windows\Fonts\meiryo.ttc"),
+		("cjk_yugoth", r"C:\Windows\Fonts\YuGothR.ttc"),
+		("cjk_noto_linux", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+		("cjk_noto_linux2", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+	];
+
+	let mut fonts = FontDefinitions::default();
+	let mut loaded_any = false;
+	for &(key, path) in candidates {
+		if let Ok(bytes) = std::fs::read(path) {
+			fonts.font_data.insert(key.to_owned(), FontData::from_owned(bytes));
+			if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
+				prop.push(key.to_owned());
+			}
+			if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
+				mono.push(key.to_owned());
+			}
+			loaded_any = true;
+		}
+	}
+	if loaded_any {
+		ctx.set_fonts(fonts);
+	}
 }
 
 /// Draw an AniCraft-style dock section header with a 2px cobalt accent bar on the left.

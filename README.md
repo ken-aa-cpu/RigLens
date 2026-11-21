@@ -132,6 +132,7 @@ cargo run --release -p riglens-booster -- run --spout-in VTubeStudioSpout --spou
 - [x] Co-processor M4: integrated `Booster` tab & `BoosterController` live telemetry sync in `inox2d-gui`, plus MCP `booster.*` controls (`booster.status`, `booster.list_spout`, `booster.configure`, `booster.start`, `booster.stop`).
 - [x] Companion MCP *client* (`McpClient` / `McpStdioClient` + `inox2d-mcp mcp-connect`) for connecting to external editors that expose MCP (e.g. nijigenerate).
 - [x] Crate packaging metadata (`Cargo.toml` repository, README, keywords, categories) & publishable workspace documentation (`cargo doc`). (Public crate rename deferred to major v1.0 tag to preserve fork path stability.)
+- [x] Core-Identity Upgrade: `Quick` / `Pro` dual workspace mode (`F2`), `is_effectively_enabled` ancestor visibility inheritance, CJK/Korean font fallback, real-world PSD semantic Auto-Rig/Auto-Mask & hidden differential expression toggles, `PathDeformer` Verlet/spring-chain physics, `DynamicComposite` offscreen render collection, `PoseGroup` + additive Blend Shape neutral IR, and live `Booster FX` stage preview.
 
 ## Contributing
 

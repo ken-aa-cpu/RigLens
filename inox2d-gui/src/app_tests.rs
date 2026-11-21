@@ -229,3 +229,26 @@ fn xy_pad_and_pose25d_y_up_convention() {
 	assert_eq!(folded.len(), 1);
 	assert_eq!(folded[0], [2, 4, 0]);
 }
+
+#[test]
+fn quick_pro_workspace_mode_switch_resets_pro_tools() {
+	let session = load_initial_session("--sample").expect("load sample");
+	let mut app = Inox2dStudioApp::new(session, None, None, None);
+	assert_eq!(app.workspace_mode, WorkspaceMode::Quick);
+	assert!(!app.quick_show_outliner);
+
+	app.set_workspace_mode(WorkspaceMode::Pro);
+	assert_eq!(app.workspace_mode, WorkspaceMode::Pro);
+	app.tool = StudioTool::VertexSubselect;
+	app.inspector_state.tab = InspectorTab::Bindings;
+
+	app.set_workspace_mode(WorkspaceMode::Quick);
+	assert_eq!(app.workspace_mode, WorkspaceMode::Quick);
+	assert_eq!(app.tool, StudioTool::Pose25D);
+	assert_eq!(app.inspector_state.tab, InspectorTab::Audit);
+
+	assert!(!app.booster_live_fx);
+	let sig_raw = app.render_signature();
+	app.booster_live_fx = true;
+	assert_ne!(app.render_signature(), sig_raw);
+}

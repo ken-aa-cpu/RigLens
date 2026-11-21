@@ -32,6 +32,7 @@ pub fn ensure_param(
 			max,
 			defaults,
 			axis_points,
+			additive: false,
 			bindings: Vec::new(),
 		},
 	);

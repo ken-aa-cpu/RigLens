@@ -48,7 +48,15 @@ use theme::{
 };
 use timeline::{BottomTab, CurveDragState};
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorkspaceMode {
+	Quick,
+	Pro,
+}
+
 pub(crate) struct Inox2dStudioApp {
+	pub(crate) workspace_mode: WorkspaceMode,
+	pub(crate) quick_show_outliner: bool,
 	pub(crate) session: Session,
 	pub(crate) source_path: Option<PathBuf>,
 	pub(crate) watch_path: Option<PathBuf>,
@@ -123,6 +131,8 @@ pub(crate) struct Inox2dStudioApp {
 	pub(crate) audit_cache: JsonValue,
 	pub(crate) audit_rev: u64,
 	pub(crate) booster_ui: booster_panel::BoosterUiState,
+	pub(crate) booster_live_fx: bool,
+	pub(crate) booster_gpu: Option<riglens_booster::gpu::GpuFrameProcessor>,
 
 	pub(crate) status_msg: String,
 	pub(crate) status_ok: bool,
@@ -173,6 +183,8 @@ impl Inox2dStudioApp {
 		};
 
 		let mut app = Self {
+			workspace_mode: WorkspaceMode::Quick,
+			quick_show_outliner: false,
 			session,
 			source_path,
 			watch_path,
@@ -240,6 +252,8 @@ impl Inox2dStudioApp {
 			audit_cache: JsonValue::new_object(),
 			audit_rev: u64::MAX,
 			booster_ui: booster_panel::BoosterUiState::default(),
+			booster_live_fx: false,
+			booster_gpu: None,
 			status_msg: initial_status,
 			status_ok: diag_count == 0,
 			cmd_palette_open: false,
@@ -253,6 +267,23 @@ impl Inox2dStudioApp {
 		app
 	}
 
+	pub(crate) fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+		self.workspace_mode = mode;
+		if mode == WorkspaceMode::Quick {
+			if matches!(
+				self.tool,
+				StudioTool::VertexSubselect | StudioTool::Delaunay | StudioTool::MeshGroup | StudioTool::Physics
+			) {
+				self.tool = StudioTool::Pose25D;
+			}
+			if self.inspector_state.tab == InspectorTab::Bindings {
+				self.inspector_state.tab = InspectorTab::Audit;
+			}
+			self.set_status(true, "Switched to Quick Inspect & Edit mode (F2 for Pro)");
+		} else {
+			self.set_status(true, "Switched to Pro Rigger & Timeline mode (F2 for Quick)");
+		}
+	}
 }
 
 impl eframe::App for Inox2dStudioApp {
@@ -429,7 +460,11 @@ impl eframe::App for Inox2dStudioApp {
 			)
 			.show(ctx, |ui| {
 				ui.vertical_centered(|ui| {
-					let groups = StudioTool::groups();
+					let groups = if self.workspace_mode == WorkspaceMode::Quick {
+						StudioTool::quick_groups()
+					} else {
+						StudioTool::groups()
+					};
 					for (gi, group) in groups.iter().enumerate() {
 						for &t in *group {
 							if draw_tool_button(ui, t, self.tool == t) {
@@ -515,42 +550,46 @@ impl eframe::App for Inox2dStudioApp {
 				});
 			});
 
-		// 5b. Left Hierarchical Outliner & Draw-Order Panel
-		let mut outliner_actions = Vec::new();
-		egui::SidePanel::left("left_outliner")
-			.resizable(true)
-			.default_width(220.0)
-			.width_range(175.0..=320.0)
-			.frame(
-				Frame::none()
-					.fill(BG_DOCK)
-					.stroke(Stroke::new(1.0_f32, BORDER))
-					.inner_margin(Margin::symmetric(6.0, 4.0)),
-			)
-			.show(ctx, |ui| {
-				outliner_actions = draw_outliner_panel(
-					ui,
-					&self.session.model.puppet,
-					self.selected_node,
-					&self.collapsed_nodes,
-					&mut self.outliner_tab,
-					&mut self.outliner_filter,
-				);
-			});
-		if !outliner_actions.is_empty() {
-			self.apply_outliner_actions(outliner_actions);
+		// 5b. Left Hierarchical Outliner & Draw-Order Panel (always in Pro, optional toggle in Quick)
+		if self.workspace_mode == WorkspaceMode::Pro || self.quick_show_outliner {
+			let mut outliner_actions = Vec::new();
+			egui::SidePanel::left("left_outliner")
+				.resizable(true)
+				.default_width(220.0)
+				.width_range(175.0..=320.0)
+				.frame(
+					Frame::none()
+						.fill(BG_DOCK)
+						.stroke(Stroke::new(1.0_f32, BORDER))
+						.inner_margin(Margin::symmetric(6.0, 4.0)),
+				)
+				.show(ctx, |ui| {
+					outliner_actions = draw_outliner_panel(
+						ui,
+						&self.session.model.puppet,
+						self.selected_node,
+						&self.collapsed_nodes,
+						&mut self.outliner_tab,
+						&mut self.outliner_filter,
+					);
+				});
+			if !outliner_actions.is_empty() {
+				self.apply_outliner_actions(outliner_actions);
+			}
 		}
 
-		// 6. Bottom Timeline & Motion Curves Dock
-		egui::TopBottomPanel::bottom("bottom_timeline_dock")
-			.exact_height(215.0)
-			.frame(
-				Frame::none()
-					.fill(BG_DOCK)
-					.stroke(Stroke::new(1.0_f32, BORDER))
-					.inner_margin(Margin::symmetric(8.0, 4.0)),
-			)
-			.show(ctx, |ui| self.draw_bottom_dock(ui));
+		// 6. Bottom Timeline & Motion Curves Dock (Pro mode only)
+		if self.workspace_mode == WorkspaceMode::Pro {
+			egui::TopBottomPanel::bottom("bottom_timeline_dock")
+				.exact_height(215.0)
+				.frame(
+					Frame::none()
+						.fill(BG_DOCK)
+						.stroke(Stroke::new(1.0_f32, BORDER))
+						.inner_margin(Margin::symmetric(8.0, 4.0)),
+				)
+				.show(ctx, |ui| self.draw_bottom_dock(ui));
+		}
 
 		// 7. Center Stage (+ optional autosave crash-recovery banner)
 		egui::CentralPanel::default()

@@ -98,7 +98,7 @@ impl<'a> InoxRenderer for DrawRecorder<'a> {
 		if *self.skip_composite.borrow() {
 			return;
 		}
-		let enabled = self.puppet.nodes.get_node(id).map(|n| n.enabled).unwrap_or(true);
+		let enabled = self.puppet.nodes.is_effectively_enabled(id);
 		if !enabled || render_ctx.index_len == 0 {
 			return;
 		}
@@ -131,7 +131,7 @@ impl<'a> InoxRenderer for DrawRecorder<'a> {
 		_render_ctx: &CompositeRenderCtx,
 		id: InoxNodeUuid,
 	) {
-		let enabled = self.puppet.nodes.get_node(id).map(|n| n.enabled).unwrap_or(true);
+		let enabled = self.puppet.nodes.is_effectively_enabled(id);
 		if !enabled {
 			*self.skip_composite.borrow_mut() = true;
 			return;

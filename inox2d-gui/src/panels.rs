@@ -15,10 +15,10 @@ use crate::startup::{
 	clean_display_name, find_example_models, load_initial_session, pick_default_pad_params, VISEME_PRESETS,
 };
 use crate::theme::{
-	section_header, ACCENT_BLUE, AUDIT_ERR_ROSE, AUDIT_OK_GREEN, AUDIT_WARN_AMBER, BG_WIDGET, BORDER, TEXT_MUTED,
-	TIMELINE_VIOLET,
+	section_header, ACCENT_BLUE, AUDIT_ERR_ROSE, AUDIT_OK_GREEN, AUDIT_WARN_AMBER, BG_WIDGET, BORDER, BTN_ACTIVE,
+	TEXT_MUTED, TIMELINE_VIOLET,
 };
-use crate::Inox2dStudioApp;
+use crate::{Inox2dStudioApp, WorkspaceMode};
 
 impl Inox2dStudioApp {
 	pub(crate) fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -176,7 +176,81 @@ impl Inox2dStudioApp {
 			}
 
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-				ui.label(egui::RichText::new("RigLens Studio · Phase 4").color(TEXT_MUTED).size(11.0));
+				let is_pro = self.workspace_mode == WorkspaceMode::Pro;
+				let pro_btn = egui::Button::new(
+					egui::RichText::new("Pro")
+						.size(11.0)
+						.color(if is_pro { Color32::WHITE } else { TEXT_MUTED }),
+				)
+				.fill(if is_pro { BTN_ACTIVE } else { BG_WIDGET });
+				if ui.add(pro_btn).on_hover_text("Pro Rigger & Timeline mode (F2)").clicked() && !is_pro {
+					self.set_workspace_mode(WorkspaceMode::Pro);
+				}
+
+				let is_quick = !is_pro;
+				let quick_btn = egui::Button::new(
+					egui::RichText::new("Quick")
+						.size(11.0)
+						.color(if is_quick { Color32::WHITE } else { TEXT_MUTED }),
+				)
+				.fill(if is_quick { BTN_ACTIVE } else { BG_WIDGET });
+				if ui
+					.add(quick_btn)
+					.on_hover_text("Quick Inspect, Audit & Booster mode (F2)")
+					.clicked() && !is_quick
+				{
+					self.set_workspace_mode(WorkspaceMode::Quick);
+				}
+
+				if is_quick {
+					ui.separator();
+					let out_btn = egui::Button::new(
+						egui::RichText::new("Outliner")
+							.size(10.5)
+							.color(if self.quick_show_outliner { Color32::WHITE } else { TEXT_MUTED }),
+					)
+					.fill(if self.quick_show_outliner { BTN_ACTIVE } else { BG_WIDGET });
+					if ui.add(out_btn).clicked() {
+						self.quick_show_outliner = !self.quick_show_outliner;
+					}
+
+					let phys_btn = egui::Button::new(
+						egui::RichText::new("Live Phys")
+							.size(10.5)
+							.color(if self.live_physics { Color32::WHITE } else { TEXT_MUTED }),
+					)
+					.fill(if self.live_physics { AUDIT_OK_GREEN.linear_multiply(0.5) } else { BG_WIDGET });
+					if ui.add(phys_btn).clicked() {
+						self.live_physics = !self.live_physics;
+					}
+
+					let play_lbl = if self.playing { "Pause" } else { "Play Idle" };
+					if ui.small_button(play_lbl).clicked() {
+						self.playing = !self.playing;
+					}
+				}
+
+				ui.separator();
+				let fx_btn = egui::Button::new(
+					egui::RichText::new("Booster FX")
+						.size(10.5)
+						.color(if self.booster_live_fx { Color32::WHITE } else { TEXT_MUTED }),
+				)
+				.fill(if self.booster_live_fx { TIMELINE_VIOLET } else { BG_WIDGET });
+				if ui
+					.add(fx_btn)
+					.on_hover_text("Toggle live Booster wgpu 2.5D Rim Light & Soft-Body stage preview")
+					.clicked()
+				{
+					self.booster_live_fx = !self.booster_live_fx;
+					self.cached_sig = u64::MAX;
+					let msg = if self.booster_live_fx {
+						"Enabled live Booster GPU FX preview on stage"
+					} else {
+						"Disabled Booster GPU FX preview (Editor Raw stage)"
+					};
+					self.set_status(true, msg);
+				}
 			});
 		});
 	}
@@ -574,7 +648,9 @@ impl Inox2dStudioApp {
 	pub(crate) fn draw_right_inspector(&mut self, ui: &mut egui::Ui) {
 		ui.horizontal_wrapped(|ui| {
 			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Properties, "Properties");
-			ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Bindings, "Bindings");
+			if self.workspace_mode == WorkspaceMode::Pro {
+				ui.selectable_value(&mut self.inspector_state.tab, InspectorTab::Bindings, "Bindings");
+			}
 			let score = self.audit_cache["score"].as_u32().unwrap_or(0);
 			let warns = self.session.model.puppet.diagnostics.len();
 			let audit_lbl = if warns > 0 {

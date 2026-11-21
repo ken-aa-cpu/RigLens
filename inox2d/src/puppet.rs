@@ -21,6 +21,14 @@ pub use transforms::TransformCtx;
 pub use tree::InoxNodeTree;
 pub use world::World;
 
+/// Mutually exclusive part-visibility group (matching Cubism `.pose3.json` / PSD differential groups).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoseGroup {
+	pub id: String,
+	pub parts: Vec<InoxNodeUuid>,
+	pub fade_seconds: f32,
+}
+
 /// Inochi2D puppet.
 pub struct Puppet {
 	pub meta: PuppetMeta,
@@ -37,6 +45,8 @@ pub struct Puppet {
 	pub param_ctx: Option<ParamCtx>,
 	/// Named animations stored in the puppet.
 	pub animations: HashMap<String, PuppetAnimation>,
+	/// Mutually exclusive part-visibility groups (evaluated at end of frame).
+	pub pose_groups: Vec<PoseGroup>,
 	/// Non-fatal problems found while loading (unknown node types, lossy conversions, ...).
 	pub diagnostics: Vec<String>,
 	/// Parameter names in file order (the `params` map itself is unordered).
@@ -65,6 +75,7 @@ impl Puppet {
 			params,
 			param_ctx: None,
 			animations: HashMap::new(),
+			pose_groups: Vec::new(),
 			diagnostics: Vec::new(),
 			param_order: Vec::new(),
 			param_extras: HashMap::new(),
@@ -279,10 +290,143 @@ impl Puppet {
 			param_ctx.apply(&self.params, &self.nodes, &mut self.node_comps);
 
 			transform_ctx.update(&self.nodes, &mut self.node_comps);
+			physics_ctx.apply_path_deforms(&self.nodes, &mut self.node_comps);
 		}
+
+		self.apply_pose_groups();
 
 		if let Some(render_ctx) = self.render_ctx.as_mut() {
 			render_ctx.update(&self.nodes, &mut self.node_comps);
 		}
+	}
+
+	fn apply_pose_groups(&mut self) {
+		use crate::node::components::{Drawable, OpacityStore};
+		for group in &self.pose_groups {
+			if group.parts.len() < 2 {
+				continue;
+			}
+			let mut best: Option<(InoxNodeUuid, f32)> = None;
+			for &pid in &group.parts {
+				if !self.nodes.is_effectively_enabled(pid) {
+					continue;
+				}
+				let op = self
+					.node_comps
+					.get::<OpacityStore>(pid)
+					.map(|o| o.0)
+					.or_else(|| self.node_comps.get::<Drawable>(pid).map(|d| d.blending.opacity))
+					.unwrap_or(0.0);
+				if op > 0.01 && best.map(|(_, b)| op > b).unwrap_or(true) {
+					best = Some((pid, op));
+				}
+			}
+			if let Some((win_id, _)) = best {
+				for &pid in &group.parts {
+					if pid != win_id {
+						if let Some(op) = self.node_comps.get_mut::<OpacityStore>(pid) {
+							op.0 = 0.0;
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::math::interp::InterpolateMode;
+	use crate::math::matrix::Matrix2d;
+	use crate::math::transform::TransformOffset;
+	use crate::node::components::{BlendMode, Blending, Drawable};
+	use crate::params::{AxisPoints, Binding, BindingValues, Param, ParamUuid};
+	use glam::{vec2, Vec3};
+
+	#[test]
+	fn pose_groups_and_additive_params_evaluate_and_roundtrip_ir() {
+		let mut puppet = Puppet::new_empty("PoseAdditive");
+		let root = puppet.nodes.root_node_id;
+		let a = InoxNodeUuid(10);
+		let b = InoxNodeUuid(11);
+		for (id, name, init_op) in [(a, "ArmA", 0.3_f32), (b, "ArmB", 0.2_f32)] {
+			puppet.nodes.add(
+				root,
+				id,
+				InoxNode {
+					uuid: id,
+					name: name.to_owned(),
+					enabled: true,
+					zsort: 0.0,
+					trans_offset: TransformOffset::default(),
+					lock_to_root: false,
+				},
+			);
+			puppet.node_comps.add(
+				id,
+				Drawable {
+					blending: Blending {
+						mode: BlendMode::Normal,
+						tint: Vec3::ONE,
+						screen_tint: Vec3::ZERO,
+						opacity: init_op,
+					},
+					masks: None,
+				},
+			);
+		}
+		puppet.pose_groups.push(PoseGroup {
+			id: "Arms".to_owned(),
+			parts: vec![a, b],
+			fade_seconds: 0.1,
+		});
+
+		let vals = Matrix2d::from_grid_transposed(2, 1, |ix, _| if ix == 1 { 0.5 } else { 0.0 });
+		let is_set = Matrix2d::from_grid_transposed(2, 1, |_, _| true);
+		puppet.params.insert(
+			"AddArmA".to_owned(),
+			Param {
+				uuid: ParamUuid(100),
+				name: "AddArmA".to_owned(),
+				is_vec2: false,
+				min: vec2(0.0, 0.0),
+				max: vec2(1.0, 0.0),
+				defaults: vec2(0.0, 0.0),
+				axis_points: AxisPoints {
+					x: vec![0.0, 1.0],
+					y: vec![0.0],
+				},
+				additive: true,
+				bindings: vec![Binding {
+					node: a,
+					is_set,
+					interpolate_mode: InterpolateMode::Linear,
+					values: BindingValues::Opacity(vals),
+				}],
+			},
+		);
+		puppet.init_all();
+
+		puppet.begin_frame();
+		puppet.param_ctx.as_mut().unwrap().set("AddArmA", vec2(1.0, 0.0)).unwrap();
+		puppet.end_frame(0.0);
+
+		// Additive param adds +0.5 onto ArmA's initial 0.3 -> 0.8; PoseGroup suppresses ArmB to 0.0
+		assert!((puppet.node_opacity(a).unwrap() - 0.8).abs() < 1e-4);
+		assert!((puppet.node_opacity(b).unwrap() - 0.0).abs() < 1e-4);
+
+		// Verify IR bridge roundtrip preserves additive and pose_groups
+		let model = crate::model::Model {
+			puppet,
+			textures: Vec::new(),
+			vendors: Vec::new(),
+		};
+		let ir = crate::formats::ir_bridge::model_to_ir(&model);
+		assert!(ir.params[0].additive);
+		assert_eq!(ir.pose_groups.len(), 1);
+		let back = crate::formats::ir_bridge::ir_to_model(&ir).expect("ir_to_model");
+		assert!(back.puppet.params["AddArmA"].additive);
+		assert_eq!(back.puppet.pose_groups.len(), 1);
 	}
 }

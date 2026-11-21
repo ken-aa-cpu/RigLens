@@ -47,6 +47,7 @@ fn minimal_empty_rig() -> RigDocument {
 			extras: BTreeMap::new(),
 		}],
 		params: Vec::new(),
+		pose_groups: Vec::new(),
 		animations: BTreeMap::new(),
 		textures: Vec::new(),
 		vendors: Vec::new(),
@@ -310,6 +311,7 @@ pub fn sample_conformance_rig() -> RigDocument {
 				defaults: [0.0, 0.0],
 				axis_x: vec![0.0, 1.0],
 				axis_y: vec![0.0],
+				additive: false,
 				bindings: vec![RigBinding {
 					node_id: 2,
 					target: BindingTarget::TransformTX,
@@ -328,6 +330,7 @@ pub fn sample_conformance_rig() -> RigDocument {
 				defaults: [0.0, 0.0],
 				axis_x: vec![0.0, 1.0],
 				axis_y: vec![0.0, 1.0],
+				additive: true,
 				bindings: vec![RigBinding {
 					node_id: 7,
 					target: BindingTarget::Deform,
@@ -341,6 +344,11 @@ pub fn sample_conformance_rig() -> RigDocument {
 				extras: param_extras,
 			},
 		],
+		pose_groups: vec![crate::ir::PoseGroup {
+			id: "Arms".to_owned(),
+			parts: vec![2],
+			fade_seconds: 0.2,
+		}],
 		animations,
 		textures: vec![TextureBlob {
 			format: TextureEncoding::Png,

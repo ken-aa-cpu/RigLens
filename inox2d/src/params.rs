@@ -80,6 +80,8 @@ pub struct Param {
 	pub max: Vec2,
 	pub defaults: Vec2,
 	pub axis_points: AxisPoints,
+	/// True when this parameter behaves as an additive Blend Shape (Live2D Cubism 5 style).
+	pub additive: bool,
 	pub bindings: Vec<Binding>,
 }
 
@@ -225,8 +227,13 @@ impl Param {
 				}
 				BindingValues::Opacity(ref matrix) => {
 					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
+					let val = cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
 					if let Some(op) = comps.get_mut::<OpacityStore>(binding.node) {
-						op.0 *= cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
+						if self.additive {
+							op.0 = (op.0 + val).clamp(0.0, 1.0);
+						} else {
+							op.0 *= val;
+						}
 					}
 				}
 			}

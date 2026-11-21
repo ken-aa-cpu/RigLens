@@ -306,10 +306,8 @@ impl<'a> InoxRenderer for SoftwareRenderer<'a> {
 		render_ctx: &TexturedMeshRenderCtx,
 		id: InoxNodeUuid,
 	) {
-		if let Some(node) = self.puppet.nodes.get_node(id) {
-			if !node.enabled {
-				return;
-			}
+		if !self.puppet.nodes.is_effectively_enabled(id) {
+			return;
 		}
 		let tex_id = components.texture.tex_albedo.0;
 		let Some(tex) = self.textures.get(tex_id) else {
@@ -1023,7 +1021,9 @@ pub fn render_diagnostic(
 		.nodes
 		.pre_order_iter()
 		.filter_map(|n| {
-			if n.enabled && model.puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some() {
+			if model.puppet.nodes.is_effectively_enabled(n.uuid)
+				&& model.puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some()
+			{
 				Some((n.uuid, n.name.clone()))
 			} else {
 				None

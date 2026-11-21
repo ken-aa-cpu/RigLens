@@ -355,9 +355,21 @@ pub struct RigParam {
 	pub defaults: [f32; 2],
 	pub axis_x: Vec<f32>,
 	pub axis_y: Vec<f32>,
+	/// True when this parameter behaves as an additive Blend Shape (Live2D Cubism 5 style).
+	#[serde(default)]
+	pub additive: bool,
 	pub bindings: Vec<RigBinding>,
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub extras: BTreeMap<String, serde_json::Value>,
+}
+
+/// Mutually exclusive part-visibility group (matching Cubism `.pose3.json` / PSD differential groups).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PoseGroup {
+	pub id: String,
+	pub parts: Vec<u32>,
+	#[serde(default)]
+	pub fade_seconds: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -414,6 +426,8 @@ pub struct RigDocument {
 	pub physics_world: PhysicsWorld,
 	pub nodes: Vec<RigNode>,
 	pub params: Vec<RigParam>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub pose_groups: Vec<PoseGroup>,
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub animations: BTreeMap<String, RigAnimation>,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -532,5 +546,58 @@ impl RigDocument {
 		} else {
 			Err(errors)
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn rig_param_additive_and_pose_groups_roundtrip_json() {
+		let doc = RigDocument {
+			schema_version: IR_SCHEMA_VERSION,
+			meta: RigMeta::default(),
+			physics_world: PhysicsWorld::default(),
+			nodes: vec![RigNode {
+				id: 1,
+				parent: None,
+				name: "Root".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				transform: RigTransform::default(),
+				lock_to_root: false,
+				kind: NodeKind::Group,
+				extras: BTreeMap::new(),
+			}],
+			params: vec![RigParam {
+				id: 10,
+				name: "Expr:: Smile".to_owned(),
+				is_vec2: false,
+				min: [0.0, 0.0],
+				max: [1.0, 0.0],
+				defaults: [0.0, 0.0],
+				axis_x: vec![0.0, 1.0],
+				axis_y: vec![0.0],
+				additive: true,
+				bindings: Vec::new(),
+				extras: BTreeMap::new(),
+			}],
+			pose_groups: vec![PoseGroup {
+				id: "ArmSwitch".to_owned(),
+				parts: vec![2, 3],
+				fade_seconds: 0.15,
+			}],
+			animations: BTreeMap::new(),
+			textures: Vec::new(),
+			vendors: Vec::new(),
+			top_extras: BTreeMap::new(),
+			diagnostics: Vec::new(),
+		};
+		let raw = serde_json::to_string(&doc).expect("serialize IR");
+		let back: RigDocument = serde_json::from_str(&raw).expect("deserialize IR");
+		assert!(back.params[0].additive);
+		assert_eq!(back.pose_groups.len(), 1);
+		assert_eq!(back.pose_groups[0].parts, vec![2, 3]);
 	}
 }

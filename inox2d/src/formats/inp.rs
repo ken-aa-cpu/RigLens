@@ -387,6 +387,7 @@ mod tests {
 					x: vec![0.0, 1.0],
 					y: vec![0.0],
 				},
+				additive: false,
 				bindings: vec![
 					Binding {
 						node: part_id,

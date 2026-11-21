@@ -3,9 +3,13 @@ pub(crate) mod runge_kutta;
 
 use std::collections::HashMap;
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
-use crate::node::components::{PhysicsModel, RigidPendulumCtx, SimplePhysics, SpringPendulumCtx, TransformStore};
+use crate::math::deform::Deform;
+use crate::node::components::{
+	DeformSource, DeformStack, ExtraFields, PathDeformer, PhysicsModel, RigidPendulumCtx, SimplePhysics,
+	SpringPendulumCtx, TransformStore,
+};
 use crate::params::ParamUuid;
 use crate::puppet::{InoxNodeTree, Puppet, World};
 
@@ -76,6 +80,17 @@ impl PhysicsCtx {
 					PhysicsModel::SpringPendulum => puppet.node_comps.set(node.uuid, SpringPendulumCtx::default()),
 				}
 			}
+			if let Some(path) = puppet.node_comps.get::<PathDeformer>(node.uuid) {
+				let has_extra_phys = puppet
+					.node_comps
+					.get::<ExtraFields>(node.uuid)
+					.map(|ef| ef.0.get("physics").is_some())
+					.unwrap_or(false);
+				if path.vertices.len() >= 2 && (path.physics_only || path.dynamic || has_extra_phys) {
+					let ctx = PathPhysicsCtx::new(path.vertices.clone());
+					puppet.node_comps.set(node.uuid, ctx);
+				}
+			}
 		}
 
 		Self {
@@ -98,8 +113,13 @@ impl PhysicsCtx {
 		}
 
 		for node in nodes.iter() {
-			if !node.enabled {
+			if !nodes.is_effectively_enabled(node.uuid) {
 				continue;
+			}
+			if let Some(transform) = comps.get::<TransformStore>(node.uuid).cloned() {
+				if let Some(path_ctx) = comps.get_mut::<PathPhysicsCtx>(node.uuid) {
+					path_ctx.update(&transform, dt);
+				}
 			}
 			if let Some(simple_physics) = comps.get::<SimplePhysics>(node.uuid) {
 				// before we use some Rust dark magic so that two components can be mutably borrowed at the same time,
@@ -160,6 +180,111 @@ impl PhysicsCtx {
 		self.t += dt;
 
 		values_to_apply
+	}
+
+	/// Push dynamic chain offsets from [`PathPhysicsCtx`] into each node's [`DeformStack`].
+	pub fn apply_path_deforms(&self, nodes: &InoxNodeTree, comps: &mut World) {
+		for node in nodes.iter() {
+			if !nodes.is_effectively_enabled(node.uuid) {
+				continue;
+			}
+			let Some(offsets) = comps
+				.get::<PathPhysicsCtx>(node.uuid)
+				.map(|p| p.last_offsets.clone())
+			else {
+				continue;
+			};
+			if let Some(stack) = comps.get_mut::<DeformStack>(node.uuid) {
+				if offsets.len() == stack.deform_len {
+					stack.push(DeformSource::Node(node.uuid), Deform::Direct(offsets));
+				}
+			}
+		}
+	}
+}
+
+/// Damped Verlet / spring-chain solver for `PathDeformer` control points.
+pub(crate) struct PathPhysicsCtx {
+	rest_verts: Vec<Vec2>,
+	positions: Vec<Vec2>,
+	velocities: Vec<Vec2>,
+	last_offsets: Vec<Vec2>,
+	initialized: bool,
+}
+
+impl PathPhysicsCtx {
+	pub fn new(rest_verts: Vec<Vec2>) -> Self {
+		let n = rest_verts.len();
+		Self {
+			rest_verts,
+			positions: vec![Vec2::ZERO; n],
+			velocities: vec![Vec2::ZERO; n],
+			last_offsets: vec![Vec2::ZERO; n],
+			initialized: false,
+		}
+	}
+
+	pub fn update(&mut self, transform: &TransformStore, dt: f32) {
+		let n = self.rest_verts.len();
+		if n < 2 || !dt.is_finite() || dt <= 0.0 {
+			return;
+		}
+		let world_targets: Vec<Vec2> = self
+			.rest_verts
+			.iter()
+			.map(|v| transform.absolute.transform_point3(Vec3::new(v.x, v.y, 0.0)).truncate())
+			.collect();
+		if !self.initialized {
+			self.positions = world_targets;
+			self.velocities.fill(Vec2::ZERO);
+			self.last_offsets.fill(Vec2::ZERO);
+			self.initialized = true;
+			return;
+		}
+
+		let mut rem = dt.min(0.25);
+		while rem > 0.0 {
+			let sub_dt = rem.min(0.01);
+			rem -= sub_dt;
+
+			self.positions[0] = world_targets[0];
+			self.velocities[0] = Vec2::ZERO;
+
+			for i in 1..n {
+				let spring_k = 52.0;
+				let damp = 7.5;
+				let force = (world_targets[i] - self.positions[i]) * spring_k;
+				self.velocities[i] = (self.velocities[i] + force * sub_dt) * (-damp * sub_dt).exp();
+				if !self.velocities[i].is_finite() {
+					self.velocities[i] = Vec2::ZERO;
+				}
+				self.positions[i] += self.velocities[i] * sub_dt;
+
+				// Soft segment-length preservation relative to previous chain node
+				let seg_rest = (self.rest_verts[i] - self.rest_verts[i - 1]).length().max(1.0);
+				let delta = self.positions[i] - self.positions[i - 1];
+				let dist = delta.length();
+				if dist > 1e-4 && dist.is_finite() {
+					let target_dist = dist + (seg_rest - dist) * 0.65;
+					self.positions[i] = self.positions[i - 1] + delta * (target_dist / dist);
+				}
+			}
+		}
+
+		let inv = transform.absolute.inverse();
+		self.last_offsets[0] = Vec2::ZERO;
+		for i in 1..n {
+			let local_pos = inv
+				.transform_point3(Vec3::new(self.positions[i].x, self.positions[i].y, 0.0))
+				.truncate();
+			let delta = local_pos - self.rest_verts[i];
+			let max_r = (self.rest_verts[i] - self.rest_verts[0]).length().max(16.0) * 1.5;
+			self.last_offsets[i] = if delta.is_finite() {
+				delta.clamp_length_max(max_r)
+			} else {
+				Vec2::ZERO
+			};
+		}
 	}
 }
 
@@ -378,5 +503,45 @@ mod tests {
 		// Disabled node should never have been ticked/initialized
 		let disabled_ctx = comps.get::<RigidPendulumCtx>(InoxNodeUuid(1)).unwrap();
 		assert!(!disabled_ctx.initialized);
+	}
+
+	#[test]
+	fn path_deformer_chain_physics_sways_on_motion_and_settles() {
+		let mut puppet = Puppet::new_empty("PathPhys");
+		let root = puppet.nodes.root_node_id;
+		let path_id = InoxNodeUuid(20);
+		puppet.nodes.add(root, path_id, make_node(20, "HairPath", true));
+		puppet.node_comps.add(
+			path_id,
+			PathDeformer {
+				curve_type: crate::math::curve::CurveType::Spline,
+				vertices: vec![Vec2::ZERO, Vec2::new(0.0, 40.0), Vec2::new(0.0, 80.0)],
+				dynamic: true,
+				physics_only: true,
+			},
+		);
+		puppet.init_all();
+
+		// First frame initializes chain at rest with zero offset
+		puppet.begin_frame();
+		puppet.end_frame(1.0 / 60.0);
+		let off0 = puppet.node_deform_offsets(path_id).expect("PathDeformer stack");
+		assert!(off0.iter().all(|v| v.length() < 1e-5));
+
+		// Displace root anchor -> chain lags behind with finite non-zero sway on tips
+		puppet.nodes.get_node_mut(path_id).unwrap().trans_offset.translation.x = 24.0;
+		puppet.begin_frame();
+		puppet.end_frame(1.0 / 60.0);
+		let off1 = puppet.node_deform_offsets(path_id).expect("PathDeformer stack");
+		assert!(off1[0].length() < 1e-5, "root control point must stay anchored");
+		assert!(off1[2].is_finite() && off1[2].x.abs() > 0.5, "tip should sway: {:?}", off1);
+
+		// Hold anchor stationary for several seconds -> chain settles back toward rest
+		for _ in 0..180 {
+			puppet.begin_frame();
+			puppet.end_frame(1.0 / 60.0);
+		}
+		let settled = puppet.node_deform_offsets(path_id).unwrap();
+		assert!(settled[2].length() < 0.5, "expected settled sway, got {:?}", settled[2]);
 	}
 }

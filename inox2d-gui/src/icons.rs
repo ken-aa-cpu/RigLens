@@ -37,6 +37,18 @@ impl StudioTool {
 		]
 	}
 
+	/// Streamlined high-frequency tools for `WorkspaceMode::Quick`.
+	pub fn quick_groups() -> &'static [&'static [StudioTool]] {
+		&[
+			&[
+				StudioTool::Pose25D,
+				StudioTool::Select,
+				StudioTool::DeformBrush,
+			],
+			&[StudioTool::HandPan, StudioTool::ZoomFit],
+		]
+	}
+
 	pub fn tooltip(self) -> &'static str {
 		match self {
 			StudioTool::Select => "Select / Move / Scale Part (V)",

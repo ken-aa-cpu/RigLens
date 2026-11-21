@@ -164,7 +164,20 @@ impl RenderCtx {
 		}
 
 		for node in nodes.iter() {
-			let needs_stack = nodes_to_deform.contains(&node.uuid) || deformer_influenced.contains(&node.uuid);
+			let has_path_phys = comps
+				.get::<PathDeformer>(node.uuid)
+				.map(|p| {
+					p.vertices.len() >= 2
+						&& (p.physics_only
+							|| p.dynamic
+							|| comps
+								.get::<crate::node::components::ExtraFields>(node.uuid)
+								.map(|ef| ef.0.get("physics").is_some())
+								.unwrap_or(false))
+				})
+				.unwrap_or(false);
+			let needs_stack =
+				nodes_to_deform.contains(&node.uuid) || deformer_influenced.contains(&node.uuid) || has_path_phys;
 			if !needs_stack {
 				continue;
 			}

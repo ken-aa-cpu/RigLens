@@ -11,6 +11,10 @@ use inox2d::node::InoxNodeUuid;
 use inox2d::render::TexturedMeshRenderCtx;
 use inox2d::texture::decode_model_textures;
 use inox2d_mcp::headless_render::{render_diagnostic, render_frame_with_textures, RenderOptions};
+use riglens_booster::gpu::ambient::AmbientTheme;
+use riglens_booster::gpu::{GpuEffectsConfig, GpuFrameProcessor};
+use riglens_booster::physics::MotionHint;
+use riglens_booster::transport::{FrameBuffer, PixelFormat};
 use riglens_stage_gl::{extract_stage_geometry, make_paint_callback, record_stage_frame, StageTextureInput};
 
 use crate::icons::StudioTool;
@@ -84,7 +88,14 @@ impl Inox2dStudioApp {
 		self.wireframe.hash(&mut h);
 		self.xray_mode.hash(&mut h);
 		self.exact_composite.hash(&mut h);
-		if self.exact_composite || self.xray_mode {
+		self.booster_live_fx.hash(&mut h);
+		if self.booster_live_fx {
+			self.booster_ui.draft.enable_soft_body.hash(&mut h);
+			self.booster_ui.draft.rim_intensity.to_bits().hash(&mut h);
+			self.booster_ui.draft.rim_theme.hash(&mut h);
+			self.booster_ui.draft.particle_count.hash(&mut h);
+		}
+		if self.exact_composite || self.xray_mode || self.booster_live_fx {
 			self.view_zoom.to_bits().hash(&mut h);
 			self.view_pan.x.to_bits().hash(&mut h);
 			self.view_pan.y.to_bits().hash(&mut h);
@@ -133,11 +144,12 @@ impl Inox2dStudioApp {
 		self.ensure_gpu_textures(ctx);
 
 		let use_exact = self.use_exact_stage();
+		let use_booster_fx = self.booster_live_fx && !self.xray_mode;
 		let sig = self.render_signature();
 		if !self.live_physics
 			&& self.cached_rev == self.session.revision
 			&& self.cached_sig == sig
-			&& ((!self.xray_mode && !use_exact) || self.stage_tex.is_some())
+			&& ((!self.xray_mode && !use_exact && !use_booster_fx) || self.stage_tex.is_some())
 		{
 			return;
 		}
@@ -191,6 +203,65 @@ impl Inox2dStudioApp {
 					self.stage_tex = Some(ctx.load_texture("inox2d_stage", cimg, egui::TextureOptions::LINEAR));
 				}
 			}
+		} else if use_booster_fx {
+			let mut fx_ok = true;
+			if self.booster_gpu.is_none() {
+				let mut cfg = GpuEffectsConfig::default();
+				cfg.enable_soft_body = self.booster_ui.draft.enable_soft_body;
+				cfg.rim_intensity = self.booster_ui.draft.rim_intensity;
+				cfg.enable_rim_light = cfg.rim_intensity > 0.01;
+				cfg.ambient_theme = AmbientTheme::parse(&self.booster_ui.draft.rim_theme).unwrap_or(AmbientTheme::Cyberpunk);
+				cfg.particle_count = self.booster_ui.draft.particle_count;
+				match GpuFrameProcessor::new_blocking(cfg) {
+					Ok(proc) => self.booster_gpu = Some(proc),
+					Err(e) => {
+						self.booster_live_fx = false;
+						self.set_status(false, format!("Booster GPU unavailable: {e}"));
+						fx_ok = false;
+					}
+				}
+			}
+			if fx_ok {
+				let fx_w = render_w.min(960);
+				let fx_h = render_h.min(960);
+				let fx_scale = eff * (fx_w as f32 / vp_w);
+				let opts = RenderOptions {
+					width: fx_w,
+					height: fx_h,
+					scale: fx_scale,
+					camera_pos: render_cam_pos,
+					wireframe: self.wireframe,
+					dt,
+					background: [0, 0, 0, 0],
+				};
+				if let (Ok(img), Some(proc)) = (
+					render_frame_with_textures(&mut self.session.model, &self.decoded_textures, &pmap, &opts),
+					self.booster_gpu.as_mut(),
+				) {
+					proc.config.enable_soft_body = self.booster_ui.draft.enable_soft_body;
+					proc.config.rim_intensity = self.booster_ui.draft.rim_intensity;
+					proc.config.enable_rim_light = proc.config.rim_intensity > 0.01;
+					proc.config.ambient_theme =
+						AmbientTheme::parse(&self.booster_ui.draft.rim_theme).unwrap_or(AmbientTheme::Cyberpunk);
+					proc.config.particle_count = self.booster_ui.draft.particle_count;
+					proc.config.upscale_factor = 1.0;
+					let (w, h) = img.dimensions();
+					if let Ok(fb) = FrameBuffer::new(w, h, PixelFormat::Rgba8, img.into_raw()) {
+						if let Ok(out) = proc.process_frame(&fb, &MotionHint::default(), dt.max(1.0 / 60.0)) {
+							let cimg = egui::ColorImage::from_rgba_unmultiplied(
+								[out.width as usize, out.height as usize],
+								&out.data,
+							);
+							if let Some(tex) = self.stage_tex.as_mut() {
+								tex.set(cimg, egui::TextureOptions::LINEAR);
+							} else {
+								self.stage_tex =
+									Some(ctx.load_texture("inox2d_stage", cimg, egui::TextureOptions::LINEAR));
+							}
+						}
+					}
+				}
+			}
 		} else if use_exact {
 			let opts = RenderOptions {
 				width: render_w,
@@ -231,7 +302,7 @@ impl Inox2dStudioApp {
 		}
 		let elapsed_ms = start.elapsed().as_secs_f32() * 1000.0;
 		self.eval_ms = elapsed_ms;
-		if self.xray_mode || use_exact {
+		if self.xray_mode || use_exact || use_booster_fx {
 			self.render_ms = elapsed_ms;
 		}
 		self.cached_rev = self.session.revision;

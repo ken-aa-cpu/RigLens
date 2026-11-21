@@ -137,4 +137,75 @@ impl InoxNodeTree {
 			.children(&self.arena)
 			.map(|id| self.arena.get(id).unwrap().get())
 	}
+
+	/// Returns `true` only if `id` exists and every node on its ancestor chain
+	/// (including `id` itself and root) has `enabled == true`.
+	pub fn is_effectively_enabled(&self, id: InoxNodeUuid) -> bool {
+		let Some(&start_id) = self.node_ids.get(&id) else {
+			return false;
+		};
+		let mut cur = Some(start_id);
+		let mut depth = 0usize;
+		while let Some(nid) = cur {
+			let Some(node) = self.arena.get(nid) else {
+				return false;
+			};
+			if !node.get().enabled {
+				return false;
+			}
+			cur = node.parent();
+			depth += 1;
+			if depth > self.node_ids.len().saturating_add(1) {
+				return false;
+			}
+		}
+		true
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::math::transform::TransformOffset;
+
+	#[test]
+	fn effectively_enabled_inherits_disabled_parent() {
+		let root = InoxNode {
+			uuid: InoxNodeUuid(1),
+			name: "Root".to_owned(),
+			enabled: true,
+			zsort: 0.0,
+			trans_offset: TransformOffset::default(),
+			lock_to_root: false,
+		};
+		let mut tree = InoxNodeTree::new_with_root(root);
+		tree.add(
+			InoxNodeUuid(1),
+			InoxNodeUuid(2),
+			InoxNode {
+				uuid: InoxNodeUuid(2),
+				name: "HiddenGroup".to_owned(),
+				enabled: false,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		tree.add(
+			InoxNodeUuid(2),
+			InoxNodeUuid(3),
+			InoxNode {
+				uuid: InoxNodeUuid(3),
+				name: "ChildPart".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		assert!(tree.is_effectively_enabled(InoxNodeUuid(1)));
+		assert!(!tree.is_effectively_enabled(InoxNodeUuid(2)));
+		assert!(!tree.is_effectively_enabled(InoxNodeUuid(3)));
+		assert!(!tree.is_effectively_enabled(InoxNodeUuid(999)));
+	}
 }

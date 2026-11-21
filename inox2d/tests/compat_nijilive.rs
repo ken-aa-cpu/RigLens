@@ -662,3 +662,39 @@ fn real_models_survive_neutral_ir_json_round_trip() {
 		assert_eq!(a["groups"].len(), b["groups"].len(), "{name}: groups");
 	}
 }
+
+#[test]
+fn dynamic_composite_collected_in_render_ctx() {
+	let child = part(3, "LayerA", "Normal");
+	let dyn_comp = node(
+		2,
+		"DynComp",
+		"DynamicComposite",
+		r#","blend_mode":"Normal","opacity":0.9,"tint":[1,1,1],"screenTint":[0,0,0],"mask_threshold":0.5,"masks":[],"auto_resized":true"#,
+		&child,
+	);
+	let root = node(1, "Root", "Node", "", &dyn_comp);
+	let src = format!(
+		r#"{{"meta":{{"name":"DynTest","version":"1.0-alpha","preservePixels":false}},"physics":{{"pixelsPerMeter":1000,"gravity":9.8}},"nodes":{root},"param":[]}}"#
+	);
+	let mut model = parse_inp(&wrap_inp(&src)[..]).expect("parse DynamicComposite");
+	model.puppet.init_all();
+	model.puppet.begin_frame();
+	model.puppet.end_frame(0.0);
+
+	let rc = model.puppet.render_ctx.as_ref().expect("RenderCtx initialized");
+	assert!(
+		rc.root_drawables_zsorted.contains(&inox2d::node::InoxNodeUuid(2)),
+		"DynamicComposite must appear in root_drawables_zsorted"
+	);
+	assert!(
+		!rc.root_drawables_zsorted.contains(&inox2d::node::InoxNodeUuid(3)),
+		"DynamicComposite child should be composited offscreen under parent"
+	);
+	let comp_ctx = model
+		.puppet
+		.node_comps
+		.get::<inox2d::render::CompositeRenderCtx>(inox2d::node::InoxNodeUuid(2))
+		.expect("CompositeRenderCtx attached");
+	assert_eq!(comp_ctx.zsorted_children_list, vec![inox2d::node::InoxNodeUuid(3)]);
+}

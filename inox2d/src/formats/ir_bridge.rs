@@ -8,9 +8,9 @@ use riglens_format::{
 	AnimatedPartData, BindingGrid, BindingTarget, BlendData, CompositeData, Diagnostic, DriverData,
 	DynamicCompositeData, ExportOptions, ExportReport, Exporter, FormatCapabilities, FormatError, GridDeformerData,
 	ImportOptions, ImportReport, Importer, MaskData, MaskEntry, MaskNodeData, MeshData, MeshGroupData, NodeKind,
-	PartData, PathDeformerData, PhysicsWorld, RigAnimation, RigAnimationLane, RigBinding, RigDocument, RigKeyframe,
-	RigMeta, RigNode, RigParam, RigTransform, RigUsageRights, ShapesData, SimplePhysicsData, TextureBlob,
-	TextureEncoding, TextureSlots, VendorExtension, IR_SCHEMA_VERSION,
+	PartData, PathDeformerData, PhysicsWorld, PoseGroup as IrPoseGroup, RigAnimation, RigAnimationLane, RigBinding,
+	RigDocument, RigKeyframe, RigMeta, RigNode, RigParam, RigTransform, RigUsageRights, ShapesData, SimplePhysicsData,
+	TextureBlob, TextureEncoding, TextureSlots, VendorExtension, IR_SCHEMA_VERSION,
 };
 
 use crate::animation::{AnimationLane, Keyframe, PuppetAnimation};
@@ -170,6 +170,8 @@ fn param_to_ir(p: &Param, extras: Option<&json::object::Object>) -> RigParam {
 		})
 		.collect();
 
+	let additive = p.additive;
+
 	RigParam {
 		id: p.uuid.0,
 		name: p.name.clone(),
@@ -179,6 +181,7 @@ fn param_to_ir(p: &Param, extras: Option<&json::object::Object>) -> RigParam {
 		defaults: [p.defaults.x, p.defaults.y],
 		axis_x: p.axis_points.x.clone(),
 		axis_y: p.axis_points.y.clone(),
+		additive,
 		bindings,
 		extras: extras.map(json_obj_to_map).unwrap_or_default(),
 	}
@@ -458,12 +461,23 @@ pub fn model_to_ir(model: &Model) -> RigDocument {
 		.map(|msg| Diagnostic::warning("PUPPET_DIAGNOSTIC", None, msg.clone()))
 		.collect();
 
+	let pose_groups = puppet
+		.pose_groups
+		.iter()
+		.map(|pg| IrPoseGroup {
+			id: pg.id.clone(),
+			parts: pg.parts.iter().map(|id| id.0).collect(),
+			fade_seconds: pg.fade_seconds,
+		})
+		.collect();
+
 	RigDocument {
 		schema_version: IR_SCHEMA_VERSION,
 		meta,
 		physics_world,
 		nodes,
 		params,
+		pose_groups,
 		animations,
 		textures,
 		vendors,
@@ -857,6 +871,7 @@ pub fn ir_to_model(doc: &RigDocument) -> Result<Model, FormatError> {
 					x: rp.axis_x.clone(),
 					y: rp.axis_y.clone(),
 				},
+				additive: rp.additive,
 				bindings,
 			},
 		);
@@ -926,6 +941,16 @@ pub fn ir_to_model(doc: &RigDocument) -> Result<Model, FormatError> {
 			},
 		);
 	}
+
+	puppet.pose_groups = doc
+		.pose_groups
+		.iter()
+		.map(|pg| crate::puppet::PoseGroup {
+			id: pg.id.clone(),
+			parts: pg.parts.iter().copied().map(InoxNodeUuid).collect(),
+			fade_seconds: pg.fade_seconds,
+		})
+		.collect();
 
 	let mut textures = Vec::with_capacity(doc.textures.len());
 	for t in &doc.textures {
