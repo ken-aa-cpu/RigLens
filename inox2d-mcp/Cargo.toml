@@ -9,6 +9,10 @@ keywords = ["inochi2d", "vtuber", "mcp", "psd", "rigging"]
 categories = ["command-line-utilities", "graphics"]
 description = "Creator rigging engine, headless renderer, CLI, and MCP server/client companion for RigLens / inox2d"
 
+[[bin]]
+name = "riglens-mcp"
+path = "src/main.rs"
+
 [dependencies]
 inox2d = { path = "../inox2d" }
 riglens-format = { path = "../riglens-format" }

@@ -28,6 +28,7 @@ impl Inox2dStudioApp {
 			let lbl_welcome = self.i18n.t("menu.file.welcome").to_owned();
 			let lbl_imp_proj = self.i18n.t("menu.file.import_psd_project").to_owned();
 			let lbl_open_no = self.i18n.t("menu.file.open_no_project").to_owned();
+			let lbl_sync_psd = self.i18n.t("menu.file.sync_psd").to_owned();
 			let lbl_open_vault = self.i18n.t("menu.file.open_vault").to_owned();
 			let lbl_save = self.i18n.t("menu.file.save").to_owned();
 			let lbl_save_as = self.i18n.t("menu.file.save_as").to_owned();
@@ -45,6 +46,10 @@ impl Inox2dStudioApp {
 				if ui.button(lbl_open_no).clicked() {
 					self.pending_psd_project_import = false;
 					self.open_file_dialog(FileDialogMode::OpenModel);
+					ui.close_menu();
+				}
+				if ui.button(lbl_sync_psd).clicked() {
+					self.open_file_dialog(FileDialogMode::SyncPsdTextures);
 					ui.close_menu();
 				}
 				if ui.button(lbl_open_vault).clicked() {

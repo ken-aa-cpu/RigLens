@@ -308,7 +308,11 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 			let _ = apply_rigid_parallax_binding(puppet, id, "Head:: Yaw-Pitch", 1.35, yaw_px, pitch_px);
 			actions.push(format!("Rigged nose '{raw_name}' (rigid parallax depth_z=1.35)"));
 		} else if lower.contains("brow") || lower.contains("眉") {
-			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.05, yaw_px, pitch_px);
+			if is_tiny {
+				let _ = apply_rigid_parallax_binding(puppet, id, "Head:: Yaw-Pitch", 1.05, yaw_px, pitch_px);
+			} else {
+				let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.05, yaw_px, pitch_px);
+			}
 			let is_right = detect_side_with_ancestors(puppet, id, &lower).unwrap_or(false);
 			let brow_param = if is_right { "Brow:: Right" } else { "Brow:: Left" };
 			let _ = apply_brow_binding(puppet, id, brow_param, is_right);

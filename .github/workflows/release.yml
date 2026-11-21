@@ -1,0 +1,49 @@
+name: Release Windows Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build RigLens binaries
+        run: cargo build --release -p inox2d-gui -p inox2d-mcp -p riglens-booster
+
+      - name: Package RigLens-windows-x64.zip
+        shell: pwsh
+        run: |
+          $stage = "dist/RigLens-windows-x64"
+          New-Item -ItemType Directory -Force -Path "$stage/locales" | Out-Null
+          Copy-Item "target/release/riglens-editor.exe" "$stage/"
+          Copy-Item "target/release/riglens-mcp.exe" "$stage/"
+          Copy-Item "target/release/riglens-booster.exe" "$stage/"
+          Copy-Item "inox2d-gui/locales/*.json" "$stage/locales/"
+          Copy-Item "README.md", "LICENSE", "NOTICE" "$stage/"
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/RigLens-windows-x64.zip" -Force
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RigLens-windows-x64
+          path: dist/RigLens-windows-x64.zip
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/RigLens-windows-x64.zip

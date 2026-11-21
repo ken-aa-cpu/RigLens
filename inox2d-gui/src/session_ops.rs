@@ -147,6 +147,7 @@ impl Inox2dStudioApp {
 						cmd,
 						"puppet.new_sample"
 							| "puppet.import_psd"
+							| "psd.sync_textures"
 							| "puppet.import"
 							| "node.add_part"
 							| "node.synthesize_overlay"
@@ -267,6 +268,14 @@ impl Inox2dStudioApp {
 							self.show_welcome = false;
 							self.open_model_from_path(&path);
 						}
+					}
+					FileDialogMode::SyncPsdTextures => {
+						let p = path.to_string_lossy().to_string();
+						self.exec_cmd(
+							"psd.sync_textures",
+							json::object! { path: p.as_str() },
+							&format!("Synced updated textures from '{}'", path.display()),
+						);
 					}
 					FileDialogMode::SaveInpAs => self.save_model_to_path(&path),
 					FileDialogMode::ExportRigJson => {

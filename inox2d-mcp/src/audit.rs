@@ -1180,6 +1180,28 @@ pub fn auto_fix_puppet(puppet: &mut Puppet) -> JsonValue {
 							for iy in 0..y_len {
 								let (fc, fh) = face_ellipses[ix][iy];
 								if let Some(cell) = mat.get_mut(ix, iy) {
+									// First shift the part rigidly by the worst out-of-ellipse correction so small features don't fold
+									let mut worst_norm = 1.0_f32;
+									let mut best_shift_w = Vec2::ZERO;
+									for (vi, d) in cell.iter().enumerate() {
+										let Some(&rest_w) = wverts.get(vi) else { continue };
+										let dw = abs.transform_vector3(d.extend(0.0)).truncate();
+										let pw = rest_w + dw;
+										let rel = pw - fc;
+										let norm = (rel.x / fh.x).powi(2) + (rel.y / fh.y).powi(2);
+										if norm > worst_norm {
+											worst_norm = norm;
+											best_shift_w = (fc + rel / norm.sqrt()) - pw;
+										}
+									}
+									if worst_norm > 1.0 {
+										let shift_local = abs_inv.transform_vector3(best_shift_w.extend(0.0)).truncate();
+										for d in cell.iter_mut() {
+											*d += shift_local;
+										}
+										clamped_vertices += 1;
+									}
+									// Per-vertex fallback only for any vertex still exceeding the ellipse after rigid shift
 									for (vi, d) in cell.iter_mut().enumerate() {
 										let Some(&rest_w) = wverts.get(vi) else { continue };
 										let dw = abs.transform_vector3(d.extend(0.0)).truncate();

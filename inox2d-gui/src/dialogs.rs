@@ -10,6 +10,7 @@ use crate::theme::{ACCENT_BLUE, AUDIT_ERR_ROSE, AUDIT_WARN_AMBER, BG_INPUT, TEXT
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FileDialogMode {
 	OpenModel,
+	SyncPsdTextures,
 	SaveInpAs,
 	ExportRigJson,
 	ExportPsd,
@@ -19,6 +20,7 @@ impl FileDialogMode {
 	pub fn title(self) -> &'static str {
 		match self {
 			Self::OpenModel => "Open / Import Puppet (.inp, .inx, .psd, .rigjson)",
+			Self::SyncPsdTextures => "Sync Updated PSD Textures (.psd)",
 			Self::SaveInpAs => "Save Puppet (.inp)",
 			Self::ExportRigJson => "Export RigLens IR (.rigjson)",
 			Self::ExportPsd => "Export Layered Artwork (.psd)",
@@ -28,6 +30,7 @@ impl FileDialogMode {
 	pub fn extensions(self) -> &'static [&'static str] {
 		match self {
 			Self::OpenModel => &["inp", "inx", "psd", "rigjson"],
+			Self::SyncPsdTextures => &["psd"],
 			Self::SaveInpAs => &["inp"],
 			Self::ExportRigJson => &["rigjson"],
 			Self::ExportPsd => &["psd"],
@@ -36,7 +39,7 @@ impl FileDialogMode {
 
 	pub fn default_filename(self) -> &'static str {
 		match self {
-			Self::OpenModel => "",
+			Self::OpenModel | Self::SyncPsdTextures => "",
 			Self::SaveInpAs => "puppet_studio.inp",
 			Self::ExportRigJson => "puppet_studio.rigjson",
 			Self::ExportPsd => "puppet_studio.psd",
@@ -44,7 +47,7 @@ impl FileDialogMode {
 	}
 
 	pub fn is_save(self) -> bool {
-		!matches!(self, Self::OpenModel)
+		!matches!(self, Self::OpenModel | Self::SyncPsdTextures)
 	}
 }
 

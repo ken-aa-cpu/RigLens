@@ -4,6 +4,7 @@
   "menu.file.welcome": "歡迎介面...",
   "menu.file.import_psd_project": "匯入 PSD（建立保護專案）...",
   "menu.file.open_no_project": "開啟 / 匯入（無專案模式）... (Ctrl+O)",
+  "menu.file.sync_psd": "同步更新 PSD 貼圖...",
   "menu.file.open_vault": "開啟備份區 (Vault)",
   "menu.file.save": "儲存 .inp (Ctrl+S)",
   "menu.file.save_as": "另存 .inp 為...",

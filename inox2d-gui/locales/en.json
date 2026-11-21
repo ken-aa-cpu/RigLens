@@ -4,6 +4,7 @@
   "menu.file.welcome": "Welcome Screen...",
   "menu.file.import_psd_project": "Import PSD (Protected Project)...",
   "menu.file.open_no_project": "Open / Import (No-Project)... (Ctrl+O)",
+  "menu.file.sync_psd": "Sync Updated PSD Textures...",
   "menu.file.open_vault": "Open Backup Vault",
   "menu.file.save": "Save .inp (Ctrl+S)",
   "menu.file.save_as": "Save .inp As...",

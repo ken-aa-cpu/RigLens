@@ -220,11 +220,13 @@ pub fn apply_head_perspective_binding(
 				let nx = ((v.x - center.x) / half.x).clamp(-1.0, 1.0);
 				let ny = ((v.y - center.y) / half.y).clamp(-1.0, 1.0);
 
-				// Parallax shift + spherical 2.5D foreshortening
+				// Parallax shift + size-aware spherical 2.5D foreshortening
 				let parallax_x = yaw * yaw_px * depth_z;
 				let parallax_y = pitch * pitch_px * depth_z;
-				let foreshorten_x = -yaw.abs() * (v.x - center.x) * 0.14 - yaw * (nx * nx) * yaw_px * 0.12;
-				let curve_y = pitch * pitch_px * 0.22 * (1.0 - nx * nx * 0.65)
+				let shear_x = (yaw_px * 0.12).min(half.x * 0.22);
+				let curve_y_amp = (pitch_px * 0.22).min(half.y * 0.25);
+				let foreshorten_x = -yaw.abs() * (v.x - center.x) * 0.14 - yaw * (nx * nx) * shear_x;
+				let curve_y = pitch * curve_y_amp * (1.0 - nx * nx * 0.65)
 					+ yaw * ny * (half.y * 0.07) * nx;
 				let foreshorten_y = -pitch.abs() * (v.y - center.y) * 0.10;
 
