@@ -16,23 +16,49 @@ use super::bindings::{
 use super::mesh::{add_grid_part, mesh_bounds};
 use super::physics_anim::{add_pendulum_physics, create_idle_animation};
 
-/// Detect left/right side from common English, suffix, and CJK naming (`Some(false)` = Left, `Some(true)` = Right).
+/// Detect left/right side from common English, suffix, arrow, and CJK naming (`Some(false)` = Left, `Some(true)` = Right).
 fn detect_side(lower: &str) -> Option<bool> {
 	let is_left = lower.ends_with("_l")
+		|| lower.ends_with(" l")
 		|| lower.contains("_l_")
+		|| lower.contains(" l ")
 		|| lower.starts_with("l_")
 		|| lower.contains("left")
-		|| lower.contains("左");
+		|| lower.contains("左")
+		|| lower.contains('←');
 	let is_right = lower.ends_with("_r")
+		|| lower.ends_with(" r")
 		|| lower.contains("_r_")
+		|| lower.contains(" r ")
 		|| lower.starts_with("r_")
 		|| lower.contains("right")
-		|| lower.contains("右");
+		|| lower.contains("右")
+		|| lower.contains('→');
 	match (is_left, is_right) {
 		(true, false) => Some(false),
 		(false, true) => Some(true),
 		_ => None,
 	}
+}
+
+/// Detect left/right side from `lower`, falling back to ancestor group names up to root.
+fn detect_side_with_ancestors(puppet: &Puppet, id: InoxNodeUuid, lower: &str) -> Option<bool> {
+	if let Some(side) = detect_side(lower) {
+		return Some(side);
+	}
+	let mut cur = id;
+	let root = puppet.nodes.root_node_id;
+	for _ in 0..64 {
+		if cur == root {
+			break;
+		}
+		let parent = puppet.nodes.get_parent(cur);
+		if let Some(side) = detect_side(&parent.name.to_lowercase()) {
+			return Some(side);
+		}
+		cur = parent.uuid;
+	}
+	None
 }
 
 /// Bind uniform rigid parallax translation (no quadratic vertex shear) for small facial parts such as `nose`.
@@ -143,8 +169,15 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 			continue;
 		}
 		let lower = raw_name.to_lowercase();
-		if lower.contains("eyeball") || lower.contains("eye_white") || lower.contains("sclera") || lower.contains("眼白") {
-			match detect_side(&lower) {
+		if lower.contains("eyeball")
+			|| lower.contains("eye_white")
+			|| lower.contains("sclera")
+			|| lower.contains("眼白")
+			|| lower.contains("白目")
+			|| lower.contains("白眼")
+			|| lower.contains("眼球")
+		{
+			match detect_side_with_ancestors(puppet, id, &lower) {
 				Some(false) if left_eyeball_id.is_none() => left_eyeball_id = Some(id),
 				Some(true) if right_eyeball_id.is_none() => right_eyeball_id = Some(id),
 				_ => {}
@@ -173,20 +206,39 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 			})
 			.unwrap_or(false);
 
-		if lower.contains("hair_back") || lower.contains("back_hair") || lower.contains("後髮") || lower.contains("后发") {
+		if lower.contains("hair_back")
+			|| lower.contains("back_hair")
+			|| lower.contains("後髮")
+			|| lower.contains("后发")
+			|| lower.contains("後ろ髪")
+		{
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", -0.85, yaw_px * 1.05, pitch_px);
 			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", sway_back);
 			actions.push(format!("Rigged back hair '{raw_name}' (depth_z=-0.85 + sway)"));
-		} else if lower.contains("hair_front") || lower.contains("bang") || lower.contains("ahoge") || lower.contains("前髮") || lower.contains("劉海") || lower.contains("刘海") || lower.contains("呆毛") {
+		} else if lower.contains("hair_front")
+			|| lower.contains("bang")
+			|| lower.contains("ahoge")
+			|| lower.contains("前髮")
+			|| lower.contains("前髪")
+			|| lower.contains("劉海")
+			|| lower.contains("刘海")
+			|| lower.contains("呆毛")
+		{
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.25, yaw_px, pitch_px);
 			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", sway_front);
 			actions.push(format!("Rigged front hair '{raw_name}' (depth_z=1.25 + sway)"));
-		} else if lower.contains("hair_side") || lower.contains("side_hair") || lower.contains("側髮") || lower.contains("鬢角") {
+		} else if lower.contains("hair_side")
+			|| lower.contains("side_hair")
+			|| lower.contains("側髮")
+			|| lower.contains("鬢角")
+			|| lower.contains("横髪")
+			|| lower.contains("もみあげ")
+		{
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 0.65, yaw_px, pitch_px);
 			let _ = apply_sway_binding(puppet, id, "Hair:: Sway", sway_front * 1.1);
 			actions.push(format!("Rigged side hair '{raw_name}' (depth_z=0.65 + sway)"));
 		} else if lower.contains("pupil") || lower.contains("iris") || lower.contains("highlight") || lower.contains("瞳") {
-			let side = detect_side(&lower);
+			let side = detect_side_with_ancestors(puppet, id, &lower);
 			let _ = apply_rigid_parallax_binding(puppet, id, "Head:: Yaw-Pitch", 1.0, yaw_px, pitch_px);
 			match side {
 				Some(false) => {
@@ -201,7 +253,7 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 			mask_targets.push((id, raw_name.clone(), side));
 			actions.push(format!("Rigged eye iris/highlight '{raw_name}' (parallax + gaze)"));
 		} else if lower.contains("eyelid") || lower.contains("eyelash") || lower.contains("lash") {
-			let side = detect_side(&lower);
+			let side = detect_side_with_ancestors(puppet, id, &lower);
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.0, yaw_px, pitch_px);
 			match side {
 				Some(false) => {
@@ -216,8 +268,13 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 		} else if lower.contains("eye_l")
 			|| lower.contains("left_eye")
 			|| lower.contains("左眼")
-			|| ((lower.contains("eyeball") || lower.contains("eye_white") || lower.contains("sclera"))
-				&& detect_side(&lower) == Some(false))
+			|| ((lower.contains("eyeball")
+				|| lower.contains("eye_white")
+				|| lower.contains("sclera")
+				|| lower.contains("白目")
+				|| lower.contains("白眼")
+				|| lower.contains("眼球"))
+				&& detect_side_with_ancestors(puppet, id, &lower) == Some(false))
 		{
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.0, yaw_px, pitch_px);
 			let _ = apply_blink_binding(puppet, id, "Eye:: Left:: Open", 0.65);
@@ -226,8 +283,13 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 		} else if lower.contains("eye_r")
 			|| lower.contains("right_eye")
 			|| lower.contains("右眼")
-			|| ((lower.contains("eyeball") || lower.contains("eye_white") || lower.contains("sclera"))
-				&& detect_side(&lower) == Some(true))
+			|| ((lower.contains("eyeball")
+				|| lower.contains("eye_white")
+				|| lower.contains("sclera")
+				|| lower.contains("白目")
+				|| lower.contains("白眼")
+				|| lower.contains("眼球"))
+				&& detect_side_with_ancestors(puppet, id, &lower) == Some(true))
 		{
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.0, yaw_px, pitch_px);
 			let _ = apply_blink_binding(puppet, id, "Eye:: Right:: Open", 0.65);
@@ -247,7 +309,7 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 			actions.push(format!("Rigged nose '{raw_name}' (rigid parallax depth_z=1.35)"));
 		} else if lower.contains("brow") || lower.contains("眉") {
 			let _ = apply_head_perspective_binding(puppet, id, "Head:: Yaw-Pitch", 1.05, yaw_px, pitch_px);
-			let is_right = detect_side(&lower).unwrap_or(false);
+			let is_right = detect_side_with_ancestors(puppet, id, &lower).unwrap_or(false);
 			let brow_param = if is_right { "Brow:: Right" } else { "Brow:: Left" };
 			let _ = apply_brow_binding(puppet, id, brow_param, is_right);
 			actions.push(format!("Rigged brow '{raw_name}' (depth_z=1.05 + {brow_param})"));
@@ -266,7 +328,7 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 		}
 	}
 
-	// Auto-attach eyeball masks to pupils/highlights that have no masks yet
+	// Auto-attach eyeball masks onto `Drawable.masks` for pupils/highlights with no masks yet
 	for (id, raw_name, side) in mask_targets {
 		let mask_src = match side {
 			Some(false) => left_eyeball_id,
@@ -276,29 +338,30 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 		let Some(source) = mask_src else {
 			continue;
 		};
-		let already_masked = puppet
-			.node_comps
-			.get::<Masks>(id)
-			.map(|m| !m.masks.is_empty())
-			.unwrap_or(false);
-		if !already_masked {
-			puppet.node_comps.add(
-				id,
-				Masks {
+		if let Some(d) = puppet.node_comps.get_mut::<Drawable>(id) {
+			let already_masked = d.masks.as_ref().map(|m| !m.masks.is_empty()).unwrap_or(false);
+			if !already_masked {
+				d.masks = Some(Masks {
 					threshold: 0.5,
 					masks: vec![Mask {
 						source,
 						mode: MaskMode::Mask,
 					}],
-				},
-			);
-			actions.push(format!("Auto-masked '{raw_name}' to eyeball node {}", source.0));
+				});
+				actions.push(format!("Auto-masked '{raw_name}' to eyeball node {}", source.0));
+			}
 		}
 	}
 
+	let has_hair_bindings = puppet
+		.params
+		.get("Hair:: Sway")
+		.map(|p| !p.bindings.is_empty())
+		.unwrap_or(false);
+
 	if let Some(head_id) = head_anchor {
 		let _ = apply_head_roll_binding(puppet, head_id, "Head:: Roll", 15.0);
-		if !has_physics {
+		if !has_physics && has_hair_bindings {
 			let _ = add_pendulum_physics(
 				puppet,
 				head_id,
@@ -312,7 +375,7 @@ pub fn auto_rig_vtuber(puppet: &mut Puppet) -> Vec<String> {
 			);
 			actions.push("Added Hair_Physics SimplePendulum".to_owned());
 		}
-	} else if !has_physics {
+	} else if !has_physics && has_hair_bindings {
 		let root_id = puppet.nodes.root_node_id;
 		let _ = add_pendulum_physics(
 			puppet,
@@ -650,10 +713,20 @@ mod tests {
 		assert!(eye_l.bindings.iter().any(|b| b.node == ew_l));
 		assert!(eye_l.bindings.iter().any(|b| b.node == pupil_l));
 
-		// pupil_L and highlight_L should be auto-masked by eye_white_L
-		let m_pupil = model.puppet.node_comps.get::<Masks>(pupil_l).expect("pupil_L masked");
+		// pupil_L and highlight_L should be auto-masked by eye_white_L via Drawable.masks
+		let m_pupil = model
+			.puppet
+			.node_comps
+			.get::<Drawable>(pupil_l)
+			.and_then(|d| d.masks.as_ref())
+			.expect("pupil_L Drawable.masks");
 		assert!(m_pupil.masks.iter().any(|m| m.source == ew_l));
-		let m_hl = model.puppet.node_comps.get::<Masks>(hl_l).expect("highlight_L masked");
+		let m_hl = model
+			.puppet
+			.node_comps
+			.get::<Drawable>(hl_l)
+			.and_then(|d| d.masks.as_ref())
+			.expect("highlight_L Drawable.masks");
 		assert!(m_hl.masks.iter().any(|m| m.source == ew_l));
 
 		// Tiny nose binding should be rigid translation (all vertices in Deform keypoint have identical offset)
@@ -696,5 +769,49 @@ mod tests {
 		let p = model.puppet.params.get("Expr:: sweat").expect("Expr:: sweat created");
 		assert!(p.bindings.iter().any(|b| b.node == drop_id));
 		assert!(model.puppet.nodes.get_node(grp_id).unwrap().enabled);
+	}
+
+	#[test]
+	fn ancestor_side_detection_and_no_orphan_hair_physics() {
+		let mut model = inox2d::model::Model {
+			puppet: Puppet::new_empty("JpEyeNoHair"),
+			textures: Vec::new(),
+			vendors: Vec::new(),
+		};
+		let root = model.puppet.nodes.root_node_id;
+		let left_eye_grp = InoxNodeUuid(9100);
+		model.puppet.nodes.add(
+			root,
+			left_eye_grp,
+			inox2d::node::InoxNode {
+				uuid: left_eye_grp,
+				name: "左目".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: Default::default(),
+				lock_to_root: false,
+			},
+		);
+		let img = RgbaImage::from_pixel(20, 20, Rgba([255, 255, 255, 255]));
+		let sclera = add_grid_part(&mut model, left_eye_grp, "白目", 0.0, vec2(-20.0, -10.0), 20.0, 20.0, 2, 2, img.clone());
+		let pupil = add_grid_part(&mut model, left_eye_grp, "瞳", -0.1, vec2(-20.0, -10.0), 10.0, 10.0, 2, 2, img);
+
+		let _ = auto_rig_vtuber(&mut model.puppet);
+
+		let d_masks = model
+			.puppet
+			.node_comps
+			.get::<Drawable>(pupil)
+			.and_then(|d| d.masks.as_ref())
+			.expect("pupil auto-masked by ancestor side");
+		assert!(d_masks.masks.iter().any(|m| m.source == sclera));
+		assert!(
+			!model
+				.puppet
+				.nodes
+				.iter()
+				.any(|n| model.puppet.node_comps.get::<SimplePhysics>(n.uuid).is_some()),
+			"must not attach Hair_Physics when no hair parts exist"
+		);
 	}
 }
