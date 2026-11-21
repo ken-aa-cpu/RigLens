@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 common = { path = "../common" }
-inox2d = { path = "../../inox2d" }
-inox2d-opengl = { path = "../../inox2d-opengl" }
+riglens-core = { path = "../../riglens-core" }
+riglens-opengl = { path = "../../riglens-opengl" }
 
 clap = { version = "4.1.8", features = ["derive"] }
 glam = { version = "0.29.0", features = ["bytemuck"] }

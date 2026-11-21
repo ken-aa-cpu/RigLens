@@ -7,7 +7,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use glam::{vec2, Vec2};
-use inox2d::math::camera::Camera;
+use riglens_core::math::camera::Camera;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 
 pub struct ExampleSceneController {

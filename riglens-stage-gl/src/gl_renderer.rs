@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use egui_glow::glow::{self, HasContext};
-use inox2d::node::components::{BlendMode, MaskMode};
+use riglens_core::node::components::{BlendMode, MaskMode};
 
 use crate::recorder::{StageDrawOp, StageFrame, StageGeometry};
 use crate::shaders::{is_gles, StagePrograms};

@@ -1,0 +1,22 @@
+[package]
+name = "riglens-editor"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+repository = "https://github.com/ken-aa-cpu/RigLens"
+readme = "../README.md"
+keywords = ["riglens", "vtuber", "egui", "rigging", "editor"]
+categories = ["gui", "graphics"]
+description = "Dual-mode Quick/Pro native Rust desktop editor for RigLens"
+
+[dependencies]
+riglens-core = { path = "../riglens-core" }
+riglens-mcp = { path = "../riglens-mcp" }
+riglens-booster = { path = "../riglens-booster" }
+riglens-stage-gl = { path = "../riglens-stage-gl" }
+eframe = { version = "0.28", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.28"
+clap = { version = "4.5", features = ["derive"] }
+glam = "0.29"
+image = { version = "0.25", default-features = false, features = ["png"] }
+json = "0.12.4"

@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use std::{error::Error, fs};
 
-use inox2d::formats::inp::parse_inp;
-use inox2d::model::Model;
-use inox2d::node::components::Mesh;
-use inox2d::render::InoxRendererExt;
-use inox2d_opengl::OpenglRenderer;
+use riglens_core::formats::inp::parse_inp;
+use riglens_core::model::Model;
+use riglens_core::node::components::Mesh;
+use riglens_core::render::InoxRendererExt;
+use riglens_opengl::OpenglRenderer;
 
 use clap::Parser;
 use glam::{vec2, Vec2};

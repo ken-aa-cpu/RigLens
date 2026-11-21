@@ -94,13 +94,13 @@ If your target format relies on a C++, C#, Python, or closed SDK library, export
 
 ```sh
 # Export any .inp / .inx / .psd / --sample puppet to neutral JSON IR
-cargo run -p inox2d-mcp -- export character.inp --out character.rigjson --pretty
+cargo run -p riglens-mcp -- export character.inp --out character.rigjson --pretty
 
 # Inspect available formats and capabilities
-cargo run -p inox2d-mcp -- formats
+cargo run -p riglens-mcp -- formats
 ```
 
-From MCP (`inox2d-mcp mcp`), use:
+From MCP (`riglens-mcp mcp`), use:
 - `format.list` — enumerate registered importers, exporters, and capability flags.
 - `puppet.export` — `{"path":"out.rigjson","format?":"rig-json","strict?":false,"pretty?":true}`.
 - `puppet.import` — `{"path":"in.rigjson","format?":"rig-json"}`.

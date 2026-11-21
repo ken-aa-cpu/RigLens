@@ -7,10 +7,10 @@ repository = "https://github.com/ken-aa-cpu/RigLens"
 readme = "../README.md"
 keywords = ["opengl", "egui", "inochi2d", "vtuber", "graphics"]
 categories = ["graphics", "rendering"]
-description = "OpenGL FBO Composite and Stencil Mask stage renderer with mipmaps and 2x SSAA for egui_glow / Inox2D"
+description = "OpenGL FBO Composite and Stencil Mask stage renderer with mipmaps and 2x SSAA for RigLens Editor"
 
 [dependencies]
 egui = "0.28"
 egui_glow = "0.28"
 glam = "0.29"
-inox2d = { path = "../inox2d" }
+riglens-core = { path = "../riglens-core" }

@@ -22,7 +22,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Build RigLens binaries
-        run: cargo build --release -p inox2d-gui -p inox2d-mcp -p riglens-booster
+        run: cargo build --release -p riglens-editor -p riglens-mcp -p riglens-booster
 
       - name: Package RigLens-windows-x64.zip
         shell: pwsh
@@ -32,7 +32,7 @@ jobs:
           Copy-Item "target/release/riglens-editor.exe" "$stage/"
           Copy-Item "target/release/riglens-mcp.exe" "$stage/"
           Copy-Item "target/release/riglens-booster.exe" "$stage/"
-          Copy-Item "inox2d-gui/locales/*.json" "$stage/locales/"
+          Copy-Item "riglens-editor/locales/*.json" "$stage/locales/"
           Copy-Item "README.md", "LICENSE", "NOTICE" "$stage/"
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/RigLens-windows-x64.zip" -Force
 

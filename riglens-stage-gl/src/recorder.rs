@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 
 use glam::{Mat4, Vec2, Vec3};
-use inox2d::node::components::{BlendMode, Mask, MaskMode, Masks};
-use inox2d::node::drawables::{CompositeComponents, TexturedMeshComponents};
-use inox2d::node::InoxNodeUuid;
-use inox2d::puppet::Puppet;
-use inox2d::render::{CompositeRenderCtx, InoxRenderer, InoxRendererExt, TexturedMeshRenderCtx};
+use riglens_core::node::components::{BlendMode, Mask, MaskMode, Masks};
+use riglens_core::node::drawables::{CompositeComponents, TexturedMeshComponents};
+use riglens_core::node::InoxNodeUuid;
+use riglens_core::puppet::Puppet;
+use riglens_core::render::{CompositeRenderCtx, InoxRenderer, InoxRendererExt, TexturedMeshRenderCtx};
 
 /// Static rest-pose vertex buffers extracted from `Puppet::render_ctx`.
 #[derive(Clone)]
@@ -195,10 +195,10 @@ pub fn record_stage_frame(puppet: &Puppet, mvp_cam: Mat4, wireframe: bool) -> Op
 mod tests {
 	use super::*;
 	use glam::vec2;
-	use inox2d::math::transform::TransformOffset;
-	use inox2d::node::components::{Blending, Composite, Drawable, Mesh, TexturedMesh};
-	use inox2d::node::InoxNode;
-	use inox2d::texture::TextureId;
+	use riglens_core::math::transform::TransformOffset;
+	use riglens_core::node::components::{Blending, Composite, Drawable, Mesh, TexturedMesh};
+	use riglens_core::node::InoxNode;
+	use riglens_core::texture::TextureId;
 
 	fn make_quad_mesh() -> Mesh {
 		Mesh {

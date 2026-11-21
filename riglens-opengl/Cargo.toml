@@ -1,0 +1,16 @@
+[package]
+name = "riglens-opengl"
+description = "OpenGL renderer for RigLens Core"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/ken-aa-cpu/RigLens"
+license = "BSD-2-Clause"
+keywords = ["riglens", "graphics", "vtuber", "opengl"]
+categories = ["graphics", "rendering"]
+
+[dependencies]
+riglens-core = { path = "../riglens-core", version = "0.1.0" }
+glam = "0.29.0"
+glow = { version = "0.14.1" }
+thiserror = "1.0.39"
+tracing = "0.1.37"

@@ -33,18 +33,18 @@ jobs:
         with:
           targets: ${{ matrix.config.target }}
 
-      - name: Build Inox2D
-        run: cargo build -p inox2d --no-default-features --features owo --all-targets --target=${{ matrix.config.target }}
+      - name: Build RigLens Core
+        run: cargo build -p riglens-core --no-default-features --features owo --all-targets --target=${{ matrix.config.target }}
 
-      - name: Build Inox2D (OpenGL)
+      - name: Build RigLens (OpenGL)
         if: matrix.renderer == 'OpenGL'
-        run: cargo build -p inox2d-opengl --all-targets --target=${{ matrix.config.target }}
+        run: cargo build -p riglens-opengl --all-targets --target=${{ matrix.config.target }}
 
       - name: Build Example (OpenGL)
         if: matrix.renderer == 'OpenGL'
         run: cargo build -p render-opengl --all-targets --target=${{ matrix.config.target }}
 
-      - name: Test Inox2D
+      - name: Test Workspace
         run: cargo test --target=${{ matrix.config.target }}
 
   build-webgl:
@@ -64,12 +64,12 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Build Inox2D
-        run: cargo build -p inox2d --no-default-features --features owo --all-targets --target=wasm32-unknown-unknown
+      - name: Build RigLens Core
+        run: cargo build -p riglens-core --no-default-features --features owo --all-targets --target=wasm32-unknown-unknown
 
-      - name: Build Inox2D (OpenGL)
+      - name: Build RigLens (OpenGL)
         if: matrix.renderer == 'OpenGL'
-        run: cargo build -p inox2d-opengl --all-targets --target=wasm32-unknown-unknown
+        run: cargo build -p riglens-opengl --all-targets --target=wasm32-unknown-unknown
 
       - name: Build WebGL Example
         run: cargo build -p render-webgl --target=wasm32-unknown-unknown

@@ -31,27 +31,25 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 
 | Product | Role | Workspace Crate |
 | :--- | :--- | :--- |
-| **RigLens Core & Format** | Format-neutral IR (`RigDocument`), `Importer`/`Exporter` plugins, `.inp`/`.inx` parser & physics | [`riglens-format`](riglens-format/), [`inox2d`](inox2d/) |
-| **RigLens Editor** | Dual-mode desktop workbench (`Quick` inspect/audit/fix & `Pro` rigger/timeline) | [`inox2d-gui`](inox2d-gui/) |
-| **RigLens Stage** | 2x-SSAA OpenGL FBO/Stencil stage renderer & upcoming standalone playback/live viewer | [`riglens-stage-gl`](riglens-stage-gl/), [`inox2d-opengl`](inox2d-opengl/) |
+| **RigLens Core & Format** | Format-neutral IR (`RigDocument`), `Importer`/`Exporter` plugins, `.inp`/`.inx` parser & physics | [`riglens-format`](riglens-format/), [`riglens-core`](riglens-core/) |
+| **RigLens Editor** | Dual-mode desktop workbench (`Quick` inspect/audit/fix & `Pro` rigger/timeline) | [`riglens-editor`](riglens-editor/) |
+| **RigLens Stage** | 2x-SSAA OpenGL FBO/Stencil stage renderer & upcoming standalone playback/live viewer | [`riglens-stage-gl`](riglens-stage-gl/), [`riglens-opengl`](riglens-opengl/) |
 | **RigLens Booster** | GPU co-processor: 120Hz physics, VTS 8001, DX11 Spout2, XPBD, JFA 2.5D rim light & 2D-DLSS | [`riglens-booster`](riglens-booster/) |
-| **RigLens MCP** | Headless renderer, 10-point auditor, pure-Rust PSD pipeline, CLI & bidirectional MCP | [`inox2d-mcp`](inox2d-mcp/) |
+| **RigLens MCP** | Headless renderer, 10-point auditor, pure-Rust PSD pipeline, CLI & bidirectional MCP | [`riglens-mcp`](riglens-mcp/) |
 
 ## Workspace overview
 
 | Crate / Path | Role |
 | :--- | :--- |
-| [`riglens-format`](riglens-format/) | Format-neutral rig IR (`RigDocument`), `Importer` / `Exporter` traits, `FormatRegistry`, `.rigjson` codec, and plugin conformance kit. |
-| [`inox2d`](inox2d/) | Core: `.inp`/`.inx` parser and serializer (`InpFormat` bridge, including P1 `AnimatedPart` / `DynamicComposite` / `Mask` / `Shapes` / `Driver`), mesh-group / grid / path deformation, simple physics, animation, opacity store. |
-| [`inox2d-opengl`](inox2d-opengl/) | OpenGL renderer with live `.inp` hot-reload and WASM/WebGL support. |
-| [`riglens-stage-gl`](riglens-stage-gl/) | Native OpenGL (`glow` 0.13) interactive stage renderer for `inox2d-gui`: 2x supersampled FBO `Composite`, 8-bit `Stencil` masking (`Mask`/`Dodge`), premultiplied RGBA8 mipmaps, and all 19 `BlendMode`s with zero CPU readback. |
-| [`inox2d-mcp`](inox2d-mcp/) | Headless CPU renderer, rig auditor / auto-fixer, pure-Rust `.psd` import/export (`PsdFormat`), CLI, JSON-RPC 2.0 MCP server (including `booster.*`), and companion stdio MCP client (`mcp-connect`). |
-| [`inox2d-gui`](inox2d-gui/) | Native desktop studio (`egui` + `glow`): full-bleed GPU FBO/Stencil stage with 2x SSAA + mipmaps & cursor-anchored pan/zoom (`--cpu-exact` for reference CPU renderer), `Live Phys` & Booster telemetry sync, `File -> Example Models` (`--model midori\|aka\|sample`), collapsible outliner, `GridDeformer` / `PathDeformer` / `MeshGroup` stage gizmos, dynamic 2D parameter pads (`+Y = Up`), 10-point audit & diagnostics, multi-animation timeline, file browser dialogs, autosave recovery, and integrated `Booster` M4 control panel. |
+| [`riglens-format`](riglens-format/) | Format-neutral rig IR (`RigDocument`, `PoseGroup`, `additive` params), `Importer` / `Exporter` traits, `FormatRegistry`, `.rigjson` codec, and plugin conformance kit. |
+| [`riglens-core`](riglens-core/) | Core `.inp`/`.inx` parser and serializer (`InpFormat` bridge, `AnimatedPart` / `DynamicComposite` / `Mask` / `Shapes` / `Driver`), mesh-group / grid / path deformation, `PathDeformer` chain physics, `PoseGroup` / `additive` runtime, ancestor visibility (`is_effectively_enabled`), and animation. |
+| [`riglens-opengl`](riglens-opengl/) | OpenGL renderer with live `.inp` hot-reload and WASM/WebGL support. |
+| [`riglens-stage-gl`](riglens-stage-gl/) | Native OpenGL (`glow` 0.13) interactive stage renderer for `riglens-editor`: 2x supersampled FBO `Composite`, 8-bit `Stencil` masking (`Mask`/`Dodge`), premultiplied RGBA8 mipmaps, and all 19 `BlendMode`s with zero CPU readback. |
+| [`riglens-mcp`](riglens-mcp/) | Headless CPU renderer, 10-point rig auditor / auto-fixer, pure-Rust `.psd` import/export & `psd.sync_textures`, CLI, JSON-RPC 2.0 MCP server (including `booster.*`), and companion stdio MCP client (`mcp-connect`). |
+| [`riglens-editor`](riglens-editor/) | Native desktop editor (`egui` + `glow`): Welcome Screen with Protected Project Vault (`production/` + verbatim `.psd` `vault/`) & No-Project mode, JSON i18n (`en`/`zh-TW`/`ja` + external locales), `Quick` / `Pro` dual workspace (`F2`), `Booster FX` live preview toggle, 2x SSAA FBO/Stencil stage, CJK font fallback, `GridDeformer` / `PathDeformer` / `MeshGroup` stage gizmos, dynamic 2D pads (`+Y = Up`), 10-point audit, multi-animation timeline, and autosave recovery. |
 | [`riglens-booster`](riglens-booster/) | Dual-channel GPU co-processor & 120Hz physics booster (`WindField`, coupled spring chains, VTube Studio Port 8001 WebSocket, Windows DX11 Spout2 bridge, `wgpu` XPBD soft-body, JFA 2D SDF 2.5D rim lighting & particles with DXGI Desktop Duplication `ScreenSync`, M3 2D-Native DLSS alpha-aware super-resolution & dual-tier motion-vector frame generation). |
 | [`.agent/skills/inox2d-vtuber-rigger`](.agent/skills/inox2d-vtuber-rigger/SKILL.md) | Playbook for AI agents rigging VTuber puppets through the MCP server. |
 | [`docs/EXPORTER_PLUGINS.md`](docs/EXPORTER_PLUGINS.md) | Guide for writing custom Rust or `.rigjson`-based exporter plugins. |
-
-> Crate names are inherited from the fork and will be renamed in a later release.
 
 ## Key capabilities
 
@@ -77,17 +75,20 @@ It is meant to *complement* editors such as [nijigenerate](https://github.com/ni
 ## Quick start
 
 ```sh
-# Run tests (across all 7 workspace crates)
-cargo test -p riglens-format -p inox2d -p inox2d-mcp -p inox2d-opengl -p riglens-stage-gl -p inox2d-gui -p riglens-booster
+# Run tests (across the entire workspace)
+cargo test --workspace
 
-# Open the default real example model (Midori/Aka if staged in assets/example-models/) using the 2x-SSAA mipmapped GPU stage (or --cpu-exact for reference)
-cargo run -p inox2d-gui -- --model midori
-cargo run -p inox2d-gui -- --model midori --cpu-exact
-cargo run -p inox2d-gui -- --model aka
-cargo run -p inox2d-gui -- --sample
+# Open RigLens Editor (Welcome Screen with Protected Project Vault & No-Project modes)
+cargo run -p riglens-editor
 
-# Live-sync the studio with the MCP server
-cargo run -p inox2d-gui -- live.inp --watch live.inp
+# Open a model directly using the 2x-SSAA mipmapped GPU stage (or --cpu-exact for reference)
+cargo run -p riglens-editor -- --model midori
+cargo run -p riglens-editor -- --model midori --cpu-exact
+cargo run -p riglens-editor -- --model aka
+cargo run -p riglens-editor -- --sample
+
+# Live-sync the editor with the MCP server
+cargo run -p riglens-editor -- live.inp --watch live.inp
 ```
 
 > Example `.inx` binaries (`Midori.inx`, `Aka.inx`) from `Inochi2D/example-models` are gitignored; place them in [`assets/example-models/`](assets/example-models/README.md) (or point `RIGLENS_EXAMPLE_MODELS` to their directory) for automatic loading and CC BY 4.0 attribution.
@@ -95,17 +96,17 @@ cargo run -p inox2d-gui -- live.inp --watch live.inp
 ### CLI examples
 
 ```sh
-cargo run -p inox2d-mcp -- new --out sample_vtuber.inp --sample
-cargo run -p inox2d-mcp -- info sample_vtuber.inp
-cargo run -p inox2d-mcp -- render-grid sample_vtuber.inp --param "Head:: Yaw-Pitch" --out head_grid.png --wireframe
-cargo run -p inox2d-mcp -- import-psd character.psd --out character.inp --delaunay
-cargo run -p inox2d-mcp -- export-psd sample_vtuber.inp --out character.psd
-cargo run -p inox2d-mcp -- formats
-cargo run -p inox2d-mcp -- export sample_vtuber.inp --out sample.rigjson --pretty
-cargo run -p inox2d-mcp -- commands
+cargo run -p riglens-mcp -- new --out sample_vtuber.inp --sample
+cargo run -p riglens-mcp -- info sample_vtuber.inp
+cargo run -p riglens-mcp -- render-grid sample_vtuber.inp --param "Head:: Yaw-Pitch" --out head_grid.png --wireframe
+cargo run -p riglens-mcp -- import-psd character.psd --out character.inp --delaunay
+cargo run -p riglens-mcp -- export-psd sample_vtuber.inp --out character.psd
+cargo run -p riglens-mcp -- formats
+cargo run -p riglens-mcp -- export sample_vtuber.inp --out sample.rigjson --pretty
+cargo run -p riglens-mcp -- commands
 
 # Companion MCP client: connect to an external MCP server (e.g. nijigenerate)
-cargo run -p inox2d-mcp -- mcp-connect path/to/mcp-server --call puppet_info -- mcp sample
+cargo run -p riglens-mcp -- mcp-connect path/to/mcp-server --call puppet_info -- mcp sample
 
 # Dual-channel GPU & 120Hz physics booster (VTube Studio Port 8001 + Spout2 + 2D DLSS)
 cargo run --release -p riglens-booster -- list-spout
@@ -120,29 +121,11 @@ cargo run --release -p riglens-booster -- run --spout-in VTubeStudioSpout --spou
   "mcpServers": {
     "puppet-tools": {
       "command": "cargo",
-      "args": ["run", "--quiet", "-p", "inox2d-mcp", "--", "mcp", "--sample"]
+      "args": ["run", "--quiet", "-p", "riglens-mcp", "--", "mcp", "--sample"]
     }
   }
 }
 ```
-
-## Roadmap
-
-- [x] Lossless round trip for unknown node types and all blend modes (synthetic tests).
-- [x] Round-trip verified on real `.inx` files (Aka, Midori).
-- [x] True Catmull-Rom `Cubic` & Hermite `Bezier` evaluation, matching nijilive.
-- [x] P1 deformers: `GridDeformer` and `PathDeformer` (`BezierDeformer`) parse/serialize, parameter bindings, and render propagation.
-- [x] P1 remaining nodes (`AnimatedPart`, `DynamicComposite`, `Driver`, `Shapes`, `Mask`) typed components, `.inp`/`.inx` + `RigDocument` IR round-trip & nijigenerate compatibility tests.
-- [x] Format-neutral rig model (`riglens-format`) and public **`Importer` / `Exporter` traits** + conformance kit so users can bind their own library and emit any format.
-- [x] P3 algorithm upgrades: nijilive-parity physics initialization & NaN/panic guards, 10-point rig auditor, and constrained Delaunay meshing with adaptive joint refinement.
-- [x] P4 desktop editor (`inox2d-gui` + `riglens-stage-gl` + shared command layer): hierarchical node tree & draw-order outliner, full-bleed OpenGL FBO `Composite` & 8-bit `Stencil` viewport with premultiplied mipmaps, 2x SSAA & cursor-anchored camera zoom (`--cpu-exact` reference toggle), stage editing for `GridDeformer` / `PathDeformer` / `MeshGroup`, clipping mask & binding keypoint editor (`mirror`, scalar CRUD), dynamic 2D parameter pads (`+Y = Up`), 10-point audit & Phase 0 load-warning diagnostics panel, multi-animation timeline, pure-Rust Open/Save/Export dialogs, and autosave crash recovery.
-- [x] Co-processor M1 (`riglens-booster`): 120Hz coupled physics/wind engine, VTube Studio Public API (Port `8001`) WebSocket bridge, and Windows DX11 Spout2 shared-texture sender/receiver.
-- [x] Co-processor M2 (`riglens-booster`): `wgpu` GPU compute/render pipeline with screen-space XPBD soft-body mesh deformation, JFA 2D SDF normals & directional 2.5D rim lighting (with DXGI Desktop Duplication + GDI fallback Windows `ScreenSync`), motion-driven GPU particles, and `gpu-bench`.
-- [x] Co-processor M3 (`riglens-booster`): **2D-Native DLSS** (`upscale_alpha_aware.wgsl` premultiplied-alpha Catmull-Rom super-resolution + edge sharpening, `flow_estimate.wgsl` + `MotionVectorField` dual-tier motion-vector frame generation via `frame_gen_warp.wgsl`).
-- [x] Co-processor M4: integrated `Booster` tab & `BoosterController` live telemetry sync in `inox2d-gui`, plus MCP `booster.*` controls (`booster.status`, `booster.list_spout`, `booster.configure`, `booster.start`, `booster.stop`).
-- [x] Companion MCP *client* (`McpClient` / `McpStdioClient` + `inox2d-mcp mcp-connect`) for connecting to external editors that expose MCP (e.g. nijigenerate).
-- [x] Crate packaging metadata (`Cargo.toml` repository, README, keywords, categories) & publishable workspace documentation (`cargo doc`). (Public crate rename deferred to major v1.0 tag to preserve fork path stability.)
-- [x] Core-Identity Upgrade: `Quick` / `Pro` dual workspace mode (`F2`), `is_effectively_enabled` ancestor visibility inheritance, CJK/Korean font fallback, real-world PSD semantic Auto-Rig/Auto-Mask & hidden differential expression toggles, `PathDeformer` Verlet/spring-chain physics, `DynamicComposite` offscreen render collection, `PoseGroup` + additive Blend Shape neutral IR, and live `Booster FX` stage preview.
 
 ## Contributing
 

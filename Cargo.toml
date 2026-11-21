@@ -4,10 +4,10 @@ members = [
     "riglens-format",
     "riglens-booster",
     "riglens-stage-gl",
-    "inox2d",
-    "inox2d-opengl",
-    "inox2d-mcp",
-    "inox2d-gui",
+    "riglens-core",
+    "riglens-opengl",
+    "riglens-mcp",
+    "riglens-editor",
     "examples/*",
 ]
 

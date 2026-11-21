@@ -1,0 +1,30 @@
+[package]
+name = "riglens-core"
+description = "Core 2D puppet rig parser, serializer, deformer, and physics engine for RigLens (derived from Inox2D)"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/ken-aa-cpu/RigLens"
+license = "BSD-2-Clause"
+keywords = ["riglens", "2d-rig", "vtuber", "graphics", "puppet"]
+categories = ["graphics", "rendering"]
+
+[dependencies]
+glam = "0.29.0"
+image = { version = "0.25.2", default-features = false, features = [
+	"png",
+	"jpeg",
+] }
+indextree = "4.6.0"
+json = "0.12.4"
+owo-colors = { version = "4.0.0", optional = true }
+riglens-format = { path = "../riglens-format" }
+serde_json = "1"
+simple-tga-reader = "0.1.0"
+thiserror = "1.0.39"
+tracing = "0.1.37"
+
+[dev-dependencies]
+clap = { version = "4.1.8", features = ["derive"] }
+
+[features]
+owo = ["dep:owo-colors"]
