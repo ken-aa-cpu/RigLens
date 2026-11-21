@@ -10,6 +10,7 @@ use crate::booster_panel;
 use crate::dialogs::FileDialogMode;
 use crate::hierarchy::OutlinerAction;
 use crate::icons::StudioTool;
+use crate::project::{default_projects_root, list_projects, open_folder_in_os};
 use crate::stage::VertexEditMode;
 use crate::startup::{
 	clean_display_name, find_example_models, load_initial_session, pick_default_pad_params, VISEME_PRESETS,
@@ -24,10 +25,30 @@ impl Inox2dStudioApp {
 	pub(crate) fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
 		egui::menu::bar(ui, |ui| {
 			ui.menu_button("File", |ui| {
-				if ui.button("Open / Import... (Ctrl+O)").clicked() {
+				if ui.button("Welcome Screen...").clicked() {
+					self.show_welcome = true;
+					ui.close_menu();
+				}
+				if ui.button("Import PSD (Protected Project)...").clicked() {
+					self.pending_psd_project_import = true;
 					self.open_file_dialog(FileDialogMode::OpenModel);
 					ui.close_menu();
 				}
+				if ui.button("Open / Import (No-Project)... (Ctrl+O)").clicked() {
+					self.pending_psd_project_import = false;
+					self.open_file_dialog(FileDialogMode::OpenModel);
+					ui.close_menu();
+				}
+				if ui.button("Open Backup Vault (備份區)").clicked() {
+					let root = default_projects_root();
+					if let Err(e) = open_folder_in_os(&root) {
+						self.set_status(false, e);
+					} else {
+						self.set_status(true, format!("Opened Backup Vault: {}", root.display()));
+					}
+					ui.close_menu();
+				}
+				ui.separator();
 				if ui.button("Load Sample VTuber").clicked() {
 					if let Ok(s) = load_initial_session("--sample") {
 						self.load_session_into_app(s, None, "Loaded built-in sample VTuber puppet".to_owned());
@@ -876,5 +897,144 @@ impl Inox2dStudioApp {
 				});
 			});
 		self.cmd_palette_open = open;
+	}
+
+	pub(crate) fn draw_welcome_screen(&mut self, ctx: &egui::Context) {
+		let projects_root = default_projects_root();
+		let projects = list_projects(&projects_root);
+
+		egui::Window::new("Welcome to RigLens Editor")
+			.collapsible(false)
+			.resizable(false)
+			.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+			.fixed_size(egui::vec2(560.0, 440.0))
+			.show(ctx, |ui| {
+				ui.horizontal(|ui| {
+					ui.heading("RigLens Editor");
+					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+						egui::ComboBox::from_id_source("welcome_lang_combo")
+							.selected_text(self.ui_lang.as_str())
+							.width(135.0)
+							.show_ui(ui, |ui| {
+								for lang in ["繁體中文 (預告)", "English", "日本語 (Coming Soon)"] {
+									ui.selectable_value(&mut self.ui_lang, lang.to_owned(), lang);
+								}
+							});
+						ui.label(egui::RichText::new("Language:").size(11.0).color(TEXT_MUTED));
+					});
+				});
+				ui.label(
+					egui::RichText::new("Protected Project Workspace (production/ + untouched PSD vault/) or Scratch Mode")
+						.size(11.5)
+						.color(TEXT_MUTED),
+				);
+				ui.add_space(10.0);
+
+				ui.horizontal_wrapped(|ui| {
+					let proj_btn = egui::Button::new(
+						egui::RichText::new("Import PSD (Protected Project)")
+							.strong()
+							.color(Color32::WHITE),
+					)
+					.fill(BTN_ACTIVE);
+					if ui
+						.add(proj_btn)
+						.on_hover_text("Creates production/ for edits & copies original PSD untouched into vault/")
+						.clicked()
+					{
+						self.pending_psd_project_import = true;
+						self.open_file_dialog(FileDialogMode::OpenModel);
+					}
+
+					if ui
+						.button("Open File (No-Project)")
+						.on_hover_text("Open .inp / .inx / .psd / .rigjson directly without creating a project folder")
+						.clicked()
+					{
+						self.pending_psd_project_import = false;
+						self.open_file_dialog(FileDialogMode::OpenModel);
+					}
+
+					if ui.button("New Sample VTuber").clicked() {
+						if let Ok(s) = load_initial_session("--sample") {
+							self.active_project = None;
+							self.show_welcome = false;
+							self.load_session_into_app(s, None, "Started Scratch Sample VTuber (No-Project)".to_owned());
+						}
+					}
+
+					let vault_btn = egui::Button::new(
+						egui::RichText::new("備份區 (Backup Vault)").color(Color32::WHITE),
+					)
+					.fill(TIMELINE_VIOLET);
+					if ui
+						.add(vault_btn)
+						.on_hover_text("Open RigLensProjects root folder to recover original PSDs from any project vault/")
+						.clicked()
+					{
+						if let Err(e) = open_folder_in_os(&projects_root) {
+							self.set_status(false, e);
+						} else {
+							self.set_status(true, format!("Opened Backup Vault: {}", projects_root.display()));
+						}
+					}
+				});
+
+				ui.add_space(6.0);
+				ui.label(
+					egui::RichText::new(format!("Projects Root: {}", projects_root.display()))
+						.monospace()
+						.size(10.0)
+						.color(TEXT_MUTED),
+				);
+				ui.separator();
+
+				section_header(ui, "EXISTING PROTECTED PROJECTS", None);
+				egui::ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
+					if projects.is_empty() {
+						ui.label(
+							egui::RichText::new("No protected projects yet. Use 'Import PSD (Protected Project)' to create one.")
+								.size(11.0)
+								.color(TEXT_MUTED),
+						);
+					} else {
+						for proj in projects {
+							ui.horizontal(|ui| {
+								ui.label(egui::RichText::new(&proj.name).strong().size(12.0));
+								if proj.has_vault_psd {
+									ui.label(egui::RichText::new("[vault PSD]").monospace().size(10.0).color(AUDIT_OK_GREEN));
+								}
+								ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+									if ui.small_button("Folder").clicked() {
+										let _ = open_folder_in_os(&proj.root_dir);
+									}
+									if let Some(ref inp_path) = proj.working_inp {
+										if ui.small_button("Open").clicked() {
+											let ws = crate::project::ProjectWorkspace {
+												name: proj.name.clone(),
+												root_dir: proj.root_dir.clone(),
+												production_dir: proj.root_dir.join("production"),
+												vault_dir: proj.root_dir.join("vault"),
+												working_inp: inp_path.clone(),
+												vault_psd: None,
+											};
+											self.active_project = Some(ws);
+											self.show_welcome = false;
+											self.open_model_from_path(inp_path);
+										}
+									}
+								});
+							});
+						}
+					}
+				});
+
+				ui.add_space(8.0);
+				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					if ui.button("Continue to Stage (No-Project)").clicked() {
+						self.show_welcome = false;
+					}
+				});
+			});
 	}
 }

@@ -225,11 +225,49 @@ impl Inox2dStudioApp {
 			FileDialogResult::Pending => {}
 			FileDialogResult::Cancelled => {
 				self.file_dialog = None;
+				self.pending_psd_project_import = false;
 			}
 			FileDialogResult::Confirmed(mode, path) => {
 				self.file_dialog = None;
+				let is_proj_psd = self.pending_psd_project_import;
+				self.pending_psd_project_import = false;
 				match mode {
-					FileDialogMode::OpenModel => self.open_model_from_path(&path),
+					FileDialogMode::OpenModel => {
+						let is_psd = path
+							.extension()
+							.and_then(|e| e.to_str())
+							.map(|s| s.eq_ignore_ascii_case("psd"))
+							.unwrap_or(false);
+						if is_proj_psd && is_psd {
+							match crate::project::create_project_from_psd(
+								&crate::project::default_projects_root(),
+								&path,
+							) {
+								Ok(ws) => {
+									let path_str = path.to_string_lossy().to_string();
+									match load_initial_session(&path_str) {
+										Ok(session) => {
+											let _ = write_inp_atomic(&session.model, &ws.working_inp);
+											let msg = format!(
+												"Project '{}' created (vault PSD backed up)",
+												ws.name
+											);
+											let working = ws.working_inp.clone();
+											self.active_project = Some(ws);
+											self.show_welcome = false;
+											self.load_session_into_app(session, Some(working), msg);
+										}
+										Err(err) => self.set_status(false, err),
+									}
+								}
+								Err(err) => self.set_status(false, err),
+							}
+						} else {
+							self.active_project = None;
+							self.show_welcome = false;
+							self.open_model_from_path(&path);
+						}
+					}
 					FileDialogMode::SaveInpAs => self.save_model_to_path(&path),
 					FileDialogMode::ExportRigJson => {
 						let p = path.to_string_lossy().to_string();

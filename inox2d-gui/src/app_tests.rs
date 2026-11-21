@@ -248,6 +248,8 @@ fn quick_pro_workspace_mode_switch_resets_pro_tools() {
 	assert_eq!(app.inspector_state.tab, InspectorTab::Audit);
 
 	assert!(!app.booster_live_fx);
+	assert!(!app.show_welcome);
+	assert!(app.active_project.is_none());
 	let sig_raw = app.render_signature();
 	app.booster_live_fx = true;
 	assert_ne!(app.render_signature(), sig_raw);

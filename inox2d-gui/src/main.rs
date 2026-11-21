@@ -7,6 +7,7 @@ mod dialogs;
 mod hierarchy;
 mod icons;
 mod panels;
+mod project;
 mod session_ops;
 mod shortcuts;
 mod stage;
@@ -57,6 +58,10 @@ pub enum WorkspaceMode {
 pub(crate) struct Inox2dStudioApp {
 	pub(crate) workspace_mode: WorkspaceMode,
 	pub(crate) quick_show_outliner: bool,
+	pub(crate) show_welcome: bool,
+	pub(crate) active_project: Option<project::ProjectWorkspace>,
+	pub(crate) pending_psd_project_import: bool,
+	pub(crate) ui_lang: String,
 	pub(crate) session: Session,
 	pub(crate) source_path: Option<PathBuf>,
 	pub(crate) watch_path: Option<PathBuf>,
@@ -185,6 +190,10 @@ impl Inox2dStudioApp {
 		let mut app = Self {
 			workspace_mode: WorkspaceMode::Quick,
 			quick_show_outliner: false,
+			show_welcome: false,
+			active_project: None,
+			pending_psd_project_import: false,
+			ui_lang: "繁體中文 (預告)".to_owned(),
 			session,
 			source_path,
 			watch_path,
@@ -628,6 +637,9 @@ impl eframe::App for Inox2dStudioApp {
 			});
 
 		self.draw_command_palette(ctx);
+		if self.show_welcome && self.file_dialog.is_none() {
+			self.draw_welcome_screen(ctx);
+		}
 		if let Some(mut dlg) = self.file_dialog.take() {
 			let res = draw_file_dialog(ctx, &mut dlg);
 			if res == FileDialogResult::Pending {
@@ -656,6 +668,7 @@ fn main() -> eframe::Result<()> {
 		}
 	}
 
+	let open_welcome = cli.input.is_none() && cli.model.is_none() && !cli.sample && cli.screenshot.is_none();
 	let native_options = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
 			.with_inner_size([1280.0, 760.0])
@@ -682,6 +695,7 @@ fn main() -> eframe::Result<()> {
 			}
 			app.initial_zoom = cli.zoom;
 			app.initial_focus_y = cli.focus_y;
+			app.show_welcome = open_welcome;
 			Ok(Box::new(app))
 		}),
 	)

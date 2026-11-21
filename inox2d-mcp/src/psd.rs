@@ -878,3 +878,81 @@ pub fn photocraft_convert(in_path: &Path, out_path: &Path) -> Result<String, Str
 	}
 	Ok(format!("Converted {} -> {} via PhotoCraft", in_path.display(), out_path.display()))
 }
+
+/// Update matching Part textures in-place from a revised `PsdDocument` without discarding
+/// existing meshes, deformers, parameter bindings, or physics. Returns the count of updated parts.
+pub fn sync_psd_textures_into_model(model: &mut Model, psd: &PsdDocument) -> Result<usize, String> {
+	use std::collections::HashMap;
+	use inox2d::node::components::TexturedMesh;
+
+	let mut layer_by_name: HashMap<String, &PsdLayer> = HashMap::new();
+	for layer in &psd.layers {
+		if matches!(layer.section, PsdSectionType::Normal) {
+			layer_by_name.entry(layer.name.to_lowercase()).or_insert(layer);
+		}
+	}
+
+	let updates: Vec<(usize, inox2d::model::ModelTexture)> = model
+		.puppet
+		.nodes
+		.iter()
+		.filter_map(|n| {
+			let tm = model.puppet.node_comps.get::<TexturedMesh>(n.uuid)?;
+			let layer = layer_by_name.get(&n.name.to_lowercase())?;
+			let (trimmed, _, _) = trim_layer_alpha(layer)?;
+			Some((tm.tex_albedo.0, encode_rgba_png(&trimmed)))
+		})
+		.collect();
+
+	let mut count = 0usize;
+	for (tex_idx, tex) in updates {
+		if let Some(slot) = model.textures.get_mut(tex_idx) {
+			*slot = tex;
+			count += 1;
+		}
+	}
+	Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn sync_psd_textures_updates_bytes_and_preserves_bindings() {
+		let layers = vec![PsdExportLayer {
+			name: "face".to_owned(),
+			left: 10,
+			top: 10,
+			image: RgbaImage::from_pixel(16, 16, Rgba([255, 220, 200, 255])),
+			opacity: 255,
+			blend_mode: BlendMode::Normal,
+			clipping: false,
+			visible: true,
+		}];
+		let psd1_bytes = write_layered_psd(64, 64, &layers).expect("write psd1");
+		let psd1 = parse_psd_bytes(&psd1_bytes).expect("parse psd1");
+		let mut model = import_psd_to_model(&psd1, "Test", true, true, 4, 4);
+		let orig_param_count = model.puppet.params.len();
+		let orig_tex_len = model.textures[0].data.len();
+
+		let layers2 = vec![PsdExportLayer {
+			name: "face".to_owned(),
+			left: 10,
+			top: 10,
+			image: RgbaImage::from_fn(16, 16, |x, y| {
+				Rgba([((x * 13) % 255) as u8, ((y * 17) % 255) as u8, 255, 255])
+			}),
+			opacity: 255,
+			blend_mode: BlendMode::Normal,
+			clipping: false,
+			visible: true,
+		}];
+		let psd2_bytes = write_layered_psd(64, 64, &layers2).expect("write psd2");
+		let psd2 = parse_psd_bytes(&psd2_bytes).expect("parse psd2");
+		let updated = sync_psd_textures_into_model(&mut model, &psd2).expect("sync textures");
+		assert_eq!(updated, 1);
+		assert_eq!(model.puppet.params.len(), orig_param_count);
+		assert_ne!(model.textures[0].data.len(), orig_tex_len);
+	}
+}
