@@ -27,6 +27,16 @@ RigLens focuses on the layer in between:
 
 It is meant to *complement* editors such as [nijigenerate](https://github.com/nijigenerate/nijigenerate) and Inochi Creator, not replace them.
 
+## RigLens Suite
+
+| Product | Role | Workspace Crate |
+| :--- | :--- | :--- |
+| **RigLens Core & Format** | Format-neutral IR (`RigDocument`), `Importer`/`Exporter` plugins, `.inp`/`.inx` parser & physics | [`riglens-format`](riglens-format/), [`inox2d`](inox2d/) |
+| **RigLens Editor** | Dual-mode desktop workbench (`Quick` inspect/audit/fix & `Pro` rigger/timeline) | [`inox2d-gui`](inox2d-gui/) |
+| **RigLens Stage** | 2x-SSAA OpenGL FBO/Stencil stage renderer & upcoming standalone playback/live viewer | [`riglens-stage-gl`](riglens-stage-gl/), [`inox2d-opengl`](inox2d-opengl/) |
+| **RigLens Booster** | GPU co-processor: 120Hz physics, VTS 8001, DX11 Spout2, XPBD, JFA 2.5D rim light & 2D-DLSS | [`riglens-booster`](riglens-booster/) |
+| **RigLens MCP** | Headless renderer, 10-point auditor, pure-Rust PSD pipeline, CLI & bidirectional MCP | [`inox2d-mcp`](inox2d-mcp/) |
+
 ## Workspace overview
 
 | Crate / Path | Role |
@@ -137,6 +147,10 @@ cargo run --release -p riglens-booster -- run --spout-in VTubeStudioSpout --spou
 ## Contributing
 
 Issues and pull requests are welcome. Please state clearly if a contribution was AI-generated, and only submit assets you have the right to share.
+
+## Support
+
+RigLens is free and open source. If it saves you rigging or streaming time, you can support ongoing development on [Ko-fi](https://ko-fi.com/kenaa45519).
 
 ## License
 

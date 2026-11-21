@@ -660,12 +660,12 @@ fn main() -> eframe::Result<()> {
 		viewport: egui::ViewportBuilder::default()
 			.with_inner_size([1280.0, 760.0])
 			.with_min_inner_size([1000.0, 620.0])
-			.with_title("Inox2D Studio — Craft-Style VTuber Rigger"),
+			.with_title("RigLens Editor"),
 		..Default::default()
 	};
 
 	eframe::run_native(
-		"Inox2D Studio",
+		"RigLens Editor",
 		native_options,
 		Box::new(move |cc| {
 			configure_craft_theme(&cc.egui_ctx);
