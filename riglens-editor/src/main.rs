@@ -37,7 +37,6 @@ use riglens_stage_gl::{SharedGlStage, StageGeometry, StageTextureInput};
 
 use autosave::{AutosaveManager, RecoveryInfo};
 use bindings::{BindingEditorState, InspectorTab};
-use dialogs::{draw_file_dialog, FileDialogResult, FileDialogState};
 use hierarchy::{draw_outliner_panel, OutlinerTab};
 use icons::{draw_tool_button, StudioTool};
 use stage::{StageDrag, VertexEditMode};
@@ -61,11 +60,14 @@ pub(crate) struct Inox2dStudioApp {
 	pub(crate) workspace_mode: WorkspaceMode,
 	pub(crate) quick_show_outliner: bool,
 	pub(crate) show_welcome: bool,
+	pub(crate) welcome_projects: Vec<project::ProjectSummary>,
+	pub(crate) welcome_projects_dirty: bool,
 	pub(crate) active_project: Option<project::ProjectWorkspace>,
-	pub(crate) pending_psd_project_import: bool,
 	pub(crate) i18n: i18n::I18n,
 	pub(crate) session: Session,
 	pub(crate) source_path: Option<PathBuf>,
+	pub(crate) last_browse_dir: Option<PathBuf>,
+	pub(crate) suggested_inp_name: Option<String>,
 	pub(crate) watch_path: Option<PathBuf>,
 	pub(crate) last_watch_mtime: Option<SystemTime>,
 	pub(crate) last_watch_check: Instant,
@@ -73,7 +75,6 @@ pub(crate) struct Inox2dStudioApp {
 	pub(crate) last_saved_rev: u64,
 	pub(crate) autosave: AutosaveManager,
 	pub(crate) pending_recovery: Option<RecoveryInfo>,
-	pub(crate) file_dialog: Option<FileDialogState>,
 
 	pub(crate) selected_node: Option<InoxNodeUuid>,
 	pub(crate) selected_vertices: HashSet<u32>,
@@ -108,6 +109,7 @@ pub(crate) struct Inox2dStudioApp {
 
 	pub(crate) stage_drag: Option<StageDrag>,
 	pub(crate) gesture_snapshot: Option<ModelSnapshot>,
+	pub(crate) gesture_start_rev: u64,
 
 	pub(crate) bottom_tab: BottomTab,
 	pub(crate) active_anim: String,
@@ -189,15 +191,30 @@ impl Inox2dStudioApp {
 			"Ready. V=Move/Scale · A=Vertex Edit · D=Deform Brush · S=Physics Gizmo · P=Pose 2.5D".to_owned()
 		};
 
+		let last_browse_dir = source_path
+			.as_deref()
+			.and_then(|p| p.parent())
+			.filter(|d| !d.as_os_str().is_empty())
+			.map(PathBuf::from);
+		let suggested_inp_name = source_path
+			.as_deref()
+			.and_then(|p| p.file_stem())
+			.and_then(|s| s.to_str())
+			.map(|s| format!("{s}.inp"));
+		let savable_source_path = source_path.filter(|p| session_ops::is_inp_path(p));
+
 		let mut app = Self {
 			workspace_mode: WorkspaceMode::Quick,
 			quick_show_outliner: false,
 			show_welcome: false,
+			welcome_projects: Vec::new(),
+			welcome_projects_dirty: true,
 			active_project: None,
-			pending_psd_project_import: false,
 			i18n: i18n::I18n::new("en"),
 			session,
-			source_path,
+			source_path: savable_source_path,
+			last_browse_dir,
+			suggested_inp_name,
 			watch_path,
 			last_watch_mtime,
 			last_watch_check: Instant::now(),
@@ -205,7 +222,6 @@ impl Inox2dStudioApp {
 			last_saved_rev: rev,
 			autosave,
 			pending_recovery,
-			file_dialog: None,
 			selected_node,
 			selected_vertices: HashSet::new(),
 			selected_physics,
@@ -236,6 +252,7 @@ impl Inox2dStudioApp {
 			pad_params,
 			stage_drag: None,
 			gesture_snapshot: None,
+			gesture_start_rev: 0,
 			bottom_tab: BottomTab::Timeline,
 			active_anim,
 			new_anim_name: String::new(),
@@ -357,7 +374,8 @@ impl eframe::App for Inox2dStudioApp {
 			self.playhead_frame += frame_dt * 30.0;
 			if self.playhead_frame > anim_len {
 				if self.loop_anim {
-					self.playhead_frame = 1.0 + (self.playhead_frame - 1.0).rem_euclid(anim_len);
+					let loop_span = (anim_len - 1.0).max(1.0);
+					self.playhead_frame = 1.0 + (self.playhead_frame - 1.0).rem_euclid(loop_span);
 				} else {
 					self.playhead_frame = anim_len;
 					self.playing = false;
@@ -494,7 +512,8 @@ impl eframe::App for Inox2dStudioApp {
 					};
 					for (gi, group) in groups.iter().enumerate() {
 						for &t in *group {
-							if draw_tool_button(ui, t, self.tool == t) {
+							let tip = self.i18n.t(t.tooltip_key()).to_owned();
+							if draw_tool_button(ui, t, self.tool == t, &tip) {
 								match t {
 									StudioTool::ZoomFit => {
 										self.fit_puppet_scale();
@@ -550,19 +569,21 @@ impl eframe::App for Inox2dStudioApp {
 													.get_node(id)
 													.map(|n| n.name.clone())
 													.unwrap_or_else(|| "Part".to_owned());
+												let msg = self.i18n.t("physics.attached_status").to_owned();
 												self.exec_cmd(
 													"physics.add_pendulum",
 													json::object! { name: format!("{name}_Pendulum"), parent_uuid: id.0, param: "Hair:: Sway" },
-													"Attached SimplePhysics pendulum driver",
+													&msg,
 												);
 											}
 										} else {
-											self.set_status(true, "Physics Gizmo active: drag Bob ● on stage to tune pendulum length");
+											let msg = self.i18n.t("physics.gizmo_hint").to_owned();
+											self.set_status(true, msg);
 										}
 									}
 									_ => {
 										self.tool = t;
-										self.set_status(true, t.tooltip());
+										self.set_status(true, tip);
 									}
 								}
 							}
@@ -637,12 +658,13 @@ impl eframe::App for Inox2dStudioApp {
 								);
 								if ui.small_button("Recover").clicked() {
 									let orig = rec.original_path.as_ref().map(PathBuf::from);
-									self.open_model_from_path(&rec.recovery_inp);
-									self.source_path = orig;
-									self.last_saved_rev = u64::MAX;
-									self.pending_recovery = None;
-									self.autosave.clear_recovery();
-									self.set_status(true, "Recovered autosaved session");
+									if self.open_model_from_path(&rec.recovery_inp) {
+										self.apply_source_origin(orig);
+										self.last_saved_rev = u64::MAX;
+										self.pending_recovery = None;
+										self.autosave.clear_recovery();
+										self.set_status(true, "Recovered autosaved session");
+									}
 								}
 								if ui.small_button("Dismiss").clicked() {
 									self.pending_recovery = None;
@@ -655,16 +677,8 @@ impl eframe::App for Inox2dStudioApp {
 			});
 
 		self.draw_command_palette(ctx);
-		if self.show_welcome && self.file_dialog.is_none() {
+		if self.show_welcome {
 			self.draw_welcome_screen(ctx);
-		}
-		if let Some(mut dlg) = self.file_dialog.take() {
-			let res = draw_file_dialog(ctx, &mut dlg);
-			if res == FileDialogResult::Pending {
-				self.file_dialog = Some(dlg);
-			} else {
-				self.handle_file_dialog_result(res);
-			}
 		}
 	}
 }
@@ -714,6 +728,9 @@ fn main() -> eframe::Result<()> {
 			app.initial_zoom = cli.zoom;
 			app.initial_focus_y = cli.focus_y;
 			app.show_welcome = open_welcome;
+			if open_welcome {
+				app.refresh_welcome_projects();
+			}
 			let saved = settings::load_settings_from(&settings::settings_path());
 			app.i18n.set_language(&saved.language);
 			if saved.workspace_mode.eq_ignore_ascii_case("pro") {

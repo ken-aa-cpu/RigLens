@@ -260,8 +260,8 @@ impl PathPhysicsCtx {
 				}
 				self.positions[i] += self.velocities[i] * sub_dt;
 
-				// Soft segment-length preservation relative to previous chain node
-				let seg_rest = (self.rest_verts[i] - self.rest_verts[i - 1]).length().max(1.0);
+				// Soft segment-length preservation relative to previous chain node (in world space)
+				let seg_rest = (world_targets[i] - world_targets[i - 1]).length().max(1.0);
 				let delta = self.positions[i] - self.positions[i - 1];
 				let dist = delta.length();
 				if dist > 1e-4 && dist.is_finite() {

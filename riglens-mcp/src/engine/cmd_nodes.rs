@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use glam::{vec2, vec3, Vec2};
+use glam::{vec2, vec3, Mat4, Vec2};
 use image::{Rgba, RgbaImage};
 use riglens_core::math::curve::CurveType;
 use riglens_core::math::transform::TransformOffset;
@@ -446,6 +446,7 @@ impl Session {
 				let rows = params["rows"].as_usize().unwrap_or(4).max(1);
 				let padding = params["padding"].as_f32().unwrap_or(16.0);
 				let child_ids = self.resolve_child_list(params)?;
+				self.validate_deformer_children(parent, &child_ids)?;
 				let (center, w, h) = self.compute_children_bounds_in_parent(parent, &child_ids, padding);
 
 				let mg_id = self.model.puppet.next_node_uuid();
@@ -490,6 +491,7 @@ impl Session {
 				let rows = params["rows"].as_usize().unwrap_or(3).clamp(1, 32);
 				let padding = params["padding"].as_f32().unwrap_or(16.0);
 				let child_ids = self.resolve_child_list(params)?;
+				self.validate_deformer_children(parent, &child_ids)?;
 				let (center, w, h) = self.compute_children_bounds_in_parent(parent, &child_ids, padding);
 
 				let axis_x: Vec<f32> = (0..=cols)
@@ -546,6 +548,7 @@ impl Session {
 				let horizontal = params["orientation"].as_str().unwrap_or("vertical").eq_ignore_ascii_case("horizontal");
 				let padding = params["padding"].as_f32().unwrap_or(16.0);
 				let child_ids = self.resolve_child_list(params)?;
+				self.validate_deformer_children(parent, &child_ids)?;
 				let (center, w, h) = self.compute_children_bounds_in_parent(parent, &child_ids, padding);
 
 				let vertices: Vec<Vec2> = (0..points)
@@ -600,6 +603,18 @@ impl Session {
 				for p in self.model.puppet.params.values_mut() {
 					p.bindings.retain(|b| !removed_set.contains(&b.node));
 				}
+				let surviving_ids: Vec<InoxNodeUuid> =
+					self.model.puppet.nodes.iter().map(|n| n.uuid).collect();
+				for uid in surviving_ids {
+					if let Some(drawable) = self.model.puppet.node_comps.get_mut::<Drawable>(uid) {
+						if let Some(ref mut masks) = drawable.masks {
+							masks.masks.retain(|m| !removed_set.contains(&m.source));
+							if masks.masks.is_empty() {
+								drawable.masks = None;
+							}
+						}
+					}
+				}
 				self.model.puppet.reset_contexts();
 				self.revision += 1;
 				Ok(json::object! {
@@ -638,12 +653,32 @@ impl Session {
 
 	fn resolve_child_list(&self, params: &JsonValue) -> Result<Vec<InoxNodeUuid>, String> {
 		let mut child_ids = Vec::new();
+		let mut seen = HashSet::new();
 		if let JsonValue::Array(arr) = &params["children"] {
 			for item in arr {
-				child_ids.push(self.resolve_node_by_ref(item)?);
+				let id = self.resolve_node_by_ref(item)?;
+				if seen.insert(id) {
+					child_ids.push(id);
+				}
 			}
 		}
 		Ok(child_ids)
+	}
+
+	fn validate_deformer_children(&self, parent: InoxNodeUuid, child_ids: &[InoxNodeUuid]) -> Result<(), String> {
+		let root = self.model.puppet.nodes.root_node_id;
+		for &cid in child_ids {
+			if cid == root {
+				return Err("Cannot wrap the Root node inside a deformer".to_owned());
+			}
+			if self.model.puppet.nodes.get_node(cid).is_none() {
+				return Err(format!("Child node {} not found", cid.0));
+			}
+			if parent == cid || self.model.puppet.nodes.is_descendant(parent, cid) {
+				return Err("Cannot reparent an ancestor of the deformer into itself".to_owned());
+			}
+		}
+		Ok(())
 	}
 
 	fn compute_children_bounds_in_parent(
@@ -692,12 +727,33 @@ impl Session {
 		child_ids: &[InoxNodeUuid],
 		center: Vec2,
 	) -> Result<(), String> {
+		let parent_abs = self
+			.model
+			.puppet
+			.node_transform(parent)
+			.map(|t| t.absolute)
+			.unwrap_or(Mat4::IDENTITY);
+		let deformer_abs = parent_abs * Mat4::from_translation(vec3(center.x, center.y, 0.0));
+		let deformer_inv = deformer_abs.inverse();
+
 		for &cid in child_ids {
-			let same_parent = self.model.puppet.nodes.get_parent(cid).uuid == parent;
-			if same_parent {
-				if let Some(child_node) = self.model.puppet.nodes.get_node_mut(cid) {
-					child_node.trans_offset.translation.x -= center.x;
-					child_node.trans_offset.translation.y -= center.y;
+			let old_parent = self.model.puppet.nodes.get_parent(cid).uuid;
+			let child_abs = self.model.puppet.node_transform(cid).map(|t| t.absolute);
+			if let Some(child_node) = self.model.puppet.nodes.get_node_mut(cid) {
+				if !child_node.lock_to_root {
+					if old_parent == parent {
+						child_node.trans_offset.translation.x -= center.x;
+						child_node.trans_offset.translation.y -= center.y;
+					} else if deformer_inv.is_finite() {
+						if let Some(c_abs) = child_abs {
+							let local = deformer_inv * c_abs;
+							let (scale, rot, trans) = local.to_scale_rotation_translation();
+							let (rx, ry, rz) = rot.to_euler(glam::EulerRot::XYZ);
+							child_node.trans_offset.translation = trans;
+							child_node.trans_offset.rotation = vec3(rx, ry, rz);
+							child_node.trans_offset.scale = vec2(scale.x, scale.y);
+						}
+					}
 				}
 			}
 			self.model.puppet.nodes.reparent(cid, deformer_id)?;
@@ -705,5 +761,111 @@ impl Session {
 		self.model.puppet.reset_contexts();
 		self.revision += 1;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn reparent_into_deformer_preserves_lock_to_root_and_rotated_parent_transforms() {
+		let mut s = Session::new_sample();
+		let root = s.model.puppet.nodes.root_node_id;
+		let rot_parent = InoxNodeUuid(9001);
+		let locked_child = InoxNodeUuid(9002);
+		let moving_child = InoxNodeUuid(9003);
+		let deformer = InoxNodeUuid(9004);
+
+		for (parent, id, name, trans, ltr) in [
+			(
+				root,
+				rot_parent,
+				"RotParent",
+				TransformOffset {
+					translation: vec3(40.0, 20.0, 0.0),
+					rotation: vec3(0.0, 0.0, std::f32::consts::FRAC_PI_2),
+					scale: vec2(2.0, 2.0),
+					pixel_snap: false,
+				},
+				false,
+			),
+			(
+				root,
+				locked_child,
+				"LockedChild",
+				TransformOffset {
+					translation: vec3(123.0, 45.0, 0.0),
+					..TransformOffset::default()
+				},
+				true,
+			),
+			(
+				rot_parent,
+				moving_child,
+				"MovingChild",
+				TransformOffset {
+					translation: vec3(10.0, 0.0, 0.0),
+					..TransformOffset::default()
+				},
+				false,
+			),
+			(
+				root,
+				deformer,
+				"TestDeformer",
+				TransformOffset {
+					translation: vec3(50.0, 10.0, 0.0),
+					..TransformOffset::default()
+				},
+				false,
+			),
+		] {
+			s.model.puppet.nodes.add(
+				parent,
+				id,
+				InoxNode {
+					uuid: id,
+					name: name.to_owned(),
+					enabled: true,
+					zsort: 0.0,
+					trans_offset: trans,
+					lock_to_root: ltr,
+				},
+			);
+		}
+		s.model.puppet.init_all();
+		s.model.puppet.begin_frame();
+		s.model.puppet.end_frame(0.0);
+
+		let moving_world_before = s
+			.model
+			.puppet
+			.node_transform(moving_child)
+			.unwrap()
+			.absolute
+			.transform_point3(glam::Vec3::ZERO);
+
+		s.reparent_into_deformer(deformer, root, &[locked_child, moving_child], vec2(50.0, 10.0))
+			.unwrap();
+		s.model.puppet.begin_frame();
+		s.model.puppet.end_frame(0.0);
+
+		// lock_to_root child translation must NOT be shifted by -center even when old_parent == parent
+		let lc = s.model.puppet.nodes.get_node(locked_child).unwrap();
+		assert!((lc.trans_offset.translation - vec3(123.0, 45.0, 0.0)).length() < 1e-4);
+
+		// Child moved from rotated/scaled parent into deformer must preserve world position
+		let moving_world_after = s
+			.model
+			.puppet
+			.node_transform(moving_child)
+			.unwrap()
+			.absolute
+			.transform_point3(glam::Vec3::ZERO);
+		assert!(
+			(moving_world_before - moving_world_after).length() < 1e-3,
+			"expected world pos preserved: before={moving_world_before:?}, after={moving_world_after:?}"
+		);
 	}
 }

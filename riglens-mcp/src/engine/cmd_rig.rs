@@ -618,7 +618,8 @@ impl Session {
 					return Err(format!("Animation '{name}' already exists"));
 				}
 				let length = params["length"].as_i32().unwrap_or(120).clamp(1, 36000);
-				let fps = params["fps"].as_f32().unwrap_or(30.0).clamp(1.0, 240.0);
+				let raw_fps = params["fps"].as_f32().unwrap_or(30.0);
+				let fps = if raw_fps.is_finite() { raw_fps.clamp(1.0, 240.0) } else { 30.0 };
 				self.model.puppet.animations.insert(
 					name.to_owned(),
 					PuppetAnimation {

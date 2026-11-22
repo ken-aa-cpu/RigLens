@@ -42,7 +42,7 @@ fn detect_side(lower: &str) -> Option<bool> {
 }
 
 /// Detect left/right side from `lower`, falling back to ancestor group names up to root.
-fn detect_side_with_ancestors(puppet: &Puppet, id: InoxNodeUuid, lower: &str) -> Option<bool> {
+pub(crate) fn detect_side_with_ancestors(puppet: &Puppet, id: InoxNodeUuid, lower: &str) -> Option<bool> {
 	if let Some(side) = detect_side(lower) {
 		return Some(side);
 	}
@@ -102,7 +102,7 @@ fn apply_rigid_parallax_binding(
 		let ty = param.axis_points.y[iy];
 		let yaw = param.min.x + (param.max.x - param.min.x) * tx;
 		let pitch = param.min.y + (param.max.y - param.min.y) * ty;
-		let shift = vec2(yaw * yaw_px * depth_z, pitch * pitch_px * depth_z);
+		let shift = vec2(yaw * yaw_px * depth_z, -pitch * pitch_px * depth_z);
 		vec![shift; vert_len]
 	});
 	let is_set = Matrix2d::from_grid_transposed(x_len, y_len, |_, _| true);
@@ -817,5 +817,22 @@ mod tests {
 				.any(|n| model.puppet.node_comps.get::<SimplePhysics>(n.uuid).is_some()),
 			"must not attach Hair_Physics when no hair parts exist"
 		);
+	}
+
+	#[test]
+	fn rigid_parallax_pitch_up_shifts_upward_in_y_down_world_space() {
+		let mut model = build_sample_vtuber_model();
+		let root = model.puppet.nodes.root_node_id;
+		let img = RgbaImage::from_pixel(10, 10, Rgba([255, 255, 255, 255]));
+		let nose = add_grid_part(&mut model, root, "nose", -0.3, vec2(0.0, 5.0), 10.0, 10.0, 2, 2, img);
+		apply_rigid_parallax_binding(&mut model.puppet, nose, "Head:: Yaw-Pitch", 1.0, 15.0, 12.0).unwrap();
+
+		model.puppet.init_all();
+		model.puppet.begin_frame();
+		model.puppet.param_ctx.as_mut().unwrap().set("Head:: Yaw-Pitch", vec2(0.0, 1.0)).unwrap();
+		model.puppet.end_frame(0.0);
+
+		let defs = model.puppet.node_deform_offsets(nose).unwrap();
+		assert!(defs.iter().all(|d| d.y < 0.0), "pitch=+1 must shift nose upward (dy < 0), got {:?}", defs);
 	}
 }

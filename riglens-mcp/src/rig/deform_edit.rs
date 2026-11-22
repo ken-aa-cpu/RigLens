@@ -291,29 +291,38 @@ pub fn apply_deform_brush_mode(
 					}
 				}
 				DeformBrushMode::Smooth => {
-					let prev = cell.clone();
-					let strength = (delta.length().clamp(1.0, 14.0) / radius).clamp(0.10, 0.55);
-					for (vi, &v) in verts.iter().enumerate() {
-						let nbrs = &neighbors[vi];
-						if nbrs.is_empty() {
-							continue;
-						}
-						let cur_pos = v + prev[vi];
-						let t2 = ((cur_pos - brush_center).length_squared() * inv_r2).clamp(0.0, 1.0);
-						let w = (1.0 - t2) * (1.0 - t2);
-						if w > 0.01 {
-							let mut sum = Vec2::ZERO;
-							for &ni in nbrs {
-								sum += verts[ni] + prev[ni];
+					if delta.length_squared() >= 1e-6 {
+						let prev = cell.clone();
+						let strength = (delta.length().clamp(1.0, 14.0) / radius).clamp(0.10, 0.55);
+						for (vi, &v) in verts.iter().enumerate() {
+							let nbrs = &neighbors[vi];
+							if nbrs.is_empty() {
+								continue;
 							}
-							let avg = sum / (nbrs.len() as f32);
-							cell[vi] += (avg - cur_pos) * (strength * w);
-							affected += 1;
+							let cur_pos = v + prev[vi];
+							let t2 = ((cur_pos - brush_center).length_squared() * inv_r2).clamp(0.0, 1.0);
+							let w = (1.0 - t2) * (1.0 - t2);
+							if w > 0.01 {
+								let mut sum = Vec2::ZERO;
+								for &ni in nbrs {
+									sum += verts[ni] + prev[ni];
+								}
+								let avg = sum / (nbrs.len() as f32);
+								cell[vi] += (avg - cur_pos) * (strength * w);
+								affected += 1;
+							}
 						}
 					}
 				}
 				DeformBrushMode::Bulge => {
-					let mag = delta.x - delta.y;
+					let diff = delta.x - delta.y;
+					let mag = if diff.abs() > delta.length() * 0.15 {
+						diff
+					} else if delta.x.abs() >= delta.y.abs() {
+						delta.x
+					} else {
+						-delta.y
+					};
 					for (vi, &v) in verts.iter().enumerate() {
 						let cur_pos = v + cell.get(vi).copied().unwrap_or(Vec2::ZERO);
 						let rel = cur_pos - brush_center;
@@ -912,4 +921,54 @@ pub fn weld_seam_vertices(
 	}
 
 	Ok((ix, iy, pairs))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn smooth_zero_delta_is_noop_and_bulge_handles_diagonal_drag() {
+		let mut puppet = crate::engine::Session::new_sample().model.puppet;
+		let node_id = puppet
+			.nodes
+			.iter()
+			.find(|n| puppet.node_comps.get::<Mesh>(n.uuid).is_some())
+			.map(|n| n.uuid)
+			.expect("sample puppet has a Mesh node");
+		let param_name = puppet
+			.params
+			.keys()
+			.next()
+			.cloned()
+			.expect("sample puppet has a parameter");
+
+		let (_, _, affected_smooth0) = apply_deform_brush_mode(
+			&mut puppet,
+			node_id,
+			&param_name,
+			Vec2::ZERO,
+			Some("center"),
+			None,
+			0.5,
+			Vec2::ZERO,
+			DeformBrushMode::Smooth,
+		)
+		.unwrap();
+		assert_eq!(affected_smooth0, 0);
+
+		let (_, _, affected_diag) = apply_deform_brush_mode(
+			&mut puppet,
+			node_id,
+			&param_name,
+			Vec2::ZERO,
+			Some("center"),
+			None,
+			0.8,
+			vec2(10.0, 10.0),
+			DeformBrushMode::Bulge,
+		)
+		.unwrap();
+		assert!(affected_diag > 0);
+	}
 }

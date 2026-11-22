@@ -156,7 +156,7 @@ void main() {
 	vec4 c = texture(fbo, texUVs);
 	float a = clamp(c.a, 0.0, 1.0);
 	vec3 straight = (a > 0.0005) ? clamp(c.rgb / a, 0.0, 1.0) : vec3(0.0);
-	vec3 screenOut = vec3(1.0) - ((vec3(1.0) - straight) * (vec3(1.0) - screenColor * a));
+	vec3 screenOut = vec3(1.0) - ((vec3(1.0) - straight) * (vec3(1.0) - screenColor));
 	vec3 finalStraight = clamp(screenOut * multColor, 0.0, 1.0);
 	float sa = clamp(a * opacity, 0.0, 1.0);
 

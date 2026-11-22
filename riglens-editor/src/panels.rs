@@ -3,14 +3,14 @@ use glam::{vec2 as gvec2, Vec2 as GVec2};
 use riglens_core::node::components::{SimplePhysics, TexturedMesh};
 use riglens_core::node::InoxNodeUuid;
 use riglens_mcp::engine::command_registry;
-use riglens_mcp::rig::DeformBrushMode;
+use riglens_mcp::rig::{configure_pendulum_physics, DeformBrushMode};
 
 use crate::bindings::{draw_audit_tab, draw_bindings_tab, draw_properties_tab, InspectorAction, InspectorTab};
 use crate::booster_panel;
 use crate::dialogs::FileDialogMode;
 use crate::hierarchy::OutlinerAction;
 use crate::icons::StudioTool;
-use crate::project::{default_projects_root, list_projects, open_folder_in_os};
+use crate::project::{default_projects_root, open_folder_in_os};
 use crate::stage::VertexEditMode;
 use crate::startup::{
 	clean_display_name, find_example_models, load_initial_session, pick_default_pad_params, VISEME_PRESETS,
@@ -33,18 +33,25 @@ impl Inox2dStudioApp {
 			let lbl_save = self.i18n.t("menu.file.save").to_owned();
 			let lbl_save_as = self.i18n.t("menu.file.save_as").to_owned();
 
+			let lbl_load_sample = self.i18n.t("menu.file.load_sample").to_owned();
+			let lbl_example_models = self.i18n.t("menu.file.example_models").to_owned();
+			let lbl_builtin_sample = self.i18n.t("menu.file.builtin_sample").to_owned();
+			let lbl_export_rigjson = self.i18n.t("menu.file.export_rigjson").to_owned();
+			let lbl_export_psd = self.i18n.t("menu.file.export_psd").to_owned();
+			let lbl_export_card = self.i18n.t("menu.file.export_spec_card").to_owned();
+			let lbl_export_gif = self.i18n.t("menu.file.export_idle_gif").to_owned();
+
 			ui.menu_button(lbl_file, |ui| {
 				if ui.button(lbl_welcome).clicked() {
+					self.refresh_welcome_projects();
 					self.show_welcome = true;
 					ui.close_menu();
 				}
 				if ui.button(lbl_imp_proj).clicked() {
-					self.pending_psd_project_import = true;
-					self.open_file_dialog(FileDialogMode::OpenModel);
+					self.open_file_dialog(FileDialogMode::ImportPsdProject);
 					ui.close_menu();
 				}
 				if ui.button(lbl_open_no).clicked() {
-					self.pending_psd_project_import = false;
 					self.open_file_dialog(FileDialogMode::OpenModel);
 					ui.close_menu();
 				}
@@ -62,24 +69,28 @@ impl Inox2dStudioApp {
 					ui.close_menu();
 				}
 				ui.separator();
-				if ui.button("Load Sample VTuber").clicked() {
+				if ui.button(lbl_load_sample).clicked() {
 					if let Ok(s) = load_initial_session("--sample") {
+						self.active_project = None;
 						self.load_session_into_app(s, None, "Loaded built-in sample VTuber puppet".to_owned());
 					}
 					ui.close_menu();
 				}
 				let example_models = find_example_models();
 				if !example_models.is_empty() {
-					ui.menu_button("Example Models", |ui| {
+					ui.menu_button(lbl_example_models, |ui| {
 						for (label, path) in &example_models {
 							if ui.button(label).clicked() {
-								self.open_model_from_path(path);
+								if self.open_model_from_path(path) {
+									self.active_project = None;
+								}
 								ui.close_menu();
 							}
 						}
 						ui.separator();
-						if ui.button("Built-in Sample VTuber").clicked() {
+						if ui.button(lbl_builtin_sample).clicked() {
 							if let Ok(s) = load_initial_session("--sample") {
+								self.active_project = None;
 								self.load_session_into_app(
 									s,
 									None,
@@ -92,27 +103,23 @@ impl Inox2dStudioApp {
 				}
 				ui.separator();
 				if ui.button(lbl_save).clicked() {
-					if let Some(p) = self.watch_path.clone().or_else(|| self.source_path.clone()) {
-						self.save_model_to_path(&p);
-					} else {
-						self.open_file_dialog(FileDialogMode::SaveInpAs);
-					}
+					self.save_or_prompt_save_as();
 					ui.close_menu();
 				}
 				if ui.button(lbl_save_as).clicked() {
 					self.open_file_dialog(FileDialogMode::SaveInpAs);
 					ui.close_menu();
 				}
-				if ui.button("Export .rigjson (IR)...").clicked() {
+				if ui.button(lbl_export_rigjson).clicked() {
 					self.open_file_dialog(FileDialogMode::ExportRigJson);
 					ui.close_menu();
 				}
-				if ui.button("Export Layered .psd...").clicked() {
+				if ui.button(lbl_export_psd).clicked() {
 					self.open_file_dialog(FileDialogMode::ExportPsd);
 					ui.close_menu();
 				}
 				ui.separator();
-				if ui.button("Export Spec Card PNG (FigCraft)").clicked() {
+				if ui.button(lbl_export_card).clicked() {
 					self.exec_cmd(
 						"craft.figcraft_card",
 						json::object! { out: "studio_spec_card.png" },
@@ -120,7 +127,7 @@ impl Inox2dStudioApp {
 					);
 					ui.close_menu();
 				}
-				if ui.button("Export Animated Idle GIF").clicked() {
+				if ui.button(lbl_export_gif).clicked() {
 					let anim_name = self.active_anim.clone();
 					self.exec_cmd(
 						"render.gif",
@@ -154,14 +161,20 @@ impl Inox2dStudioApp {
 
 			let lbl_view = self.i18n.t("menu.view").to_owned();
 			let lbl_lang_menu = self.i18n.t("menu.view.language").to_owned();
+			let lbl_v_wire = self.i18n.t("menu.view.wireframe").to_owned();
+			let lbl_v_xray = self.i18n.t("menu.view.xray").to_owned();
+			let lbl_v_exact = self.i18n.t("menu.view.cpu_exact").to_owned();
+			let lbl_v_phys = self.i18n.t("menu.view.live_physics").to_owned();
+			let lbl_v_sel = self.i18n.t("menu.view.sel_overlay").to_owned();
+			let lbl_v_fit = self.i18n.t("menu.view.fit_stage").to_owned();
 			let langs = self.i18n.available_languages();
 			let cur_lang = self.i18n.current_lang().to_owned();
 			ui.menu_button(lbl_view, |ui| {
-				ui.checkbox(&mut self.wireframe, "Show Render Wireframe");
-				ui.checkbox(&mut self.xray_mode, "X-Ray Geometric Diagnostic");
-				ui.checkbox(&mut self.exact_composite, "CPU Exact FX (Reference)");
-				ui.checkbox(&mut self.live_physics, "Live Physics Preview");
-				ui.checkbox(&mut self.show_sel_overlay, "Selected Node Vector Overlay");
+				ui.checkbox(&mut self.wireframe, lbl_v_wire);
+				ui.checkbox(&mut self.xray_mode, lbl_v_xray);
+				ui.checkbox(&mut self.exact_composite, lbl_v_exact);
+				ui.checkbox(&mut self.live_physics, lbl_v_phys);
+				ui.checkbox(&mut self.show_sel_overlay, lbl_v_sel);
 				ui.menu_button(lbl_lang_menu, |ui| {
 					for (code, name) in langs {
 						let selected = code == cur_lang;
@@ -172,7 +185,7 @@ impl Inox2dStudioApp {
 						}
 					}
 				});
-				if ui.button("Fit Puppet to Stage (Z)").clicked() {
+				if ui.button(lbl_v_fit).clicked() {
 					self.fit_puppet_scale();
 					self.cached_rev = u64::MAX;
 					ui.close_menu();
@@ -180,24 +193,29 @@ impl Inox2dStudioApp {
 			});
 
 			let lbl_rig = self.i18n.t("menu.rig").to_owned();
+			let lbl_rig_auto = self.i18n.t("menu.rig.auto_rig").to_owned();
+			let lbl_rig_vis = self.i18n.t("menu.rig.upgrade_visemes").to_owned();
+			let lbl_rig_idle = self.i18n.t("menu.rig.create_idle").to_owned();
 			ui.menu_button(lbl_rig, |ui| {
-				if ui.button("Auto-Rig Full Puppet (EN/ZH Semantics)").clicked() {
+				if ui.button(lbl_rig_auto).clicked() {
 					self.exec_cmd("rig.auto_rig_vtuber", json::object! {}, "Auto-rigged puppet layers");
 					ui.close_menu();
 				}
-				if ui.button("Upgrade Mouth -> 2D A/I/U/E/O Visemes").clicked() {
+				if ui.button(lbl_rig_vis).clicked() {
 					self.exec_cmd("rig.auto_visemes", json::object! { node_name: "Mouth" }, "Bound 2D A/I/U/E/O visemes");
 					ui.close_menu();
 				}
-				if ui.button("Create 120f Idle Animation").clicked() {
+				if ui.button(lbl_rig_idle).clicked() {
 					self.exec_cmd("anim.create_idle", json::object! {}, "Generated Idle animation");
 					ui.close_menu();
 				}
 			});
 
 			let lbl_audit = self.i18n.t("menu.audit").to_owned();
+			let lbl_audit_run = self.i18n.t("menu.audit.run").to_owned();
+			let lbl_audit_fix = self.i18n.t("menu.audit.auto_fix").to_owned();
 			ui.menu_button(lbl_audit, |ui| {
-				if ui.button("Run 10-Point Rig Audit").clicked() {
+				if ui.button(lbl_audit_run).clicked() {
 					self.audit_rev = u64::MAX;
 					self.refresh_audit();
 					self.inspector_state.tab = InspectorTab::Audit;
@@ -205,16 +223,17 @@ impl Inox2dStudioApp {
 					self.set_status(s >= 80, format!("10-point audit score: {s}/100"));
 					ui.close_menu();
 				}
-				if ui.button("1-Click Constraint Auto-Fix").clicked() {
+				if ui.button(lbl_audit_fix).clicked() {
 					self.exec_cmd("rig.auto_fix", json::object! {}, "Ran deterministic rig constraint auto-fix");
 					ui.close_menu();
 				}
 			});
 
 			let lbl_overlays = self.i18n.t("menu.overlays").to_owned();
+			let lbl_ov_prefix = self.i18n.t("menu.overlays.synthesize_prefix").to_owned();
 			ui.menu_button(lbl_overlays, |ui| {
 				for kind in ["blush", "gloom", "tears", "angry", "shock"] {
-					if ui.button(format!("+ Synthesize {kind} Overlay")).clicked() {
+					if ui.button(format!("{lbl_ov_prefix} {kind}")).clicked() {
 						self.exec_cmd(
 							"node.synthesize_overlay",
 							json::object! { kind: kind },
@@ -308,6 +327,9 @@ impl Inox2dStudioApp {
 					.clicked()
 				{
 					self.booster_live_fx = !self.booster_live_fx;
+					if !self.booster_live_fx {
+						self.booster_gpu = None;
+					}
 					self.cached_sig = u64::MAX;
 					let msg = if self.booster_live_fx {
 						"Enabled live Booster GPU FX preview on stage"
@@ -340,6 +362,14 @@ impl Inox2dStudioApp {
 			.and_then(|s| s.to_str())
 			.map(clean_display_name)
 			.filter(|s| !s.is_empty())
+			.or_else(|| {
+				self.suggested_inp_name
+					.as_deref()
+					.and_then(|n| std::path::Path::new(n).file_stem())
+					.and_then(|s| s.to_str())
+					.map(clean_display_name)
+					.filter(|s| !s.is_empty())
+			})
 		{
 			return stem.to_owned();
 		}
@@ -373,10 +403,12 @@ impl Inox2dStudioApp {
 			ui.label(egui::RichText::new(format!("> {sel_name}")).color(TEXT_MUTED).size(11.5));
 			ui.separator();
 
-			if ui.button("Auto-Rig").clicked() {
+			let lbl_ctx_auto_rig = self.i18n.t("ctx.auto_rig").to_owned();
+			let lbl_ctx_auto_fix = self.i18n.t("ctx.auto_fix").to_owned();
+			if ui.button(lbl_ctx_auto_rig).clicked() {
 				self.exec_cmd("rig.auto_rig_vtuber", json::object! {}, "Auto-rigged puppet layers");
 			}
-			if ui.button("Auto-Fix").clicked() {
+			if ui.button(lbl_ctx_auto_fix).clicked() {
 				self.exec_cmd("rig.auto_fix", json::object! {}, "Repaired leaks, foldovers & masks");
 			}
 			ui.separator();
@@ -418,12 +450,7 @@ impl Inox2dStudioApp {
 						if !self.selected_vertices.is_empty() && ui.small_button("Reset Verts").clicked() {
 							if let Some(id) = self.selected_node {
 								let indices: Vec<u32> = self.selected_vertices.iter().copied().collect();
-								let pval = self
-									.session
-									.param_overrides
-									.get(&self.brush_param)
-									.copied()
-									.unwrap_or(GVec2::ZERO);
+								let pval = self.active_param_value(&self.brush_param);
 								self.exec_cmd(
 									"deform.set_vertices",
 									json::object! {
@@ -492,22 +519,60 @@ impl Inox2dStudioApp {
 							let mut freq = phys.props.frequency;
 							let mut damp = phys.props.angle_damping;
 							ui.label(egui::RichText::new(format!("{pname}:")).size(10.5).color(AUDIT_WARN_AMBER));
-							if ui.add(egui::DragValue::new(&mut len).speed(1.0).range(10.0..=500.0).prefix("Len:")).changed() {
-								self.exec_cmd("physics.configure", json::object! { node_uuid: pid.0, length: len }, "Updated physics length");
+							let r_len = ui.add(egui::DragValue::new(&mut len).speed(1.0).range(10.0..=500.0).prefix("Len:"));
+							let r_freq = ui.add(egui::DragValue::new(&mut freq).speed(0.05).range(0.1..=12.0).prefix("Hz:"));
+							let r_damp = ui.add(egui::DragValue::new(&mut damp).speed(0.02).range(0.0..=5.0).prefix("Damp:"));
+							let mut changed = false;
+							let mut any_dragged = false;
+							let mut any_focused = false;
+							let mut any_stopped_or_lost = false;
+							for r in [&r_len, &r_freq, &r_damp] {
+								if r.drag_started() {
+									self.begin_gesture_undo();
+								}
+								changed |= r.changed();
+								any_dragged |= r.dragged();
+								any_focused |= r.has_focus();
+								any_stopped_or_lost |= r.drag_stopped() || r.lost_focus();
 							}
-							if ui.add(egui::DragValue::new(&mut freq).speed(0.05).range(0.1..=12.0).prefix("Hz:")).changed() {
-								self.exec_cmd("physics.configure", json::object! { node_uuid: pid.0, frequency: freq }, "Updated physics frequency");
+							if changed {
+								self.begin_gesture_undo();
+								let _ = configure_pendulum_physics(
+									&mut self.session.model.puppet,
+									pid,
+									None,
+									Some(len),
+									Some(freq),
+									Some(damp),
+									None,
+									None,
+									None,
+								);
+								self.session.revision += 1;
+								self.cached_rev = u64::MAX;
+								self.audit_rev = u64::MAX;
+								if !any_dragged && !any_focused {
+									self.finish_gesture_undo();
+								}
 							}
-							if ui.add(egui::DragValue::new(&mut damp).speed(0.02).range(0.0..=5.0).prefix("Damp:")).changed() {
-								self.exec_cmd("physics.configure", json::object! { node_uuid: pid.0, angle_damping: damp }, "Updated physics damping");
+							if any_stopped_or_lost {
+								self.finish_gesture_undo();
 							}
 						}
 					} else {
-						ui.label(egui::RichText::new("No SimplePhysics nodes — attach from S tool").size(10.5).color(TEXT_MUTED));
+						ui.label(
+							egui::RichText::new(self.i18n.t("physics.empty"))
+								.size(10.5)
+								.color(TEXT_MUTED),
+						);
 					}
 				}
 				_ => {
-					ui.label(egui::RichText::new(self.tool.tooltip()).size(10.5).color(TEXT_MUTED));
+					ui.label(
+						egui::RichText::new(self.i18n.t(self.tool.tooltip_key()))
+							.size(10.5)
+							.color(TEXT_MUTED),
+					);
 				}
 			}
 
@@ -550,11 +615,15 @@ impl Inox2dStudioApp {
 					self.inspector_state.tab = InspectorTab::Audit;
 				}
 
-				ui.checkbox(&mut self.live_physics, "Live Phys");
-				ui.checkbox(&mut self.exact_composite, "CPU Exact FX")
+				let lbl_ctx_phys = self.i18n.t("ctx.live_phys").to_owned();
+				let lbl_ctx_exact = self.i18n.t("ctx.cpu_exact").to_owned();
+				let lbl_ctx_xray = self.i18n.t("ctx.xray").to_owned();
+				let lbl_ctx_wire = self.i18n.t("ctx.wireframe").to_owned();
+				ui.checkbox(&mut self.live_physics, lbl_ctx_phys);
+				ui.checkbox(&mut self.exact_composite, lbl_ctx_exact)
 					.on_hover_text("Optional CPU reference renderer (GPU FBO+Stencil stage with mipmaps & 2x SSAA is active by default)");
-				ui.checkbox(&mut self.xray_mode, "X-Ray");
-				ui.checkbox(&mut self.wireframe, "Wireframe");
+				ui.checkbox(&mut self.xray_mode, lbl_ctx_xray);
+				ui.checkbox(&mut self.wireframe, lbl_ctx_wire);
 			});
 		});
 	}
@@ -570,6 +639,9 @@ impl Inox2dStudioApp {
 					self.session.revision += 1;
 					self.cached_rev = u64::MAX;
 					self.audit_rev = u64::MAX;
+				}
+				InspectorAction::RefreshView => {
+					self.cached_rev = u64::MAX;
 				}
 				InspectorAction::FinishGestureUndo => {
 					self.finish_gesture_undo();
@@ -741,6 +813,8 @@ impl Inox2dStudioApp {
 						self.selected_node,
 						&mut self.inspector_state,
 						&mut self.gesture_snapshot,
+						&mut self.gesture_start_rev,
+						&self.i18n,
 					);
 					self.apply_inspector_actions(actions);
 
@@ -862,6 +936,8 @@ impl Inox2dStudioApp {
 						&mut self.session,
 						self.selected_node,
 						&mut self.inspector_state,
+						&mut self.gesture_snapshot,
+						&mut self.gesture_start_rev,
 					);
 					self.apply_inspector_actions(actions);
 				}
@@ -874,6 +950,7 @@ impl Inox2dStudioApp {
 						ui,
 						&mut self.session.booster,
 						&mut self.booster_ui,
+						&self.i18n,
 						&mut self.status_msg,
 					);
 				}
@@ -949,7 +1026,10 @@ impl Inox2dStudioApp {
 
 	pub(crate) fn draw_welcome_screen(&mut self, ctx: &egui::Context) {
 		let projects_root = default_projects_root();
-		let projects = list_projects(&projects_root);
+		if self.welcome_projects_dirty {
+			self.refresh_welcome_projects();
+		}
+		let projects = self.welcome_projects.clone();
 		let langs = self.i18n.available_languages();
 		let mut next_lang: Option<String> = None;
 
@@ -965,6 +1045,9 @@ impl Inox2dStudioApp {
 		let lbl_new_sample = self.i18n.t("welcome.new_sample").to_owned();
 		let lbl_vault = self.i18n.t("welcome.backup_vault").to_owned();
 		let hint_vault = self.i18n.t("welcome.backup_vault_hint").to_owned();
+		let lbl_projects_root = self.i18n.t("welcome.projects_root").to_owned();
+		let lbl_vault_tag = self.i18n.t("welcome.vault_psd_tag").to_owned();
+		let lbl_refresh_btn = self.i18n.t("welcome.refresh_btn").to_owned();
 		let lbl_existing = self.i18n.t("welcome.existing_projects").to_owned();
 		let lbl_no_proj = self.i18n.t("welcome.no_projects").to_owned();
 		let lbl_open_btn = self.i18n.t("welcome.open_btn").to_owned();
@@ -1003,12 +1086,10 @@ impl Inox2dStudioApp {
 					)
 					.fill(BTN_ACTIVE);
 					if ui.add(proj_btn).on_hover_text(hint_import_proj).clicked() {
-						self.pending_psd_project_import = true;
-						self.open_file_dialog(FileDialogMode::OpenModel);
+						self.open_file_dialog(FileDialogMode::ImportPsdProject);
 					}
 
 					if ui.button(lbl_open_no).on_hover_text(hint_open_no).clicked() {
-						self.pending_psd_project_import = false;
 						self.open_file_dialog(FileDialogMode::OpenModel);
 					}
 
@@ -1034,12 +1115,19 @@ impl Inox2dStudioApp {
 				});
 
 				ui.add_space(6.0);
-				ui.label(
-					egui::RichText::new(format!("Projects Root: {}", projects_root.display()))
-						.monospace()
-						.size(10.0)
-						.color(TEXT_MUTED),
-				);
+				ui.horizontal(|ui| {
+					ui.label(
+						egui::RichText::new(format!("{lbl_projects_root} {}", projects_root.display()))
+							.monospace()
+							.size(10.0)
+							.color(TEXT_MUTED),
+					);
+					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+						if ui.small_button(&lbl_refresh_btn).clicked() {
+							self.refresh_welcome_projects();
+						}
+					});
+				});
 				ui.separator();
 
 				section_header(ui, &lbl_existing, None);
@@ -1051,7 +1139,12 @@ impl Inox2dStudioApp {
 							ui.horizontal(|ui| {
 								ui.label(egui::RichText::new(&proj.name).strong().size(12.0));
 								if proj.has_vault_psd {
-									ui.label(egui::RichText::new("[vault PSD]").monospace().size(10.0).color(AUDIT_OK_GREEN));
+									ui.label(
+										egui::RichText::new(&lbl_vault_tag)
+											.monospace()
+											.size(10.0)
+											.color(AUDIT_OK_GREEN),
+									);
 								}
 								ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 									if ui.small_button(&lbl_folder_btn).clicked() {
@@ -1059,17 +1152,18 @@ impl Inox2dStudioApp {
 									}
 									if let Some(ref inp_path) = proj.working_inp {
 										if ui.small_button(&lbl_open_btn).clicked() {
-											let ws = crate::project::ProjectWorkspace {
-												name: proj.name.clone(),
-												root_dir: proj.root_dir.clone(),
-												production_dir: proj.root_dir.join("production"),
-												vault_dir: proj.root_dir.join("vault"),
-												working_inp: inp_path.clone(),
-												vault_psd: None,
-											};
-											self.active_project = Some(ws);
-											self.show_welcome = false;
-											self.open_model_from_path(inp_path);
+											if self.open_model_from_path(inp_path) {
+												let ws = crate::project::ProjectWorkspace {
+													name: proj.name.clone(),
+													root_dir: proj.root_dir.clone(),
+													production_dir: proj.root_dir.join("production"),
+													vault_dir: proj.root_dir.join("vault"),
+													working_inp: inp_path.clone(),
+													vault_psd: proj.vault_psd.clone(),
+												};
+												self.active_project = Some(ws);
+												self.show_welcome = false;
+											}
 										}
 									}
 								});

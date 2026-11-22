@@ -99,6 +99,39 @@ pub(crate) fn xy_pad_screen_from_norm(nx: f32, ny: f32, rect: egui::Rect) -> egu
 }
 
 impl Inox2dStudioApp {
+	pub(crate) fn world_delta_to_node_local(&self, id: InoxNodeUuid, world_delta: GVec2) -> GVec2 {
+		let Some(ts) = self.session.model.puppet.node_comps.get::<TransformStore>(id) else {
+			return world_delta;
+		};
+		let inv = ts.absolute.inverse();
+		if inv.is_finite() {
+			inv.transform_vector3(gvec3(world_delta.x, world_delta.y, 0.0)).truncate()
+		} else {
+			world_delta
+		}
+	}
+
+	pub(crate) fn world_delta_to_parent_local(&self, id: InoxNodeUuid, world_delta: GVec2) -> GVec2 {
+		let puppet = &self.session.model.puppet;
+		let Some(node) = puppet.nodes.get_node(id) else {
+			return world_delta;
+		};
+		let parent_id = if node.lock_to_root || id == puppet.nodes.root_node_id {
+			puppet.nodes.root_node_id
+		} else {
+			puppet.nodes.get_parent(id).uuid
+		};
+		let Some(ts) = puppet.node_comps.get::<TransformStore>(parent_id) else {
+			return world_delta;
+		};
+		let inv = ts.absolute.inverse();
+		if inv.is_finite() {
+			inv.transform_vector3(gvec3(world_delta.x, world_delta.y, 0.0)).truncate()
+		} else {
+			world_delta
+		}
+	}
+
 	pub(crate) fn draw_stage(&mut self, ui: &mut egui::Ui) {
 		let rect = ui.available_rect_before_wrap();
 		let painter = ui.painter_at(rect);
@@ -381,7 +414,9 @@ impl Inox2dStudioApp {
 						let old = self.selected_node;
 						let mut best_z = f32::INFINITY;
 						for node in self.session.model.puppet.nodes.iter() {
-							if self.session.model.puppet.node_comps.get::<TexturedMesh>(node.uuid).is_none() {
+							if !self.session.model.puppet.nodes.is_effectively_enabled(node.uuid)
+								|| self.session.model.puppet.node_comps.get::<TexturedMesh>(node.uuid).is_none()
+							{
 								continue;
 							}
 							self.selected_node = Some(node.uuid);
@@ -537,9 +572,13 @@ impl Inox2dStudioApp {
 						} else {
 							delta
 						};
+						let local_d = self.world_delta_to_parent_local(
+							id,
+							gvec2(constrained.x * world_per_ui, constrained.y * world_per_ui),
+						);
 						if let Some(n) = self.session.model.puppet.nodes.get_node_mut(id) {
-							n.trans_offset.translation.x += constrained.x * world_per_ui;
-							n.trans_offset.translation.y += constrained.y * world_per_ui;
+							n.trans_offset.translation.x += local_d.x;
+							n.trans_offset.translation.y += local_d.y;
 							self.session.revision += 1;
 							self.cached_rev = u64::MAX;
 						}
@@ -567,16 +606,14 @@ impl Inox2dStudioApp {
 							delta
 						};
 						if constrained.length_sq() > 0.01 && !self.selected_vertices.is_empty() {
-							let local_delta = gvec2(constrained.x * world_per_ui, constrained.y * world_per_ui);
+							let local_delta = self.world_delta_to_node_local(
+								id,
+								gvec2(constrained.x * world_per_ui, constrained.y * world_per_ui),
+							);
 							let indices: Vec<u32> = self.selected_vertices.iter().copied().collect();
 							match self.vertex_mode {
 								VertexEditMode::DeformKeypoint => {
-									let pval = self
-										.session
-										.param_overrides
-										.get(&self.brush_param)
-										.copied()
-										.unwrap_or(GVec2::ZERO);
+									let pval = self.active_param_value(&self.brush_param);
 									let _ = apply_vertex_deform_delta(
 										&mut self.session.model.puppet,
 										id,
@@ -622,13 +659,11 @@ impl Inox2dStudioApp {
 					if let (Some(id), Some(p)) = (self.selected_node, pos) {
 						if delta.length() > 0.2 {
 							if let Some(local_xy) = self.ui_to_local_on_node(id, canvas_rect, p) {
-								let local_delta = gvec2(delta.x * world_per_ui, delta.y * world_per_ui);
-								let pval = self
-									.session
-									.param_overrides
-									.get(&self.brush_param)
-									.copied()
-									.unwrap_or(GVec2::ZERO);
+								let local_delta = self.world_delta_to_node_local(
+									id,
+									gvec2(delta.x * world_per_ui, delta.y * world_per_ui),
+								);
+								let pval = self.active_param_value(&self.brush_param);
 								let _ = self.session.exec(
 									"deform.brush",
 									&json::object! {
@@ -640,7 +675,8 @@ impl Inox2dStudioApp {
 										local_xy: [local_xy.x, local_xy.y],
 										radius_ratio: self.brush_radius_ratio,
 										dx: local_delta.x,
-										dy: local_delta.y
+										dy: local_delta.y,
+										push_undo: false
 									},
 								);
 								self.cached_rev = u64::MAX;
@@ -676,7 +712,7 @@ impl Inox2dStudioApp {
 						for (pname, val) in [
 							("Head:: Yaw-Pitch", gvec2(nx, ny)),
 							("Head:: Roll", gvec2(nx * 0.35, 0.0)),
-							("Body:: Yaw-Pitch", gvec2(nx * 0.35, ny * 0.35)),
+							("Body:: Yaw-Pitch", gvec2(nx * 0.65, ny * 0.65)),
 							("Eye:: Gaze", gvec2(nx, ny)),
 							("Eye:: Left:: Gaze", gvec2(nx, ny)),
 							("Eye:: Right:: Gaze", gvec2(nx, ny)),
@@ -736,6 +772,14 @@ impl Inox2dStudioApp {
 				}
 				_ => {}
 			}
+		} else if !resp.dragged()
+			&& !resp.drag_started()
+			&& self.stage_drag.is_some()
+			&& !ui.ctx().input(|i| i.pointer.any_down())
+		{
+			// Pointer released outside stage: finalize any in-progress gesture undo cleanly.
+			self.stage_drag = None;
+			self.finish_gesture_undo();
 		}
 
 		// Deform Brush hover circle
@@ -807,17 +851,19 @@ impl Inox2dStudioApp {
 				if (resp.clicked() || resp.dragged()) && rect.width() > 2.0 {
 					if let Some(ptr) = resp.interact_pointer_pos() {
 						let (mut tx, mut ty) = xy_pad_norm_from_pointer(ptr, rect);
-						// Magnetic snap onto nearby axis keypoint dot (< 7px) for accurate keypoint sculpting
-						for &ax in &p.axis_points.x {
-							if ((ax - tx) * rect.width()).abs() < 7.0 {
-								tx = ax;
-								break;
+						// Magnetic snap onto nearby axis keypoint dot (< 7px) only in keypoint sculpting mode
+						if is_armed {
+							for &ax in &p.axis_points.x {
+								if ((ax - tx) * rect.width()).abs() < 7.0 {
+									tx = ax;
+									break;
+								}
 							}
-						}
-						for &ay in &p.axis_points.y {
-							if ((ay - ty) * rect.height()).abs() < 7.0 {
-								ty = ay;
-								break;
+							for &ay in &p.axis_points.y {
+								if ((ay - ty) * rect.height()).abs() < 7.0 {
+									ty = ay;
+									break;
+								}
 							}
 						}
 						let vx = p.min.x + (p.max.x - p.min.x) * tx;

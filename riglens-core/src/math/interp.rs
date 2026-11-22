@@ -323,6 +323,17 @@ impl Cell {
 		}
 	}
 
+	/// Interpolate a scalar binding, sampling corner values via `sample(x, y)`.
+	pub fn f32_sampled(&self, sample: impl Fn(usize, usize) -> f32, mode: InterpolateMode) -> f32 {
+		if Self::is_cubic(mode) {
+			cubic_cell(sample, self.xs, self.ys, self.x_last, self.y_last, self.offset())
+		} else {
+			let out_top = InterpRange::new(sample(self.xs.0, self.ys.0), sample(self.xs.1, self.ys.0));
+			let out_bottom = InterpRange::new(sample(self.xs.0, self.ys.1), sample(self.xs.1, self.ys.1));
+			bi_interpolate_f32(self.t, self.range_in, out_top, out_bottom, mode)
+		}
+	}
+
 	/// Add an interpolated per-vertex deformation into `out`.
 	pub fn vec2s_additive(
 		&self,
@@ -340,6 +351,27 @@ impl Cell {
 			}
 		} else {
 			bi_interpolate_vec2s_additive(self.t, self.range_in, out_top, out_bottom, mode, out);
+		}
+	}
+
+	/// Add an interpolated per-vertex deformation into `out`, sampling corner offsets via `sample(x, y, vertex_idx)`.
+	pub fn vec2s_additive_sampled(
+		&self,
+		sample: impl Fn(usize, usize, usize) -> Vec2,
+		mode: InterpolateMode,
+		out: &mut [Vec2],
+	) {
+		if Self::is_cubic(mode) {
+			let off = self.offset();
+			for (i, o) in out.iter_mut().enumerate() {
+				*o += cubic_cell(|x, y| sample(x, y, i), self.xs, self.ys, self.x_last, self.y_last, off);
+			}
+		} else {
+			for (i, o) in out.iter_mut().enumerate() {
+				let out_top = InterpRange::new(sample(self.xs.0, self.ys.0, i), sample(self.xs.1, self.ys.0, i));
+				let out_bottom = InterpRange::new(sample(self.xs.0, self.ys.1, i), sample(self.xs.1, self.ys.1, i));
+				*o += bi_interpolate_vec2(self.t, self.range_in, out_top, out_bottom, mode);
+			}
 		}
 	}
 }

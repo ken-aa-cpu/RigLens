@@ -23,7 +23,20 @@ pub(crate) enum BottomTab {
 pub(crate) struct CurveDragState {
 	pub(crate) param_name: String,
 	pub(crate) target: u8,
-	pub(crate) frame: i32,
+	pub(crate) kf_idx: usize,
+}
+
+fn relocate_keyframe_sorted(kfs: &mut [riglens_core::animation::Keyframe], mut idx: usize) -> usize {
+	let f = kfs[idx].frame;
+	while idx > 0 && kfs[idx - 1].frame > f {
+		kfs.swap(idx - 1, idx);
+		idx -= 1;
+	}
+	while idx + 1 < kfs.len() && kfs[idx + 1].frame < f {
+		kfs.swap(idx, idx + 1);
+		idx += 1;
+	}
+	idx
 }
 
 impl Inox2dStudioApp {
@@ -218,7 +231,12 @@ impl Inox2dStudioApp {
 		if let Some((ref kp_name, kp_t, kp_f)) = self.selected_keyframe.clone() {
 			if kp_name == &sel_pname && kp_t == sel_target {
 				let mut t_val = cur_tension;
-				if ctrl_ui.add(egui::Slider::new(&mut t_val, 0.0..=1.0).text("Tension")).changed() {
+				let r_tens = ctrl_ui.add(egui::Slider::new(&mut t_val, 0.0..=1.0).text("Tension"));
+				if r_tens.drag_started() || r_tens.gained_focus() {
+					self.begin_gesture_undo();
+				}
+				if r_tens.changed() {
+					self.begin_gesture_undo();
 					if let (Some(puuid), Some(anim)) = (
 						sel_uuid,
 						self.session.model.puppet.animations.get_mut(self.active_anim.as_str()),
@@ -226,10 +244,18 @@ impl Inox2dStudioApp {
 						if let Some(lane) = anim.lanes.iter_mut().find(|l| l.param_uuid == puuid && l.target == sel_target) {
 							if let Some(k) = lane.keyframes.iter_mut().find(|k| k.frame == kp_f) {
 								k.tension = t_val;
+								self.apply_anim_at_playhead();
 								self.session.revision += 1;
+								self.cached_rev = u64::MAX;
 							}
 						}
 					}
+					if !r_tens.dragged() && !r_tens.has_focus() {
+						self.finish_gesture_undo();
+					}
+				}
+				if r_tens.drag_stopped() || r_tens.lost_focus() {
+					self.finish_gesture_undo();
 				}
 			}
 		}
@@ -345,17 +371,18 @@ impl Inox2dStudioApp {
 		}
 		if g_resp.drag_started() {
 			if let Some(ptr) = g_resp.interact_pointer_pos() {
-				if let Some(kf) = kfs
+				if let Some((idx, kf)) = kfs
 					.1
 					.iter()
-					.find(|k| pos2(f_to_x(k.frame as f32), val_to_y(k.value)).distance(ptr) < 11.0)
+					.enumerate()
+					.find(|(_, k)| pos2(f_to_x(k.frame as f32), val_to_y(k.value)).distance(ptr) < 11.0)
 				{
 					self.begin_gesture_undo();
 					self.selected_keyframe = Some((sel_pname.clone(), sel_target, kf.frame));
 					self.curve_drag = Some(CurveDragState {
 						param_name: sel_pname.clone(),
 						target: sel_target,
-						frame: kf.frame,
+						kf_idx: idx,
 					});
 				}
 			}
@@ -373,16 +400,17 @@ impl Inox2dStudioApp {
 						.iter_mut()
 						.find(|l| l.param_uuid == puuid && l.target == cd.target)
 					{
-						if let Some(k) = lane.keyframes.iter_mut().find(|k| k.frame == cd.frame) {
-							k.frame = nf;
-							k.value = nv;
-							cd.frame = nf;
-							lane.keyframes.sort_by_key(|k| k.frame);
-							self.selected_keyframe = Some((cd.param_name.clone(), cd.target, nf));
-							self.playhead_frame = nf as f32;
-							self.apply_anim_at_playhead();
-							self.session.revision += 1;
-							self.cached_rev = u64::MAX;
+						if let Some(k) = lane.keyframes.get_mut(cd.kf_idx) {
+							if k.frame != nf || (k.value - nv).abs() > 1e-6 {
+								k.frame = nf;
+								k.value = nv;
+								cd.kf_idx = relocate_keyframe_sorted(&mut lane.keyframes, cd.kf_idx);
+								self.selected_keyframe = Some((cd.param_name.clone(), cd.target, nf));
+								self.playhead_frame = nf as f32;
+								self.apply_anim_at_playhead();
+								self.session.revision += 1;
+								self.cached_rev = u64::MAX;
+							}
 						}
 					}
 				}
@@ -395,11 +423,15 @@ impl Inox2dStudioApp {
 
 	pub(crate) fn draw_bottom_dock(&mut self, ui: &mut egui::Ui) {
 		ui.horizontal(|ui| {
-			let t_btn = egui::SelectableLabel::new(self.bottom_tab == BottomTab::Timeline, "Timeline");
+			let lbl_timeline = self.i18n.t("timeline.tab_timeline").to_owned();
+			let lbl_curves = self.i18n.t("timeline.tab_curves").to_owned();
+			let lbl_loop = self.i18n.t("timeline.loop").to_owned();
+			let lbl_add_key = self.i18n.t("timeline.add_key").to_owned();
+			let t_btn = egui::SelectableLabel::new(self.bottom_tab == BottomTab::Timeline, lbl_timeline);
 			if ui.add(t_btn).clicked() {
 				self.bottom_tab = BottomTab::Timeline;
 			}
-			let m_btn = egui::SelectableLabel::new(self.bottom_tab == BottomTab::MotionCurves, "Curves");
+			let m_btn = egui::SelectableLabel::new(self.bottom_tab == BottomTab::MotionCurves, lbl_curves);
 			if ui.add(m_btn).clicked() {
 				self.bottom_tab = BottomTab::MotionCurves;
 			}
@@ -463,7 +495,7 @@ impl Inox2dStudioApp {
 				self.playhead_frame += 1.0;
 				self.apply_anim_at_playhead();
 			}
-			ui.checkbox(&mut self.loop_anim, "Loop");
+			ui.checkbox(&mut self.loop_anim, lbl_loop);
 
 			ui.label(
 				egui::RichText::new(format!(
@@ -476,7 +508,7 @@ impl Inox2dStudioApp {
 				.color(TEXT_MUTED),
 			);
 			if ui
-				.small_button("+Key")
+				.small_button(lbl_add_key)
 				.on_hover_text("Insert keyframe at playhead (F6)")
 				.clicked()
 			{
@@ -650,7 +682,7 @@ impl Inox2dStudioApp {
 			let ruler_resp = ui.interact(ruler_rect, ui.id().with("timeline_ruler"), Sense::click_and_drag());
 			if ruler_resp.clicked() || ruler_resp.dragged() {
 				if let Some(p) = ruler_resp.interact_pointer_pos() {
-					let f = (((p.x - right_rect.left()) / px_per_frame) + 1.0).clamp(1.0, anim_len as f32);
+					let f = (((p.x - right_rect.left() - 12.0) / px_per_frame) + 1.0).clamp(1.0, anim_len as f32);
 					self.playing = false;
 					self.playhead_frame = f;
 					self.apply_anim_at_playhead();
@@ -688,7 +720,7 @@ impl Inox2dStudioApp {
 				.collect();
 			let anim_opt = self.session.model.puppet.animations.get(self.active_anim.as_str()).cloned();
 			let span_w = (anim_len as f32 * px_per_frame).min(right_rect.width() - 24.0).max(40.0);
-			let mut kf_hits: Vec<(egui::Pos2, String, u8, i32)> = Vec::new();
+			let mut kf_hits: Vec<(egui::Pos2, String, u8, i32, usize)> = Vec::new();
 
 			for (idx, (uid, name, _, _, _, _, _, _, _, _, _)) in nodes_list.iter().enumerate() {
 				let y = right_rect.top() + ruler_h + idx as f32 * (row_h + 2.0) + 3.0;
@@ -715,13 +747,13 @@ impl Inox2dStudioApp {
 				if let Some(ref anim) = anim_opt {
 					if let Some(lane) = anim.lanes.iter().find(|l| bound_params.contains(&l.param_uuid)) {
 						let pname = uuid_to_name.get(&lane.param_uuid).cloned().unwrap_or_default();
-						for kf in &lane.keyframes {
+						for (k_idx, kf) in lane.keyframes.iter().enumerate() {
 							let kx = right_rect.left() + (kf.frame.max(1) - 1) as f32 * px_per_frame + 12.0;
 							if kx > bar_rect.right() - 2.0 {
 								continue;
 							}
 							let kc = pos2(kx, bar_rect.center().y);
-							kf_hits.push((kc, pname.clone(), lane.target, kf.frame));
+							kf_hits.push((kc, pname.clone(), lane.target, kf.frame, k_idx));
 							let is_kf_sel = self.selected_keyframe.as_ref() == Some(&(pname.clone(), lane.target, kf.frame));
 							let d = if is_kf_sel { 4.8 } else { 3.6 };
 							let diamond = vec![kc + vec2(0.0, -d), kc + vec2(d, 0.0), kc + vec2(0.0, d), kc + vec2(-d, 0.0)];
@@ -742,7 +774,7 @@ impl Inox2dStudioApp {
 			let tr_resp = ui.interact(tracks_rect, ui.id().with("timeline_tracks_drag"), Sense::click_and_drag());
 			if tr_resp.clicked() {
 				if let Some(ptr) = tr_resp.interact_pointer_pos() {
-					if let Some((_, pname, tgt, f)) = kf_hits.iter().find(|(kc, _, _, _)| kc.distance(ptr) < 10.0) {
+					if let Some((_, pname, tgt, f, _)) = kf_hits.iter().find(|(kc, _, _, _, _)| kc.distance(ptr) < 10.0) {
 						self.selected_curve_lane = Some((pname.clone(), *tgt));
 						self.selected_keyframe = Some((pname.clone(), *tgt, *f));
 						self.playhead_frame = (*f).max(1) as f32;
@@ -752,14 +784,14 @@ impl Inox2dStudioApp {
 			}
 			if tr_resp.drag_started() {
 				if let Some(ptr) = tr_resp.interact_pointer_pos() {
-					if let Some((_, pname, tgt, f)) = kf_hits.iter().find(|(kc, _, _, _)| kc.distance(ptr) < 11.0) {
+					if let Some((_, pname, tgt, f, k_idx)) = kf_hits.iter().find(|(kc, _, _, _, _)| kc.distance(ptr) < 11.0) {
 						self.begin_gesture_undo();
 						self.selected_curve_lane = Some((pname.clone(), *tgt));
 						self.selected_keyframe = Some((pname.clone(), *tgt, *f));
 						self.curve_drag = Some(CurveDragState {
 							param_name: pname.clone(),
 							target: *tgt,
-							frame: *f,
+							kf_idx: *k_idx,
 						});
 					}
 				}
@@ -778,15 +810,16 @@ impl Inox2dStudioApp {
 							.iter_mut()
 							.find(|l| l.param_uuid == puuid && l.target == cd.target)
 						{
-							if let Some(k) = lane.keyframes.iter_mut().find(|k| k.frame == cd.frame) {
-								k.frame = nf;
-								cd.frame = nf;
-								lane.keyframes.sort_by_key(|k| k.frame);
-								self.selected_keyframe = Some((cd.param_name.clone(), cd.target, nf));
-								self.playhead_frame = nf as f32;
-								self.apply_anim_at_playhead();
-								self.session.revision += 1;
-								self.cached_rev = u64::MAX;
+							if let Some(k) = lane.keyframes.get_mut(cd.kf_idx) {
+								if k.frame != nf {
+									k.frame = nf;
+									cd.kf_idx = relocate_keyframe_sorted(&mut lane.keyframes, cd.kf_idx);
+									self.selected_keyframe = Some((cd.param_name.clone(), cd.target, nf));
+									self.playhead_frame = nf as f32;
+									self.apply_anim_at_playhead();
+									self.session.revision += 1;
+									self.cached_rev = u64::MAX;
+								}
 							}
 						}
 					}

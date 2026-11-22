@@ -50,11 +50,16 @@ impl DeformStack {
 			.entry(src)
 			.and_modify(|enabled_deform| {
 				if enabled_deform.0 {
-					panic!("A same source submitted deform twice for a same node within one frame.")
-				}
-				enabled_deform.0 = true;
+					let Deform::Direct(ref mut existing) = enabled_deform.1;
+					let Deform::Direct(ref incoming) = deform;
+					for (e, &inc) in existing.iter_mut().zip(incoming.iter()) {
+						*e += inc;
+					}
+				} else {
+					enabled_deform.0 = true;
 
-				swap(&mut enabled_deform.1, &mut deform);
+					swap(&mut enabled_deform.1, &mut deform);
+				}
 			})
 			.or_insert((true, deform));
 	}

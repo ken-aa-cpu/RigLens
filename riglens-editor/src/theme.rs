@@ -75,9 +75,14 @@ pub fn configure_craft_theme(ctx: &egui::Context) {
 fn install_cjk_fallback_fonts(ctx: &egui::Context) {
 	let candidates: &[(&str, &str)] = &[
 		("cjk_msjh", r"C:\Windows\Fonts\msjh.ttc"),
+		("cjk_msyh", r"C:\Windows\Fonts\msyh.ttc"),
 		("cjk_malgun", r"C:\Windows\Fonts\malgun.ttf"),
 		("cjk_meiryo", r"C:\Windows\Fonts\meiryo.ttc"),
 		("cjk_yugoth", r"C:\Windows\Fonts\YuGothR.ttc"),
+		("cjk_pingfang_mac", "/System/Library/Fonts/PingFang.ttc"),
+		("cjk_hiragino_gb_mac", "/System/Library/Fonts/Hiragino Sans GB.ttc"),
+		("cjk_hiragino_w3_mac", "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"),
+		("cjk_apple_gothic_mac", "/System/Library/Fonts/AppleSDGothicNeo.ttc"),
 		("cjk_noto_linux", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
 		("cjk_noto_linux2", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
 	];

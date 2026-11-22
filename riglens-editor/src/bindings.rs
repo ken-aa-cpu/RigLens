@@ -8,7 +8,7 @@ use riglens_core::node::components::{
 use riglens_core::node::InoxNodeUuid;
 use riglens_core::params::BindingValues;
 use riglens_mcp::engine::{ModelSnapshot, Session};
-use riglens_mcp::rig::binding_kind_name;
+use riglens_mcp::rig::{binding_kind_name, set_scalar_binding_keypoint};
 use json::JsonValue;
 
 use crate::theme::{
@@ -31,6 +31,7 @@ pub enum InspectorAction {
 		ok_label: String,
 	},
 	TouchRevision,
+	RefreshView,
 	FinishGestureUndo,
 	RefreshAudit,
 	SelectNode(InoxNodeUuid),
@@ -50,6 +51,7 @@ pub struct BindingEditorState {
 	pub rename_buf: String,
 	pub rename_node_id: Option<InoxNodeUuid>,
 	pub copied_kp: Option<(InoxNodeUuid, String, usize, usize)>,
+	pub tint_editing: bool,
 }
 
 impl Default for BindingEditorState {
@@ -66,6 +68,7 @@ impl Default for BindingEditorState {
 			rename_buf: String::new(),
 			rename_node_id: None,
 			copied_kp: None,
+			tint_editing: false,
 		}
 	}
 }
@@ -82,8 +85,9 @@ const SCALAR_KINDS: [&str; 9] = [
 	"Opacity",
 ];
 
-fn begin_gesture(session: &Session, snap: &mut Option<ModelSnapshot>) {
+fn begin_gesture(session: &Session, snap: &mut Option<ModelSnapshot>, start_rev: &mut u64) {
 	if snap.is_none() {
+		*start_rev = session.revision;
 		*snap = Some(session.snapshot());
 	}
 }
@@ -94,14 +98,16 @@ pub fn draw_properties_tab(
 	selected_node: Option<InoxNodeUuid>,
 	state: &mut BindingEditorState,
 	gesture_snap: &mut Option<ModelSnapshot>,
+	gesture_start_rev: &mut u64,
+	i18n: &crate::i18n::I18n,
 ) -> Vec<InspectorAction> {
 	let mut actions = Vec::new();
-	section_header(ui, "Node Properties", None);
+	section_header(ui, i18n.t("insp.node_properties"), None);
 	ui.add_space(4.0);
 
 	let Some(id) = selected_node else {
 		ui.label(
-			egui::RichText::new("Select a node in the Hierarchy or Stage.")
+			egui::RichText::new(i18n.t("insp.select_node"))
 				.color(TEXT_MUTED)
 				.size(11.0),
 		);
@@ -109,7 +115,7 @@ pub fn draw_properties_tab(
 	};
 
 	let Some(node) = session.model.puppet.nodes.get_node(id).cloned() else {
-		ui.label(egui::RichText::new("Selected node no longer exists.").color(TEXT_MUTED).size(11.0));
+		ui.label(egui::RichText::new(i18n.t("insp.missing_node")).color(TEXT_MUTED).size(11.0));
 		return actions;
 	};
 
@@ -178,7 +184,7 @@ pub fn draw_properties_tab(
 		.num_columns(2)
 		.spacing([8.0, 5.0])
 		.show(ui, |ui| {
-			ui.label(egui::RichText::new("Name").color(TEXT_MUTED).size(11.0));
+			ui.label(egui::RichText::new(i18n.t("insp.name")).color(TEXT_MUTED).size(11.0));
 			ui.horizontal(|ui| {
 				let nr = ui.add_sized([132.0, 18.0], egui::TextEdit::singleline(&mut state.rename_buf));
 				let commit_rename = (nr.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)))
@@ -196,7 +202,7 @@ pub fn draw_properties_tab(
 			ui.end_row();
 
 			if !is_root {
-				ui.label(egui::RichText::new("Parent").color(TEXT_MUTED).size(11.0));
+				ui.label(egui::RichText::new(i18n.t("insp.parent")).color(TEXT_MUTED).size(11.0));
 				egui::ComboBox::from_id_source("prop_parent_combo")
 					.selected_text(&cur_parent_name)
 					.width(150.0)
@@ -214,10 +220,10 @@ pub fn draw_properties_tab(
 				ui.end_row();
 			}
 
-			ui.label(egui::RichText::new("Flags").color(TEXT_MUTED).size(11.0));
+			ui.label(egui::RichText::new(i18n.t("insp.flags")).color(TEXT_MUTED).size(11.0));
 			ui.horizontal(|ui| {
 				let mut enabled = node.enabled;
-				if ui.checkbox(&mut enabled, "Visible").changed() {
+				if ui.checkbox(&mut enabled, i18n.t("insp.visible")).changed() {
 					actions.push(InspectorAction::ExecCmd {
 						cmd: "node.configure",
 						params: json::object! { node_uuid: id.0, enabled: enabled },
@@ -225,7 +231,7 @@ pub fn draw_properties_tab(
 					});
 				}
 				let mut ltr = node.lock_to_root;
-				if ui.checkbox(&mut ltr, "LockRoot").changed() {
+				if ui.checkbox(&mut ltr, i18n.t("insp.lock_root")).changed() {
 					actions.push(InspectorAction::ExecCmd {
 						cmd: "node.configure",
 						params: json::object! { node_uuid: id.0, lock_to_root: ltr },
@@ -235,17 +241,15 @@ pub fn draw_properties_tab(
 			});
 			ui.end_row();
 
-			ui.label(egui::RichText::new("Offset").color(TEXT_MUTED).size(11.0));
+			ui.label(egui::RichText::new(i18n.t("insp.offset")).color(TEXT_MUTED).size(11.0));
 			ui.horizontal(|ui| {
 				let rx = ui.add(egui::DragValue::new(&mut tx).speed(0.5).prefix("X:"));
 				let ry = ui.add(egui::DragValue::new(&mut ty).speed(0.5).prefix("Y:"));
-				for r in [&rx, &ry] {
-					if r.drag_started() || r.gained_focus() {
-						begin_gesture(session, gesture_snap);
-					}
+				if rx.drag_started() || ry.drag_started() {
+					begin_gesture(session, gesture_snap, gesture_start_rev);
 				}
 				if rx.changed() || ry.changed() {
-					begin_gesture(session, gesture_snap);
+					begin_gesture(session, gesture_snap, gesture_start_rev);
 					if let Some(n) = session.model.puppet.nodes.get_node_mut(id) {
 						n.trans_offset.translation.x = tx;
 						n.trans_offset.translation.y = ty;
@@ -263,17 +267,15 @@ pub fn draw_properties_tab(
 			});
 			ui.end_row();
 
-			ui.label(egui::RichText::new("Scale").color(TEXT_MUTED).size(11.0));
+			ui.label(egui::RichText::new(i18n.t("insp.scale")).color(TEXT_MUTED).size(11.0));
 			ui.horizontal(|ui| {
 				let rsx = ui.add(egui::DragValue::new(&mut sx).speed(0.01).range(0.05..=10.0).prefix("X:"));
 				let rsy = ui.add(egui::DragValue::new(&mut sy).speed(0.01).range(0.05..=10.0).prefix("Y:"));
-				for r in [&rsx, &rsy] {
-					if r.drag_started() || r.gained_focus() {
-						begin_gesture(session, gesture_snap);
-					}
+				if rsx.drag_started() || rsy.drag_started() {
+					begin_gesture(session, gesture_snap, gesture_start_rev);
 				}
 				if rsx.changed() || rsy.changed() {
-					begin_gesture(session, gesture_snap);
+					begin_gesture(session, gesture_snap, gesture_start_rev);
 					if let Some(n) = session.model.puppet.nodes.get_node_mut(id) {
 						n.trans_offset.scale.x = sx;
 						n.trans_offset.scale.y = sy;
@@ -291,17 +293,15 @@ pub fn draw_properties_tab(
 			});
 			ui.end_row();
 
-			ui.label(egui::RichText::new("Rot / Z").color(TEXT_MUTED).size(11.0));
+			ui.label(egui::RichText::new(i18n.t("insp.rot_z")).color(TEXT_MUTED).size(11.0));
 			ui.horizontal(|ui| {
 				let rrot = ui.add(egui::DragValue::new(&mut rz_deg).speed(0.5).suffix(" deg"));
 				let rz = ui.add(egui::DragValue::new(&mut zsort).speed(0.25).prefix("Z:"));
-				for r in [&rrot, &rz] {
-					if r.drag_started() || r.gained_focus() {
-						begin_gesture(session, gesture_snap);
-					}
+				if rrot.drag_started() || rz.drag_started() {
+					begin_gesture(session, gesture_snap, gesture_start_rev);
 				}
 				if rrot.changed() || rz.changed() {
-					begin_gesture(session, gesture_snap);
+					begin_gesture(session, gesture_snap, gesture_start_rev);
 					if let Some(n) = session.model.puppet.nodes.get_node_mut(id) {
 						n.trans_offset.rotation.z = rz_deg.to_radians();
 						n.zsort = zsort;
@@ -322,18 +322,18 @@ pub fn draw_properties_tab(
 
 	if let Some(drw) = drawable_opt {
 		ui.add_space(4.0);
-		section_header(ui, "Drawable & Blending", None);
+		section_header(ui, i18n.t("insp.drawable_blending"), None);
 		ui.add_space(3.0);
 
 		let mut op = drw.blending.opacity;
 		ui.horizontal(|ui| {
-			ui.label(egui::RichText::new("Opacity").color(TEXT_MUTED).size(11.0));
+			ui.label(egui::RichText::new(i18n.t("insp.opacity")).color(TEXT_MUTED).size(11.0));
 			let rop = ui.add(egui::Slider::new(&mut op, 0.0..=1.0));
-			if rop.drag_started() || rop.gained_focus() {
-				begin_gesture(session, gesture_snap);
+			if rop.drag_started() {
+				begin_gesture(session, gesture_snap, gesture_start_rev);
 			}
 			if rop.changed() {
-				begin_gesture(session, gesture_snap);
+				begin_gesture(session, gesture_snap, gesture_start_rev);
 				if let Some(d) = session.model.puppet.node_comps.get_mut::<Drawable>(id) {
 					d.blending.opacity = op.clamp(0.0, 1.0);
 				}
@@ -348,7 +348,7 @@ pub fn draw_properties_tab(
 		});
 
 		ui.horizontal(|ui| {
-			ui.label(egui::RichText::new("Blend").color(TEXT_MUTED).size(11.0));
+			ui.label(egui::RichText::new(i18n.t("insp.blend")).color(TEXT_MUTED).size(11.0));
 			egui::ComboBox::from_id_source("prop_blend_combo")
 				.selected_text(drw.blending.mode.as_str())
 				.width(120.0)
@@ -363,14 +363,24 @@ pub fn draw_properties_tab(
 						}
 					}
 				});
-			ui.label(egui::RichText::new("Tint").color(TEXT_MUTED).size(11.0));
+			ui.label(egui::RichText::new(i18n.t("insp.tint")).color(TEXT_MUTED).size(11.0));
 			let mut rgb = [drw.blending.tint.x, drw.blending.tint.y, drw.blending.tint.z];
-			if ui.color_edit_button_rgb(&mut rgb).changed() {
-				actions.push(InspectorAction::ExecCmd {
-					cmd: "node.configure",
-					params: json::object! { node_uuid: id.0, tint: [rgb[0], rgb[1], rgb[2]] },
-					ok_label: "Updated drawable tint".to_owned(),
-				});
+			let rtint = ui.color_edit_button_rgb(&mut rgb);
+			if rtint.changed() {
+				begin_gesture(session, gesture_snap, gesture_start_rev);
+				state.tint_editing = true;
+				if let Some(d) = session.model.puppet.node_comps.get_mut::<Drawable>(id) {
+					d.blending.tint = glam::vec3(rgb[0], rgb[1], rgb[2]);
+				}
+				actions.push(InspectorAction::TouchRevision);
+			}
+			if state.tint_editing
+				&& !ui.ctx().memory(|m| m.any_popup_open())
+				&& !rtint.has_focus()
+				&& !ui.ctx().input(|i| i.pointer.any_down())
+			{
+				state.tint_editing = false;
+				actions.push(InspectorAction::FinishGestureUndo);
 			}
 		});
 
@@ -378,7 +388,7 @@ pub fn draw_properties_tab(
 		let masks_vec = drw.masks.as_ref().map(|m| m.masks.clone()).unwrap_or_default();
 		let mut threshold = drw.masks.as_ref().map(|m| m.threshold).unwrap_or(0.1);
 		let mask_badge = format!("{}", masks_vec.len());
-		section_header(ui, "Clipping Masks", Some((&mask_badge, AUDIT_WARN_AMBER)));
+		section_header(ui, i18n.t("insp.clipping_masks"), Some((&mask_badge, AUDIT_WARN_AMBER)));
 		ui.add_space(3.0);
 
 		let build_mask_sources_json = |items: &[(InoxNodeUuid, MaskMode)]| -> JsonValue {
@@ -441,17 +451,25 @@ pub fn draw_properties_tab(
 		}
 		if !pairs.is_empty() {
 			ui.horizontal(|ui| {
-				ui.label(egui::RichText::new("Thresh").color(TEXT_MUTED).size(10.5));
-				if ui.add(egui::Slider::new(&mut threshold, 0.0..=1.0)).changed() {
-					actions.push(InspectorAction::ExecCmd {
-						cmd: "node.set_mask",
-						params: json::object! {
-							node_uuid: id.0,
-							sources: build_mask_sources_json(&pairs),
-							threshold: threshold
-						},
-						ok_label: "Updated mask threshold".to_owned(),
-					});
+				ui.label(egui::RichText::new(i18n.t("insp.thresh")).color(TEXT_MUTED).size(10.5));
+				let rt = ui.add(egui::Slider::new(&mut threshold, 0.0..=1.0));
+				if rt.drag_started() {
+					begin_gesture(session, gesture_snap, gesture_start_rev);
+				}
+				if rt.changed() {
+					begin_gesture(session, gesture_snap, gesture_start_rev);
+					if let Some(d) = session.model.puppet.node_comps.get_mut::<Drawable>(id) {
+						if let Some(ref mut masks) = d.masks {
+							masks.threshold = threshold.clamp(0.0, 1.0);
+						}
+					}
+					actions.push(InspectorAction::TouchRevision);
+					if !rt.dragged() && !rt.has_focus() {
+						actions.push(InspectorAction::FinishGestureUndo);
+					}
+				}
+				if rt.drag_stopped() || rt.lost_focus() {
+					actions.push(InspectorAction::FinishGestureUndo);
 				}
 			});
 		}
@@ -473,7 +491,7 @@ pub fn draw_properties_tab(
 		let sel_cand_name = state
 			.mask_add_source
 			.and_then(|sid| mask_cands.iter().find(|(cid, _)| *cid == sid).map(|(_, n)| n.clone()))
-			.unwrap_or_else(|| "None".to_owned());
+			.unwrap_or_else(|| i18n.t("insp.none").to_owned());
 		ui.horizontal(|ui| {
 			egui::ComboBox::from_id_source("mask_add_combo")
 				.selected_text(sel_cand_name)
@@ -483,7 +501,7 @@ pub fn draw_properties_tab(
 						ui.selectable_value(&mut state.mask_add_source, Some(*cid), cname);
 					}
 				});
-			if ui.small_button("+ Add Mask").clicked() {
+			if ui.small_button(i18n.t("insp.add_mask")).clicked() {
 				if let Some(src) = state.mask_add_source {
 					let mut updated = pairs.clone();
 					if !updated.iter().any(|(s, _)| *s == src) {
@@ -572,6 +590,8 @@ pub fn draw_bindings_tab(
 	session: &mut Session,
 	selected_node: Option<InoxNodeUuid>,
 	state: &mut BindingEditorState,
+	gesture_snap: &mut Option<ModelSnapshot>,
+	gesture_start_rev: &mut u64,
 ) -> Vec<InspectorAction> {
 	let mut actions = Vec::new();
 	section_header(ui, "Bindings & Keypoints", None);
@@ -704,7 +724,7 @@ pub fn draw_bindings_tab(
 					let vx = param.min.x + (param.max.x - param.min.x) * ax;
 					let vy = param.min.y + (param.max.y - param.min.y) * ay;
 					session.param_overrides.insert(state.selected_param.clone(), vec2(vx, vy));
-					actions.push(InspectorAction::TouchRevision);
+					actions.push(InspectorAction::RefreshView);
 				}
 			}
 			ui.end_row();
@@ -856,19 +876,31 @@ pub fn draw_bindings_tab(
 						.size(10.5)
 						.color(if is_kp_set { AUDIT_OK_GREEN } else { TEXT_MUTED }),
 				);
-				if ui.add(egui::DragValue::new(&mut v).speed(0.05)).changed() {
-					actions.push(InspectorAction::ExecCmd {
-						cmd: "param.set_binding_keypoint",
-						params: json::object! {
-							node_uuid: node_id.0,
-							param: state.selected_param.as_str(),
-							kind: kind,
-							ix: cix,
-							iy: ciy,
-							value: v
-						},
-						ok_label: format!("Set {kind} ({cix},{ciy}) = {v:.2}"),
-					});
+				let r = ui.add(egui::DragValue::new(&mut v).speed(0.05));
+				if r.drag_started() {
+					begin_gesture(session, gesture_snap, gesture_start_rev);
+				}
+				if r.changed() {
+					begin_gesture(session, gesture_snap, gesture_start_rev);
+					if set_scalar_binding_keypoint(
+						&mut session.model.puppet,
+						node_id,
+						&state.selected_param,
+						cix,
+						ciy,
+						kind,
+						v,
+					)
+					.is_ok()
+					{
+						actions.push(InspectorAction::TouchRevision);
+					}
+					if !r.dragged() && !r.has_focus() {
+						actions.push(InspectorAction::FinishGestureUndo);
+					}
+				}
+				if r.drag_stopped() || r.lost_focus() {
+					actions.push(InspectorAction::FinishGestureUndo);
 				}
 				if ui.small_button("Clr").clicked() {
 					actions.push(InspectorAction::ExecCmd {

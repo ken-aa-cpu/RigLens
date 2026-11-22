@@ -34,6 +34,10 @@ pub enum InoxParseError {
 	InvalidMatrix2dData(#[from] Matrix2dFromSliceVecsError),
 	#[error("Unknown param map mode {0:?}")]
 	UnknownParamMapMode(String),
+	#[error("Unknown physics model {0:?}")]
+	UnknownPhysicsModel(String),
+	#[error("Expected at least 2 axis point arrays, got {0}")]
+	InvalidAxisPoints(usize),
 	#[error("Unknown mask mode {0:?}")]
 	UnknownMaskMode(String),
 	#[error("Unknown interpolate mode {0:?}")]
@@ -152,9 +156,9 @@ fn deserialize_simple_physics(obj: JsonObject) -> InoxParseResult<SimplePhysics>
 		param: ParamUuid(obj.get_u32("param")?),
 
 		model_type: match obj.get_str("model_type")? {
-			"Pendulum" => PhysicsModel::RigidPendulum,
+			"RigidPendulum" | "Pendulum" => PhysicsModel::RigidPendulum,
 			"SpringPendulum" => PhysicsModel::SpringPendulum,
-			a => todo!("{}", a),
+			unknown => return Err(InoxParseError::UnknownPhysicsModel(unknown.to_owned())),
 		},
 		map_mode: match obj.get_str("map_mode")? {
 			"AngleLength" => PhysicsParamMapMode::AngleLength,
@@ -265,7 +269,25 @@ fn deserialize_vec2s_flat(vals: &[json::JsonValue]) -> InoxParseResult<Vec<Vec2>
 		return Err(InoxParseError::OddNumberOfFloatsInList(vals.len()));
 	}
 
-	let floats = deserialize_f32s(vals);
+	let mut floats = Vec::with_capacity(vals.len());
+	for (idx, val) in vals.iter().enumerate() {
+		let Some(f) = val.as_f32() else {
+			return Err(InoxParseError::JsonError(JsonError::ErrorInList {
+				index: idx,
+				source: Box::new(JsonError::ValueIsNotNumber("vec2s_flat".to_owned())),
+			}));
+		};
+		if !f.is_finite() {
+			return Err(InoxParseError::JsonError(JsonError::ErrorInList {
+				index: idx,
+				source: Box::new(JsonError::ParseVec2Error {
+					key: "vec2s_flat".to_owned(),
+					msg: format!("non-finite float at index {idx}"),
+				}),
+			}));
+		}
+		floats.push(f);
+	}
 	let mut vertices = Vec::new();
 	vertices.extend_from_slice(f32s_as_vec2s(&floats));
 
@@ -320,6 +342,9 @@ impl Puppet {
 		if let Ok(anims_obj) = obj.get_object("animations") {
 			puppet.animations = deserialize_animations(anims_obj)?;
 		}
+		if let Ok(pg_list) = obj.get_list("pose_groups") {
+			puppet.pose_groups = deserialize_pose_groups(pg_list)?;
+		}
 
 		// Preserve what we do not model: parameter order/extras and top-level keys.
 		for p in obj.get_list("param")? {
@@ -337,7 +362,7 @@ impl Puppet {
 			}
 		}
 		for (k, v) in obj.0.iter() {
-			if !["meta", "physics", "nodes", "param", "animations"].contains(&k) {
+			if !["meta", "physics", "nodes", "param", "animations", "pose_groups"].contains(&k) {
 				puppet.top_extras.insert(k, v.clone());
 			}
 		}
@@ -579,7 +604,17 @@ impl Puppet {
 }
 
 /// Parameter keys this crate models; everything else is kept as extras.
-const PARAM_MANAGED_KEYS: &[&str] = &["uuid", "name", "is_vec2", "min", "max", "defaults", "axis_points", "bindings"];
+const PARAM_MANAGED_KEYS: &[&str] = &[
+	"uuid",
+	"name",
+	"is_vec2",
+	"min",
+	"max",
+	"defaults",
+	"axis_points",
+	"bindings",
+	"blend_shape_additive",
+];
 
 /// Per-node-type keys that this crate models; everything else is kept as extras (see `ExtraFields`).
 fn managed_keys_for_type(ty: &str) -> Option<&'static [&'static str]> {
@@ -742,6 +777,7 @@ fn managed_keys_for_type(ty: &str) -> Option<&'static [&'static str]> {
 			"grid_axis_y",
 			"formation",
 			"dynamic",
+			"translate_children",
 		],
 		"PathDeformer" | "BezierDeformer" => &[
 			"uuid",
@@ -866,9 +902,34 @@ fn deserialize_inner_binding_values(values: &[JsonValue]) -> Result<Matrix2d<f32
 }
 
 fn deserialize_axis_points(vals: &[json::JsonValue]) -> InoxParseResult<AxisPoints> {
+	if vals.len() < 2 {
+		return Err(InoxParseError::InvalidAxisPoints(vals.len()));
+	}
 	let x = deserialize_f32s(as_nested_list(0, &vals[0])?);
 	let y = deserialize_f32s(as_nested_list(1, &vals[1])?);
 	Ok(AxisPoints { x, y })
+}
+
+fn deserialize_pose_groups(vals: &[json::JsonValue]) -> InoxParseResult<Vec<crate::puppet::PoseGroup>> {
+	let mut groups = Vec::with_capacity(vals.len());
+	for (i, val) in vals.iter().enumerate() {
+		let obj = as_object(&format!("pose_groups[{i}]"), val)?;
+		let id = obj.get_str("id").unwrap_or("").to_owned();
+		let parts = obj
+			.get_list("parts")
+			.unwrap_or(&[])
+			.iter()
+			.filter_map(JsonValue::as_u32)
+			.map(InoxNodeUuid)
+			.collect();
+		let fade_seconds = obj.get_f32("fade_seconds").unwrap_or(0.0);
+		groups.push(crate::puppet::PoseGroup {
+			id,
+			parts,
+			fade_seconds,
+		});
+	}
+	Ok(groups)
 }
 
 fn deserialize_puppet_physics(obj: JsonObject) -> InoxParseResult<PuppetPhysics> {
@@ -985,4 +1046,29 @@ fn deserialize_animations(obj: JsonObject) -> InoxParseResult<HashMap<String, Pu
 		);
 	}
 	Ok(animations)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn deserialize_vec2s_flat_rejects_non_numeric_and_non_finite_values() {
+		let bad = vec![
+			json::JsonValue::from(1.0_f32),
+			json::JsonValue::from("oops"),
+			json::JsonValue::from(2.0_f32),
+			json::JsonValue::from(3.0_f32),
+		];
+		assert!(deserialize_vec2s_flat(&bad).is_err());
+
+		let nan_vals = vec![json::JsonValue::from(f32::NAN), json::JsonValue::from(0.0_f32)];
+		assert!(deserialize_vec2s_flat(&nan_vals).is_err());
+
+		let ok_vals = vec![
+			json::JsonValue::from(1.5_f32),
+			json::JsonValue::from(-2.5_f32),
+		];
+		assert_eq!(deserialize_vec2s_flat(&ok_vals).unwrap(), vec![vec2(1.5, -2.5)]);
+	}
 }

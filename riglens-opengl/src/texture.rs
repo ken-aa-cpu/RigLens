@@ -19,7 +19,11 @@ impl Texture {
 	}
 
 	pub fn from_raw_pixels(gl: &glow::Context, pixels: &[u8], width: u32, height: u32) -> Result<Self, TextureError> {
-		let bpp = 8 * (pixels.len() / (width as usize * height as usize)) as u32;
+		let pixel_count = (width as usize).saturating_mul(height as usize);
+		if pixel_count == 0 {
+			return Err(TextureError("Texture dimensions must be non-zero".to_owned()));
+		}
+		let bpp = 8 * (pixels.len() / pixel_count) as u32;
 
 		let tex = unsafe { gl.create_texture().map_err(TextureError)? };
 		unsafe {
@@ -80,6 +84,10 @@ impl Texture {
 
 	pub fn bpp(&self) -> u32 {
 		self.bpp
+	}
+
+	pub fn delete(self, gl: &glow::Context) {
+		unsafe { gl.delete_texture(self.tex) };
 	}
 }
 

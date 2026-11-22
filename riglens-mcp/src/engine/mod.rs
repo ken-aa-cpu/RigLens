@@ -239,7 +239,7 @@ impl Session {
 			});
 		}
 
-		let snap = if Self::is_mutating_cmd(cmd) {
+		let snap = if Self::is_mutating_cmd(cmd) && params["push_undo"].as_bool().unwrap_or(true) {
 			Some(self.snapshot())
 		} else {
 			None

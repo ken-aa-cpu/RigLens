@@ -41,6 +41,10 @@ impl<T> Matrix2d<T> {
 		self.data.get_mut(iy * self.width + ix)
 	}
 
+	pub fn any(&self, f: impl FnMut(&T) -> bool) -> bool {
+		self.data.iter().any(f)
+	}
+
 	pub fn to_vec_vecs(&self) -> Vec<Vec<T>>
 	where
 		T: Clone,

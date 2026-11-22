@@ -42,16 +42,18 @@ pub struct AxisPoints {
 	pub y: Vec<f32>,
 }
 
-fn ranges_out(
-	matrix: &Matrix2d<f32>,
-	x_mindex: usize,
-	x_maxdex: usize,
-	y_mindex: usize,
-	y_maxdex: usize,
-) -> (InterpRange<f32>, InterpRange<f32>) {
-	let out_top = InterpRange::new(matrix[(x_mindex, y_mindex)], matrix[(x_maxdex, y_mindex)]);
-	let out_btm = InterpRange::new(matrix[(x_mindex, y_maxdex)], matrix[(x_maxdex, y_maxdex)]);
-	(out_top, out_btm)
+fn find_axis_cell(axis: &[f32], t: f32) -> (usize, usize) {
+	let last_idx = axis.len().saturating_sub(1);
+	if last_idx == 0 {
+		return (0, 0);
+	}
+	match axis.binary_search_by(|a| a.total_cmp(&t)) {
+		Ok(ind) if ind >= last_idx => (last_idx - 1, last_idx),
+		Ok(ind) => (ind, ind + 1),
+		Err(0) => (0, 0),
+		Err(ind) if ind > last_idx => (last_idx, last_idx),
+		Err(ind) => (ind - 1, ind),
+	}
 }
 
 fn deform_vertex_count(comps: &World, id: InoxNodeUuid) -> Option<usize> {
@@ -103,34 +105,16 @@ impl Param {
 		);
 
 		// calculate axis point indexes
-		let (x_mindex, x_maxdex) = {
-			let x_temp = self.axis_points.x.binary_search_by(|a| a.total_cmp(&val_normed.x));
-
-			let last_idx = self.axis_points.x.len() - 1;
-
-			match x_temp {
-				Ok(_) | Err(_) if last_idx == 0 => (last_idx, last_idx),
-				Ok(ind) if ind >= last_idx => (last_idx - 1, last_idx),
-				Ok(ind) => (ind, ind + 1),
-				Err(ind) => (ind - 1, ind),
-			}
-		};
-
-		let (y_mindex, y_maxdex) = {
-			let y_temp = self.axis_points.y.binary_search_by(|a| a.total_cmp(&val_normed.y));
-
-			let last_idx = self.axis_points.y.len() - 1;
-
-			match y_temp {
-				Ok(_) | Err(_) if last_idx == 0 => (last_idx, last_idx),
-				Ok(ind) if ind >= last_idx => (last_idx - 1, last_idx),
-				Ok(ind) => (ind, ind + 1),
-				Err(ind) => (ind - 1, ind),
-			}
-		};
+		let (x_mindex, x_maxdex) = find_axis_cell(&self.axis_points.x, val_normed.x);
+		let (y_mindex, y_maxdex) = find_axis_cell(&self.axis_points.y, val_normed.y);
+		let x_last = self.axis_points.x.len() - 1;
+		let y_last = self.axis_points.y.len() - 1;
 
 		// Apply offset on each binding
 		for binding in &self.bindings {
+			if !binding.is_set.any(|&v| v) {
+				continue;
+			}
 			let range_in = InterpRange::new(
 				vec2(self.axis_points.x[x_mindex], self.axis_points.y[y_mindex]),
 				vec2(self.axis_points.x[x_maxdex], self.axis_points.y[y_maxdex]),
@@ -143,15 +127,32 @@ impl Param {
 				range_in,
 				xs: (x_mindex, x_maxdex),
 				ys: (y_mindex, y_maxdex),
-				x_last: self.axis_points.x.len() - 1,
-				y_last: self.axis_points.y.len() - 1,
+				x_last,
+				y_last,
+			};
+
+			let eval_scalar = |matrix: &Matrix2d<f32>, neutral: f32| -> f32 {
+				cell.f32_sampled(
+					|x, y| {
+						if binding.is_set.get(x, y).copied().unwrap_or(false) {
+							matrix[(x, y)]
+						} else {
+							neutral
+						}
+					},
+					binding.interpolate_mode,
+				)
 			};
 
 			match binding.values {
 				BindingValues::ZSort(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
+					if matrix.get(x_last, y_last).is_none() {
+						tracing::warn!(param = %self.name, node_uuid = binding.node.0, "Param ZSort matrix smaller than axis_points; skipping.");
+						continue;
+					}
+					let val = eval_scalar(matrix, 0.0);
 					if let Some(zsort) = comps.get_mut::<ZSort>(binding.node) {
-						zsort.0 += cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
+						zsort.0 += val;
 					} else {
 						tracing::warn!(
 							param = %self.name,
@@ -167,8 +168,16 @@ impl Param {
 				| BindingValues::TransformRX(ref matrix)
 				| BindingValues::TransformRY(ref matrix)
 				| BindingValues::TransformRZ(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-					let val = cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
+					if matrix.get(x_last, y_last).is_none() {
+						tracing::warn!(param = %self.name, node_uuid = binding.node.0, "Param Transform matrix smaller than axis_points; skipping.");
+						continue;
+					}
+					let is_scale = matches!(
+						binding.values,
+						BindingValues::TransformSX(_) | BindingValues::TransformSY(_)
+					);
+					let neutral = if is_scale && !self.additive { 1.0 } else { 0.0 };
+					let val = eval_scalar(matrix, neutral);
 					let Some(ts) = comps.get_mut::<TransformStore>(binding.node) else {
 						tracing::warn!(
 							param = %self.name,
@@ -180,8 +189,20 @@ impl Param {
 					match binding.values {
 						BindingValues::TransformTX(_) => ts.relative.translation.x += val,
 						BindingValues::TransformTY(_) => ts.relative.translation.y += val,
-						BindingValues::TransformSX(_) => ts.relative.scale.x *= val,
-						BindingValues::TransformSY(_) => ts.relative.scale.y *= val,
+						BindingValues::TransformSX(_) => {
+							if self.additive {
+								ts.relative.scale.x += val;
+							} else {
+								ts.relative.scale.x *= val;
+							}
+						}
+						BindingValues::TransformSY(_) => {
+							if self.additive {
+								ts.relative.scale.y += val;
+							} else {
+								ts.relative.scale.y *= val;
+							}
+						}
 						BindingValues::TransformRX(_) => ts.relative.rotation.x += val,
 						BindingValues::TransformRY(_) => ts.relative.rotation.y += val,
 						BindingValues::TransformRZ(_) => ts.relative.rotation.z += val,
@@ -189,14 +210,10 @@ impl Param {
 					}
 				}
 				BindingValues::Deform(ref matrix) => {
-					let out_top = InterpRange::new(
-						matrix[(x_mindex, y_mindex)].as_slice(),
-						matrix[(x_maxdex, y_mindex)].as_slice(),
-					);
-					let out_bottom = InterpRange::new(
-						matrix[(x_mindex, y_maxdex)].as_slice(),
-						matrix[(x_maxdex, y_maxdex)].as_slice(),
-					);
+					if matrix.get(x_last, y_last).is_none() {
+						tracing::warn!(param = %self.name, node_uuid = binding.node.0, "Param Deform matrix smaller than axis_points; skipping.");
+						continue;
+					}
 
 					// deform specified by a parameter must be direct, i.e., in the form of displacements of all vertices
 					let direct_deform = {
@@ -216,7 +233,17 @@ impl Param {
 
 						let mut direct_deform: Vec<Vec2> = vec![Vec2::ZERO; vert_len];
 
-						cell.vec2s_additive(matrix, out_top, out_bottom, binding.interpolate_mode, &mut direct_deform);
+						cell.vec2s_additive_sampled(
+							|x, y, i| {
+								if binding.is_set.get(x, y).copied().unwrap_or(false) {
+									matrix[(x, y)].get(i).copied().unwrap_or(Vec2::ZERO)
+								} else {
+									Vec2::ZERO
+								}
+							},
+							binding.interpolate_mode,
+							&mut direct_deform,
+						);
 
 						direct_deform
 					};
@@ -226,8 +253,12 @@ impl Param {
 					}
 				}
 				BindingValues::Opacity(ref matrix) => {
-					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
-					let val = cell.f32(matrix, out_top, out_bottom, binding.interpolate_mode);
+					if matrix.get(x_last, y_last).is_none() {
+						tracing::warn!(param = %self.name, node_uuid = binding.node.0, "Param Opacity matrix smaller than axis_points; skipping.");
+						continue;
+					}
+					let neutral = if self.additive { 0.0 } else { 1.0 };
+					let val = eval_scalar(matrix, neutral);
 					if let Some(op) = comps.get_mut::<OpacityStore>(binding.node) {
 						if self.additive {
 							op.0 = (op.0 + val).clamp(0.0, 1.0);
@@ -291,4 +322,166 @@ impl ParamCtx {
 pub enum SetParamError {
 	#[error("No parameter named {0}")]
 	NoParameterNamed(String),
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::math::transform::TransformOffset;
+	use crate::node::InoxNode;
+
+	#[test]
+	fn param_apply_clamps_unanchored_axis_points_and_guards_matrix_mismatch() {
+		let mut puppet = Puppet::new_empty("AxisClampTest");
+		let root = puppet.nodes.root_node_id;
+		let child = InoxNodeUuid(5);
+		puppet.nodes.add(
+			root,
+			child,
+			InoxNode {
+				uuid: child,
+				name: "Child".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		puppet.init_transforms();
+		puppet.transform_ctx.as_mut().unwrap().reset(&puppet.nodes, &mut puppet.node_comps);
+
+		// axis_points do not start at 0.0 or end at 1.0 -> binary_search_by returns Err(0) and Err(len)
+		let param = Param {
+			uuid: ParamUuid(1),
+			name: "Clamped".to_owned(),
+			is_vec2: false,
+			min: vec2(0.0, 0.0),
+			max: vec2(1.0, 0.0),
+			defaults: vec2(0.5, 0.0),
+			axis_points: AxisPoints {
+				x: vec![0.2, 0.8],
+				y: vec![0.25],
+			},
+			additive: false,
+			bindings: vec![
+				Binding {
+					node: child,
+					is_set: Matrix2d::from_grid_transposed(2, 1, |_, _| true),
+					interpolate_mode: InterpolateMode::Linear,
+					values: BindingValues::TransformTX(Matrix2d::from_grid_transposed(2, 1, |ix, _| {
+						if ix == 0 { 10.0 } else { 20.0 }
+					})),
+				},
+				// Mismatched smaller matrix (1x1) must be skipped safely without panicking
+				Binding {
+					node: child,
+					is_set: Matrix2d::from_grid_transposed(1, 1, |_, _| true),
+					interpolate_mode: InterpolateMode::Linear,
+					values: BindingValues::TransformTY(Matrix2d::from_grid_transposed(1, 1, |_, _| 99.0)),
+				},
+			],
+		};
+
+		param.apply(vec2(0.0, 0.0), &puppet.nodes, &mut puppet.node_comps);
+		assert!((puppet.node_transform(child).unwrap().relative.translation.x - 10.0).abs() < 1e-4);
+
+		puppet.transform_ctx.as_mut().unwrap().reset(&puppet.nodes, &mut puppet.node_comps);
+		param.apply(vec2(1.0, 0.0), &puppet.nodes, &mut puppet.node_comps);
+		assert!((puppet.node_transform(child).unwrap().relative.translation.x - 20.0).abs() < 1e-4);
+	}
+
+	#[test]
+	fn param_apply_handles_additive_scale_and_unset_is_set_corners() {
+		let mut puppet = Puppet::new_empty("AdditiveAndIsSet");
+		let root = puppet.nodes.root_node_id;
+		let child = InoxNodeUuid(7);
+		puppet.nodes.add(
+			root,
+			child,
+			InoxNode {
+				uuid: child,
+				name: "Child".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		puppet.init_transforms();
+		puppet.transform_ctx.as_mut().unwrap().reset(&puppet.nodes, &mut puppet.node_comps);
+
+		// 1) All-false is_set binding must be skipped completely even if matrix holds 99.0.
+		let skip_param = Param {
+			uuid: ParamUuid(1),
+			name: "AllUnset".to_owned(),
+			is_vec2: false,
+			min: vec2(0.0, 0.0),
+			max: vec2(1.0, 0.0),
+			defaults: vec2(0.0, 0.0),
+			axis_points: AxisPoints {
+				x: vec![0.0, 1.0],
+				y: vec![0.0],
+			},
+			additive: false,
+			bindings: vec![Binding {
+				node: child,
+				is_set: Matrix2d::from_grid_transposed(2, 1, |_, _| false),
+				interpolate_mode: InterpolateMode::Linear,
+				values: BindingValues::TransformTX(Matrix2d::from_grid_transposed(2, 1, |_, _| 99.0)),
+			}],
+		};
+		skip_param.apply(vec2(1.0, 0.0), &puppet.nodes, &mut puppet.node_comps);
+		assert_eq!(puppet.node_transform(child).unwrap().relative.translation.x, 0.0);
+
+		// 2) Non-additive TransformSX with corner 0 unset (matrix holds 99.0) and corner 1 = 3.0 ->
+		//    midpoint (0.5) interpolates neutral 1.0 and 3.0 -> 2.0.
+		let scale_partial = Param {
+			uuid: ParamUuid(2),
+			name: "ScalePartial".to_owned(),
+			is_vec2: false,
+			min: vec2(0.0, 0.0),
+			max: vec2(1.0, 0.0),
+			defaults: vec2(0.0, 0.0),
+			axis_points: AxisPoints {
+				x: vec![0.0, 1.0],
+				y: vec![0.0],
+			},
+			additive: false,
+			bindings: vec![Binding {
+				node: child,
+				is_set: Matrix2d::from_grid_transposed(2, 1, |ix, _| ix == 1),
+				interpolate_mode: InterpolateMode::Linear,
+				values: BindingValues::TransformSX(Matrix2d::from_grid_transposed(2, 1, |ix, _| {
+					if ix == 0 { 99.0 } else { 3.0 }
+				})),
+			}],
+		};
+		scale_partial.apply(vec2(0.5, 0.0), &puppet.nodes, &mut puppet.node_comps);
+		assert!((puppet.node_transform(child).unwrap().relative.scale.x - 2.0).abs() < 1e-4);
+
+		// 3) Additive TransformSX adds val onto existing scale (2.0 + 0.5 = 2.5).
+		let add_scale = Param {
+			uuid: ParamUuid(3),
+			name: "AddScale".to_owned(),
+			is_vec2: false,
+			min: vec2(0.0, 0.0),
+			max: vec2(1.0, 0.0),
+			defaults: vec2(0.0, 0.0),
+			axis_points: AxisPoints {
+				x: vec![0.0, 1.0],
+				y: vec![0.0],
+			},
+			additive: true,
+			bindings: vec![Binding {
+				node: child,
+				is_set: Matrix2d::from_grid_transposed(2, 1, |_, _| true),
+				interpolate_mode: InterpolateMode::Linear,
+				values: BindingValues::TransformSX(Matrix2d::from_grid_transposed(2, 1, |ix, _| {
+					if ix == 0 { 0.0 } else { 0.5 }
+				})),
+			}],
+		};
+		add_scale.apply(vec2(1.0, 0.0), &puppet.nodes, &mut puppet.node_comps);
+		assert!((puppet.node_transform(child).unwrap().relative.scale.x - 2.5).abs() < 1e-4);
+	}
 }

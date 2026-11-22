@@ -127,11 +127,43 @@ fn eval(
 	);
 
 	let dd_bob_damping = vec2(
-		dd_bob_rot.x * off_pos_norm.y - d_bob_rot.y * off_pos_norm.x,
-		dd_bob_rot.y * off_pos_norm.y + d_bob_rot.x * off_pos_norm.x,
+		dd_bob_rot.x * off_pos_norm.y - dd_bob_rot.y * off_pos_norm.x,
+		dd_bob_rot.y * off_pos_norm.y + dd_bob_rot.x * off_pos_norm.x,
 	);
 
 	let dd_bob = force + dd_bob_damping;
 
 	state.derivatives.bob_vel = if dd_bob.is_finite() { dd_bob } else { Vec2::ZERO };
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::physics::PuppetPhysics;
+
+	#[test]
+	fn spring_pendulum_damping_opposes_horizontal_velocity() {
+		let mut state = PhysicsState::<4, SpringPendulum>::default();
+		let anchor = vec2(0.0, 0.0);
+		state.vars.bob_pos = vec2(0.0, 100.0);
+		state.vars.bob_vel = vec2(50.0, 0.0);
+		let props = PhysicsProps {
+			gravity: 1.0,
+			length: 100.0,
+			frequency: 2.0,
+			angle_damping: 0.8,
+			length_damping: 0.8,
+			output_scale: vec2(1.0, 1.0),
+		};
+		let puppet_physics = PuppetPhysics {
+			pixels_per_meter: 1000.0,
+			gravity: 9.8,
+		};
+		eval(&mut state, &(&puppet_physics, &props), &anchor, 0.0);
+		assert!(
+			state.derivatives.bob_vel.x < 0.0,
+			"expected horizontal damping deceleration (< 0), got {}",
+			state.derivatives.bob_vel.x
+		);
+	}
 }

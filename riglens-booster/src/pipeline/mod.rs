@@ -123,8 +123,17 @@ impl BoosterPipeline {
 		max_ticks: Option<u64>,
 		live_telemetry: Option<Arc<Mutex<BoosterTelemetry>>>,
 	) -> BoosterTelemetry {
-		let tick_hz = self.config.tick_hz.clamp(15.0, 240.0);
-		let poll_every_n = ((tick_hz / self.config.vts_poll_hz.clamp(1.0, tick_hz)).round() as u64).max(1);
+		let tick_hz = if self.config.tick_hz.is_finite() {
+			self.config.tick_hz.clamp(15.0, 240.0)
+		} else {
+			120.0
+		};
+		let vts_poll_hz = if self.config.vts_poll_hz.is_finite() {
+			self.config.vts_poll_hz.clamp(1.0, tick_hz)
+		} else {
+			60.0f32.clamp(1.0, tick_hz)
+		};
+		let poll_every_n = ((tick_hz / vts_poll_hz).round() as u64).max(1);
 		let tick_period = Duration::from_secs_f32(1.0 / tick_hz);
 		let mut interval = tokio::time::interval(tick_period);
 		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -648,5 +657,20 @@ mod tests {
 		let snap = shared.lock().unwrap().clone();
 		assert_eq!(snap.ticks, 3);
 		assert!(dst.clone().recv_frame().unwrap().is_some());
+	}
+
+	#[tokio::test]
+	async fn pipeline_handles_nan_tick_and_poll_hz_without_panicking() {
+		let cfg = BoosterConfig {
+			tick_hz: f32::NAN,
+			vts_poll_hz: f32::NAN,
+			enable_vts: false,
+			enable_gpu: false,
+			..Default::default()
+		};
+		let mut pipeline = BoosterPipeline::new(cfg, None, None);
+		let stop = Arc::new(AtomicBool::new(false));
+		let telemetry = pipeline.run_with_telemetry(stop, Some(2), None).await;
+		assert_eq!(telemetry.ticks, 2);
 	}
 }

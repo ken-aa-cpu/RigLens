@@ -254,3 +254,122 @@ fn quick_pro_workspace_mode_switch_resets_pro_tools() {
 	app.booster_live_fx = true;
 	assert_ne!(app.render_signature(), sig_raw);
 }
+
+#[test]
+fn session_ops_watch_path_refresh_view_and_failed_open_guards() {
+	let tmp = std::env::temp_dir().join(format!("riglens_app_ops_test_{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&tmp);
+	std::fs::create_dir_all(&tmp).unwrap();
+	let watch_file = tmp.join("watch.inp");
+
+	let session = load_initial_session("--sample").expect("load sample");
+	let mut app = Inox2dStudioApp::new(session, None, Some(watch_file.clone()), None);
+	app.show_welcome = true;
+
+	// RefreshView (e.g. clicking a Bindings keypoint cell) must NOT dirty session.revision
+	let rev_before = app.session.revision;
+	app.apply_inspector_actions(vec![crate::bindings::InspectorAction::RefreshView]);
+	assert_eq!(app.session.revision, rev_before);
+
+	// Failed OpenModel must NOT close Welcome or clobber active_project
+	app.handle_file_dialog_result(crate::dialogs::FileDialogResult::Confirmed(
+		crate::dialogs::FileDialogMode::OpenModel,
+		tmp.join("does_not_exist.inp"),
+	));
+	assert!(app.show_welcome);
+	assert!(!app.status_ok);
+
+	// Switching to another model must clear watch_path so watch_file is not overwritten
+	app.load_session_into_app(
+		load_initial_session("--sample").unwrap(),
+		None,
+		"Switched".to_owned(),
+	);
+	assert!(app.watch_path.is_none());
+	assert!(!watch_file.exists());
+
+	// DeformBrush exec with push_undo: false does not push per-frame undo snapshots
+	let face_id = app
+		.session
+		.model
+		.puppet
+		.nodes
+		.iter()
+		.find(|n| n.name == "Face")
+		.unwrap()
+		.uuid;
+	let undo_len_before = app.session.undo_stack.len();
+	app.begin_gesture_undo();
+	app.session
+		.exec(
+			"deform.brush",
+			&json::object! {
+				node_uuid: face_id.0,
+				param: "Head:: Yaw-Pitch",
+				mode: "Grab",
+				kx: 0.0,
+				ky: 0.0,
+				local_xy: [0.0, 0.0],
+				radius_ratio: 0.45,
+				dx: 2.0,
+				dy: -2.0,
+				push_undo: false
+			},
+		)
+		.unwrap();
+	app.finish_gesture_undo();
+	assert_eq!(app.session.undo_stack.len(), undo_len_before + 1);
+
+	let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn non_inp_source_cannot_be_overwritten_and_noop_gesture_does_not_spam_undo() {
+	let tmp = std::env::temp_dir().join(format!("riglens_save_guard_test_{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&tmp);
+	std::fs::create_dir_all(&tmp).unwrap();
+
+	let mut sample = load_initial_session("--sample").expect("load sample");
+	let rigjson_path = tmp.join("character.rigjson");
+	sample
+		.exec(
+			"puppet.export",
+			&json::object! { path: rigjson_path.to_str().unwrap(), format: "rig-json", pretty: true },
+		)
+		.expect("export rigjson");
+	let orig_bytes = std::fs::read(&rigjson_path).unwrap();
+
+	let mut app = Inox2dStudioApp::new(load_initial_session("--sample").unwrap(), None, None, None);
+	assert!(app.open_model_from_path(&rigjson_path));
+	// Opening a non-.inp (.rigjson/.psd/.inx) must keep direct save target None while preserving browse dir & .inp name suggestion.
+	assert!(app.source_path.is_none());
+	assert_eq!(app.last_browse_dir.as_deref(), Some(tmp.as_path()));
+	assert_eq!(app.suggested_inp_name.as_deref(), Some("character.inp"));
+
+	// Direct save_model_to_path to non-.inp must refuse and leave original file untouched.
+	app.save_model_to_path(&rigjson_path);
+	assert!(!app.status_ok);
+	assert_eq!(std::fs::read(&rigjson_path).unwrap(), orig_bytes);
+
+	// Direct save to .inp succeeds and sets source_path.
+	let inp_path = tmp.join("character.inp");
+	app.save_model_to_path(&inp_path);
+	assert!(app.status_ok);
+	assert_eq!(app.source_path.as_deref(), Some(inp_path.as_path()));
+	assert!(inp_path.is_file());
+
+	// No-op focus/gesture cycle without model edits must NOT push onto undo_stack or bump revision.
+	let undo_before = app.session.undo_stack.len();
+	let rev_before = app.session.revision;
+	app.begin_gesture_undo();
+	app.finish_gesture_undo();
+	assert_eq!(app.session.undo_stack.len(), undo_before);
+	assert_eq!(app.session.revision, rev_before);
+
+	// active_param_value falls back to param.defaults (e.g. Eye:: Left:: Open default = 1.0) rather than ZERO.
+	app.session.param_overrides.clear();
+	let eye_open = app.active_param_value("Eye:: Left:: Open");
+	assert!((eye_open.x - 1.0).abs() < 1e-4);
+
+	let _ = std::fs::remove_dir_all(&tmp);
+}

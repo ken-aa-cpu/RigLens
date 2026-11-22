@@ -220,14 +220,14 @@ pub fn apply_head_perspective_binding(
 				let nx = ((v.x - center.x) / half.x).clamp(-1.0, 1.0);
 				let ny = ((v.y - center.y) / half.y).clamp(-1.0, 1.0);
 
-				// Parallax shift + size-aware spherical 2.5D foreshortening
+				// Parallax shift + size-aware spherical 2.5D foreshortening (Y-up param -> Y-down world)
 				let parallax_x = yaw * yaw_px * depth_z;
-				let parallax_y = pitch * pitch_px * depth_z;
+				let parallax_y = -pitch * pitch_px * depth_z;
 				let shear_x = (yaw_px * 0.12).min(half.x * 0.22);
 				let curve_y_amp = (pitch_px * 0.22).min(half.y * 0.25);
 				let foreshorten_x = -yaw.abs() * (v.x - center.x) * 0.14 - yaw * (nx * nx) * shear_x;
-				let curve_y = pitch * curve_y_amp * (1.0 - nx * nx * 0.65)
-					+ yaw * ny * (half.y * 0.07) * nx;
+				let curve_y = -pitch * curve_y_amp * (1.0 - nx * nx * 0.65)
+					- yaw * ny * (half.y * 0.07) * nx;
 				let foreshorten_y = -pitch.abs() * (v.y - center.y) * 0.10;
 
 				vec2(parallax_x + foreshorten_x, parallax_y + curve_y + foreshorten_y)
@@ -433,7 +433,7 @@ pub fn apply_sway_binding(
 			.map(|&v| {
 				let t = ((v.y - min_v.y) / y_span).clamp(0.0, 1.0);
 				let weight = t * t;
-				vec2(sx * sway_px * weight, sy * (sway_px * 0.35) * weight)
+				vec2(sx * sway_px * weight, -sy * (sway_px * 0.35) * weight)
 			})
 			.collect()
 	});
@@ -567,7 +567,7 @@ pub fn apply_eye_gaze_binding(
 				let ny = ((v.y - center.y) / half.y).clamp(-1.0, 1.0);
 				// Center iris vertices shift more than outer sclera boundary
 				let w = ((1.0 - nx * nx * 0.7) * (1.0 - ny * ny * 0.7)).max(0.0);
-				vec2(gx * gaze_x_px * w, gy * gaze_y_px * w)
+				vec2(gx * gaze_x_px * w, -gy * gaze_y_px * w)
 			})
 			.collect()
 	});
@@ -881,4 +881,50 @@ pub fn apply_brow_binding(
 		},
 	);
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::rig::add_grid_part;
+	use image::{Rgba, RgbaImage};
+	use riglens_core::model::Model;
+
+	#[test]
+	fn y_up_parameters_shift_upward_in_y_down_world_space() {
+		let mut model = Model {
+			puppet: Puppet::new_empty("YConventionTest"),
+			textures: Vec::new(),
+			vendors: Vec::new(),
+		};
+		let root = model.puppet.nodes.root_node_id;
+		let img = RgbaImage::from_pixel(24, 24, Rgba([255, 255, 255, 255]));
+		let eye = add_grid_part(&mut model, root, "Eye_L", 0.0, vec2(0.0, 0.0), 40.0, 40.0, 2, 2, img.clone());
+		let iris = add_grid_part(&mut model, root, "Iris_L", -0.1, vec2(0.0, 0.0), 20.0, 20.0, 2, 2, img.clone());
+		let hair = add_grid_part(&mut model, root, "Hair", -0.2, vec2(0.0, 0.0), 40.0, 80.0, 2, 2, img);
+
+		apply_head_perspective_binding(&mut model.puppet, eye, "Head:: Yaw-Pitch", 1.0, 20.0, 20.0).unwrap();
+		apply_eye_gaze_binding(&mut model.puppet, iris, "Eye:: Gaze", 8.0, 6.0).unwrap();
+		apply_sway_binding(&mut model.puppet, hair, "Hair:: Sway", 20.0).unwrap();
+
+		model.puppet.init_all();
+		model.puppet.begin_frame();
+		let pc = model.puppet.param_ctx.as_mut().unwrap();
+		pc.set("Head:: Yaw-Pitch", vec2(0.0, 1.0)).unwrap();
+		pc.set("Eye:: Gaze", vec2(0.0, 1.0)).unwrap();
+		pc.set("Hair:: Sway", vec2(0.0, 1.0)).unwrap();
+		model.puppet.end_frame(0.0);
+
+		let eye_defs = model.puppet.node_deform_offsets(eye).unwrap();
+		let eye_avg_dy: f32 = eye_defs.iter().map(|d| d.y).sum::<f32>() / eye_defs.len() as f32;
+		assert!(eye_avg_dy < 0.0, "pitch=+1 must shift facial feature upward (dy < 0), got {eye_avg_dy}");
+
+		let iris_defs = model.puppet.node_deform_offsets(iris).unwrap();
+		let iris_center_dy = iris_defs[iris_defs.len() / 2].y;
+		assert!(iris_center_dy < 0.0, "gy=+1 must shift iris upward (dy < 0), got {iris_center_dy}");
+
+		let hair_defs = model.puppet.node_deform_offsets(hair).unwrap();
+		let hair_tip_dy = hair_defs.last().unwrap().y;
+		assert!(hair_tip_dy < 0.0, "sy=+1 must shift hair tip upward (dy < 0), got {hair_tip_dy}");
+	}
 }

@@ -304,6 +304,62 @@ pub fn write_inp<W: Write>(model: &Model, w: &mut W) -> io::Result<()> {
 	Ok(())
 }
 
+/// Atomically serialize and write `model` to `path` using a temporary file and backup swap.
+pub fn write_inp_atomic(model: &Model, path: &std::path::Path) -> Result<(), String> {
+	use std::fs::{self, File};
+	use std::io::BufWriter;
+
+	if let Some(parent) = path.parent() {
+		if !parent.as_os_str().is_empty() {
+			fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
+		}
+	}
+	let pid = std::process::id();
+	let file_name = path
+		.file_name()
+		.and_then(|s| s.to_str())
+		.unwrap_or("model.inp");
+	let tmp_path = path.with_file_name(format!("{file_name}.{pid}.tmp"));
+	let bak_path = path.with_file_name(format!("{file_name}.{pid}.bak"));
+	{
+		let file = File::create(&tmp_path).map_err(|e| format!("Failed to create temp file: {e}"))?;
+		let mut w = BufWriter::new(file);
+		if let Err(e) = write_inp(model, &mut w) {
+			drop(w);
+			let _ = fs::remove_file(&tmp_path);
+			return Err(format!("Failed to serialize .inp: {e}"));
+		}
+		if let Err(e) = w.flush() {
+			drop(w);
+			let _ = fs::remove_file(&tmp_path);
+			return Err(format!("Failed to flush .inp: {e}"));
+		}
+	}
+	match fs::rename(&tmp_path, path) {
+		Ok(()) => Ok(()),
+		Err(first_err) => {
+			if path.exists() {
+				let _ = fs::remove_file(&bak_path);
+				if fs::rename(path, &bak_path).is_ok() {
+					match fs::rename(&tmp_path, path) {
+						Ok(()) => {
+							let _ = fs::remove_file(&bak_path);
+							return Ok(());
+						}
+						Err(swap_err) => {
+							let _ = fs::rename(&bak_path, path);
+							let _ = fs::remove_file(&tmp_path);
+							return Err(format!("Failed to update '{}': {swap_err}", path.display()));
+						}
+					}
+				}
+			}
+			let _ = fs::remove_file(&tmp_path);
+			Err(format!("Failed to update '{}': {first_err}", path.display()))
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -431,5 +487,86 @@ mod tests {
 		assert!((z - (-9.0)).abs() < 1e-4, "expected zsort -9.0, got {z}");
 		let deforms = &parsed.puppet.render_ctx.as_ref().unwrap().vertex_buffers.deforms;
 		assert!((deforms.last().unwrap().x - 5.0).abs() < 1e-4);
+	}
+
+	#[test]
+	fn inp_roundtrip_preserves_pose_groups_additive_and_grid_translate_children() {
+		use crate::node::components::{GridDeformer, GridFormation};
+		use crate::params::ParamUuid;
+		use crate::puppet::PoseGroup;
+
+		let mut puppet = Puppet::new_empty("FeatureRoundtrip");
+		let root = puppet.nodes.root_node_id;
+		let grid_id = InoxNodeUuid(10);
+		puppet.nodes.add(
+			root,
+			grid_id,
+			InoxNode {
+				uuid: grid_id,
+				name: "Grid".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		puppet.node_comps.add(
+			grid_id,
+			GridDeformer {
+				axis_x: vec![-10.0, 10.0],
+				axis_y: vec![-10.0, 10.0],
+				formation: GridFormation::Bilinear,
+				dynamic: true,
+				translate_children: false,
+			},
+		);
+		puppet.pose_groups.push(PoseGroup {
+			id: "Arms".to_owned(),
+			parts: vec![InoxNodeUuid(10)],
+			fade_seconds: 0.25,
+		});
+		puppet.params.insert(
+			"AddParam".to_owned(),
+			Param {
+				uuid: ParamUuid(50),
+				name: "AddParam".to_owned(),
+				is_vec2: false,
+				min: vec2(0.0, 0.0),
+				max: vec2(1.0, 0.0),
+				defaults: vec2(0.0, 0.0),
+				axis_points: AxisPoints {
+					x: vec![0.0, 1.0],
+					y: vec![0.0],
+				},
+				additive: true,
+				bindings: Vec::new(),
+			},
+		);
+
+		let model = Model {
+			puppet,
+			textures: Vec::new(),
+			vendors: Vec::new(),
+		};
+		let mut bytes = Vec::new();
+		write_inp(&model, &mut bytes).expect("write_inp");
+		let parsed = parse_inp(bytes.as_slice()).expect("parse_inp");
+
+		assert_eq!(parsed.puppet.pose_groups.len(), 1);
+		assert_eq!(parsed.puppet.pose_groups[0].id, "Arms");
+		assert_eq!(parsed.puppet.pose_groups[0].parts, vec![InoxNodeUuid(10)]);
+		assert!((parsed.puppet.pose_groups[0].fade_seconds - 0.25).abs() < 1e-6);
+		assert!(parsed.puppet.params["AddParam"].additive);
+		assert!(
+			!parsed.puppet.top_extras.iter().any(|(k, _)| k == "pose_groups"),
+			"pose_groups must not remain in top_extras"
+		);
+		let g = parsed
+			.puppet
+			.node_comps
+			.get::<GridDeformer>(grid_id)
+			.expect("GridDeformer");
+		assert!(!g.translate_children);
+		assert!(g.dynamic);
 	}
 }

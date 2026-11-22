@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use eframe::egui;
 use image::RgbaImage;
-use riglens_core::formats::inp::{parse_inp, write_inp};
+use riglens_core::formats::inp::{parse_inp, write_inp_atomic as core_write_inp_atomic};
 use riglens_core::model::Model;
 use riglens_core::node::components::TexturedMesh;
 use riglens_core::node::InoxNodeUuid;
@@ -273,23 +272,7 @@ pub(crate) fn load_initial_session(input: &str) -> Result<Session, String> {
 }
 
 pub(crate) fn write_inp_atomic(model: &Model, path: &Path) -> Result<(), String> {
-	if let Some(parent) = path.parent() {
-		if !parent.as_os_str().is_empty() {
-			fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
-		}
-	}
-	let tmp_path = path.with_extension("inp.tmp");
-	{
-		let file = File::create(&tmp_path).map_err(|e| format!("Failed to create temp file: {e}"))?;
-		let mut w = BufWriter::new(file);
-		write_inp(model, &mut w).map_err(|e| format!("Failed to serialize .inp: {e}"))?;
-		w.flush().map_err(|e| format!("Failed to flush .inp: {e}"))?;
-	}
-	if path.exists() {
-		let _ = fs::remove_file(path);
-	}
-	fs::rename(&tmp_path, path).map_err(|e| format!("Failed to update '{}': {e}", path.display()))?;
-	Ok(())
+	core_write_inp_atomic(model, path)
 }
 
 pub(crate) fn save_color_image_png(img: &egui::ColorImage, out: &Path) -> Result<(), String> {

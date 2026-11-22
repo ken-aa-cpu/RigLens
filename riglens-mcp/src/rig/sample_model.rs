@@ -145,6 +145,10 @@ pub fn build_sample_vtuber_model() -> Model {
 		textures: Vec::new(),
 		vendors: Vec::new(),
 	};
+	model
+		.puppet
+		.top_extras
+		.insert("riglens_alpha", json::JsonValue::String("straight".to_owned()));
 
 	let root_id = model.puppet.nodes.root_node_id;
 

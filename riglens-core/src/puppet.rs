@@ -311,12 +311,25 @@ impl Puppet {
 				if !self.nodes.is_effectively_enabled(pid) {
 					continue;
 				}
-				let op = self
-					.node_comps
-					.get::<OpacityStore>(pid)
-					.map(|o| o.0)
-					.or_else(|| self.node_comps.get::<Drawable>(pid).map(|d| d.blending.opacity))
-					.unwrap_or(0.0);
+				let op = if self.node_comps.get::<Drawable>(pid).is_some() {
+					self.node_comps.get::<OpacityStore>(pid).map(|o| o.0).unwrap_or(0.0)
+				} else {
+					let mut max_child_op = None::<f32>;
+					for n in self.nodes.pre_order_iter() {
+						if n.uuid != pid
+							&& !n.lock_to_root
+							&& self.nodes.is_descendant(n.uuid, pid)
+							&& self.nodes.is_effectively_enabled(n.uuid)
+							&& self.node_comps.get::<Drawable>(n.uuid).is_some()
+						{
+							let cop = self.node_comps.get::<OpacityStore>(n.uuid).map(|o| o.0).unwrap_or(0.0);
+							max_child_op = Some(max_child_op.map_or(cop, |m| m.max(cop)));
+						}
+					}
+					max_child_op.unwrap_or_else(|| {
+						self.node_comps.get::<OpacityStore>(pid).map(|o| o.0).unwrap_or(0.0)
+					})
+				};
 				if op > 0.01 && best.map(|(_, b)| op > b).unwrap_or(true) {
 					best = Some((pid, op));
 				}
@@ -324,8 +337,18 @@ impl Puppet {
 			if let Some((win_id, _)) = best {
 				for &pid in &group.parts {
 					if pid != win_id {
-						if let Some(op) = self.node_comps.get_mut::<OpacityStore>(pid) {
-							op.0 = 0.0;
+						let descendants: Vec<InoxNodeUuid> = self
+							.nodes
+							.pre_order_iter()
+							.filter(|n| {
+								n.uuid == pid || (!n.lock_to_root && self.nodes.is_descendant(n.uuid, pid))
+							})
+							.map(|n| n.uuid)
+							.collect();
+						for uid in descendants {
+							if let Some(op) = self.node_comps.get_mut::<OpacityStore>(uid) {
+								op.0 = 0.0;
+							}
 						}
 					}
 				}
@@ -428,5 +451,100 @@ mod tests {
 		let back = crate::formats::ir_bridge::ir_to_model(&ir).expect("ir_to_model");
 		assert!(back.puppet.params["AddArmA"].additive);
 		assert_eq!(back.puppet.pose_groups.len(), 1);
+	}
+
+	#[test]
+	fn group_opacity_propagates_through_drawable_parent_and_drives_pose_group() {
+		let mut puppet = Puppet::new_empty("GroupHierarchy");
+		let root = puppet.nodes.root_node_id;
+		let grp_a = InoxNodeUuid(20);
+		let parent_part = InoxNodeUuid(21);
+		let child_part = InoxNodeUuid(22);
+		let grp_b = InoxNodeUuid(23);
+		let b_part = InoxNodeUuid(24);
+
+		for (parent, id, name) in [
+			(root, grp_a, "GroupA"),
+			(grp_a, parent_part, "ParentPart"),
+			(parent_part, child_part, "ChildPart"),
+			(root, grp_b, "GroupB"),
+			(grp_b, b_part, "BPart"),
+		] {
+			puppet.nodes.add(
+				parent,
+				id,
+				InoxNode {
+					uuid: id,
+					name: name.to_owned(),
+					enabled: true,
+					zsort: 0.0,
+					trans_offset: TransformOffset::default(),
+					lock_to_root: false,
+				},
+			);
+		}
+		for (id, op) in [(parent_part, 0.8_f32), (child_part, 0.5_f32), (b_part, 0.6_f32)] {
+			puppet.node_comps.add(
+				id,
+				Drawable {
+					blending: Blending {
+						mode: BlendMode::Normal,
+						tint: Vec3::ONE,
+						screen_tint: Vec3::ZERO,
+						opacity: op,
+					},
+					masks: None,
+				},
+			);
+		}
+		puppet.pose_groups.push(PoseGroup {
+			id: "GroupSwitch".to_owned(),
+			parts: vec![grp_a, grp_b],
+			fade_seconds: 0.0,
+		});
+
+		// Parameter scales GroupA opacity to 0.5 and ParentPart additive SX by +0.25.
+		puppet.params.insert(
+			"FadeGroupA".to_owned(),
+			Param {
+				uuid: ParamUuid(200),
+				name: "FadeGroupA".to_owned(),
+				is_vec2: false,
+				min: vec2(0.0, 0.0),
+				max: vec2(1.0, 0.0),
+				defaults: vec2(1.0, 0.0),
+				axis_points: AxisPoints {
+					x: vec![0.0, 1.0],
+					y: vec![0.0],
+				},
+				additive: false,
+				bindings: vec![Binding {
+					node: grp_a,
+					is_set: Matrix2d::from_grid_transposed(2, 1, |_, _| true),
+					interpolate_mode: InterpolateMode::Linear,
+					values: BindingValues::Opacity(Matrix2d::from_grid_transposed(2, 1, |ix, _| {
+						if ix == 0 { 0.0 } else { 0.5 }
+					})),
+				}],
+			},
+		);
+		puppet.init_all();
+
+		// At val=1.0: GroupA effective opacity = 0.5 -> ParentPart = 0.8*0.5 = 0.4, ChildPart = 0.5*0.5 = 0.25.
+		// GroupB's BPart has 0.6 > 0.4 so GroupB wins PoseGroup and suppresses GroupA descendants to 0.0.
+		puppet.begin_frame();
+		puppet.param_ctx.as_mut().unwrap().set("FadeGroupA", vec2(1.0, 0.0)).unwrap();
+		puppet.end_frame(0.0);
+		assert!((puppet.node_opacity(b_part).unwrap() - 0.6).abs() < 1e-4);
+		assert!((puppet.node_opacity(parent_part).unwrap() - 0.0).abs() < 1e-4);
+		assert!((puppet.node_opacity(child_part).unwrap() - 0.0).abs() < 1e-4);
+
+		// Remove PoseGroup to check raw Group -> ParentPart -> ChildPart inheritance directly.
+		puppet.pose_groups.clear();
+		puppet.begin_frame();
+		puppet.param_ctx.as_mut().unwrap().set("FadeGroupA", vec2(1.0, 0.0)).unwrap();
+		puppet.end_frame(0.0);
+		assert!((puppet.node_opacity(parent_part).unwrap() - 0.4).abs() < 1e-4);
+		assert!((puppet.node_opacity(child_part).unwrap() - 0.25).abs() < 1e-4);
 	}
 }

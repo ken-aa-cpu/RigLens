@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::Path;
 
-use riglens_core::formats::inp::write_inp;
+use riglens_core::formats::inp::write_inp_atomic;
 use riglens_core::formats::ir_bridge::{ir_to_model, model_to_ir};
 use riglens_core::node::components::RawNodeData;
 use json::JsonValue;
@@ -30,9 +30,7 @@ impl Session {
 				let path = params["path"]
 					.as_str()
 					.ok_or_else(|| "Missing 'path'".to_owned())?;
-				let file = File::create(Path::new(path)).map_err(|e| format!("Failed to create {path}: {e}"))?;
-				let mut writer = BufWriter::new(file);
-				write_inp(&self.model, &mut writer).map_err(|e| format!("Failed to write .inp: {e}"))?;
+				write_inp_atomic(&self.model, Path::new(path))?;
 				Ok(json::object! {
 					saved: path,
 					textures: self.model.textures.len(),

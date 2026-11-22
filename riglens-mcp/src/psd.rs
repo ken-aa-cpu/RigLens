@@ -4,7 +4,7 @@ use std::process::Command;
 use glam::{vec2, vec3};
 use image::{Rgba, RgbaImage};
 use riglens_core::model::Model;
-use riglens_core::node::components::{BlendMode, Blending, Drawable, Mask, MaskMode, Masks, TexturedMesh};
+use riglens_core::node::components::{BlendMode, Blending, Drawable, Mask, MaskMode, Masks, Mesh, TexturedMesh};
 use riglens_core::node::{InoxNode, InoxNodeUuid};
 use riglens_core::puppet::Puppet;
 use riglens_core::texture::{decode_model_textures, TextureId};
@@ -372,8 +372,8 @@ pub fn parse_psd_bytes(data: &[u8]) -> Result<PsdDocument, String> {
 
 	let mut layers = Vec::with_capacity(metas.len());
 	for meta in metas {
-		let w = (meta.right - meta.left).max(0) as usize;
-		let h = (meta.bottom - meta.top).max(0) as usize;
+		let w = (meta.right as i64 - meta.left as i64).clamp(0, 32768) as usize;
+		let h = (meta.bottom as i64 - meta.top as i64).clamp(0, 32768) as usize;
 		let mut ch_r = None;
 		let mut ch_g = None;
 		let mut ch_b = None;
@@ -636,6 +636,10 @@ pub fn import_psd_to_model_with_mode(
 		textures: Vec::new(),
 		vendors: Vec::new(),
 	};
+	model
+		.puppet
+		.top_extras
+		.insert("riglens_alpha", JsonValue::String("straight".to_owned()));
 
 	let root_id = model.puppet.nodes.root_node_id;
 	let mut group_stack: Vec<InoxNodeUuid> = vec![root_id];
@@ -646,6 +650,7 @@ pub fn import_psd_to_model_with_mode(
 	for (idx, layer) in psd.layers.iter().enumerate() {
 		match layer.section {
 			PsdSectionType::BoundingDivider => {
+				last_base_part = None;
 				let parent = *group_stack.last().unwrap_or(&root_id);
 				let gid = model.puppet.next_node_uuid();
 				model.puppet.add_node(
@@ -663,6 +668,7 @@ pub fn import_psd_to_model_with_mode(
 				continue;
 			}
 			PsdSectionType::OpenFolder | PsdSectionType::ClosedFolder => {
+				last_base_part = None;
 				if group_stack.len() > 1 {
 					let gid = group_stack.pop().unwrap();
 					if let Some(node) = model.puppet.nodes.get_node_mut(gid) {
@@ -676,6 +682,9 @@ pub fn import_psd_to_model_with_mode(
 		}
 
 		let Some((trimmed, abs_left, abs_top)) = trim_layer_alpha(layer) else {
+			if !layer.clipping {
+				last_base_part = None;
+			}
 			continue;
 		};
 
@@ -800,9 +809,15 @@ pub fn export_model_to_psd(model: &mut Model, width: u32, height: u32) -> Result
 
 	let mut export_layers = Vec::with_capacity(part_ids.len());
 	for (id, _) in part_ids {
-		let node = model.puppet.nodes.get_node(id).unwrap();
-		let tm = model.puppet.node_comps.get::<TexturedMesh>(id).unwrap();
-		let drawable = model.puppet.node_comps.get::<Drawable>(id).unwrap();
+		let Some(node) = model.puppet.nodes.get_node(id) else {
+			continue;
+		};
+		let Some(tm) = model.puppet.node_comps.get::<TexturedMesh>(id) else {
+			continue;
+		};
+		let Some(drawable) = model.puppet.node_comps.get::<Drawable>(id) else {
+			continue;
+		};
 		let Some(tex) = decoded.get(tm.tex_albedo.0) else {
 			continue;
 		};
@@ -811,21 +826,33 @@ pub fn export_model_to_psd(model: &mut Model, width: u32, height: u32) -> Result
 			.node_transform(id)
 			.map(|t| t.absolute)
 			.unwrap_or_default();
-		let world_center = abs.transform_point3(vec3(0.0, 0.0, 0.0));
+		let origin = model
+			.puppet
+			.node_comps
+			.get::<Mesh>(id)
+			.map(|m| m.origin)
+			.unwrap_or(glam::Vec2::ZERO);
+		let world_center = abs.transform_point3(vec3(-origin.x, -origin.y, 0.0));
 		let img = RgbaImage::from_raw(tex.width(), tex.height(), tex.pixels().to_vec())
 			.ok_or_else(|| "Invalid decoded texture buffer".to_owned())?;
 		let left = (cx + world_center.x - tex.width() as f32 * 0.5).round() as i32;
 		let top = (cy + world_center.y - tex.height() as f32 * 0.5).round() as i32;
+		let eff_opacity = model
+			.puppet
+			.node_opacity(id)
+			.unwrap_or(drawable.blending.opacity)
+			.clamp(0.0, 1.0);
+		let eff_visible = model.puppet.nodes.is_effectively_enabled(id);
 
 		export_layers.push(PsdExportLayer {
 			name: node.name.clone(),
 			left,
 			top,
 			image: img,
-			opacity: (drawable.blending.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+			opacity: (eff_opacity * 255.0).round() as u8,
 			blend_mode: drawable.blending.mode,
 			clipping: drawable.masks.is_some(),
-			visible: node.enabled,
+			visible: eff_visible,
 		});
 	}
 
@@ -883,33 +910,70 @@ pub fn photocraft_convert(in_path: &Path, out_path: &Path) -> Result<String, Str
 /// existing meshes, deformers, parameter bindings, or physics. Returns the count of updated parts.
 pub fn sync_psd_textures_into_model(model: &mut Model, psd: &PsdDocument) -> Result<usize, String> {
 	use std::collections::HashMap;
-	use riglens_core::node::components::TexturedMesh;
 
-	let mut layer_by_name: HashMap<String, &PsdLayer> = HashMap::new();
+	let mut layers_by_name: HashMap<String, Vec<&PsdLayer>> = HashMap::new();
 	for layer in &psd.layers {
 		if matches!(layer.section, PsdSectionType::Normal) {
-			layer_by_name.entry(layer.name.to_lowercase()).or_insert(layer);
+			layers_by_name
+				.entry(layer.name.to_lowercase())
+				.or_default()
+				.push(layer);
 		}
 	}
 
-	let updates: Vec<(usize, riglens_core::model::ModelTexture)> = model
-		.puppet
-		.nodes
-		.iter()
-		.filter_map(|n| {
-			let tm = model.puppet.node_comps.get::<TexturedMesh>(n.uuid)?;
-			let layer = layer_by_name.get(&n.name.to_lowercase())?;
-			let (trimmed, _, _) = trim_layer_alpha(layer)?;
-			Some((tm.tex_albedo.0, encode_rgba_png(&trimmed)))
-		})
-		.collect();
+	let decoded_old = decode_model_textures(model.textures.iter());
+	let mut consumed: HashMap<String, usize> = HashMap::new();
+	let mut updates: Vec<(InoxNodeUuid, usize, riglens_core::model::ModelTexture, Option<(f32, f32)>)> = Vec::new();
+
+	for n in model.puppet.nodes.pre_order_iter() {
+		let Some(tm) = model.puppet.node_comps.get::<TexturedMesh>(n.uuid) else {
+			continue;
+		};
+		let key = n.name.trim_end_matches('\0').to_lowercase();
+		let Some(cands) = layers_by_name.get(&key) else {
+			continue;
+		};
+		let idx_entry = consumed.entry(key).or_insert(0);
+		let Some(&layer) = cands.get(*idx_entry) else {
+			continue;
+		};
+		*idx_entry += 1;
+
+		let Some((trimmed, _, _)) = trim_layer_alpha(layer) else {
+			continue;
+		};
+		let new_w = trimmed.width() as f32;
+		let new_h = trimmed.height() as f32;
+		let scale = decoded_old.get(tm.tex_albedo.0).and_then(|old| {
+			let ow = old.width() as f32;
+			let oh = old.height() as f32;
+			if ow > 0.0 && oh > 0.0 && ((ow - new_w).abs() > 0.5 || (oh - new_h).abs() > 0.5) {
+				Some((new_w / ow, new_h / oh))
+			} else {
+				None
+			}
+		});
+		updates.push((n.uuid, tm.tex_albedo.0, encode_rgba_png(&trimmed), scale));
+	}
 
 	let mut count = 0usize;
-	for (tex_idx, tex) in updates {
+	for (node_id, tex_idx, tex, scale) in updates {
 		if let Some(slot) = model.textures.get_mut(tex_idx) {
 			*slot = tex;
 			count += 1;
 		}
+		if let Some((sx, sy)) = scale {
+			if let Some(mesh) = model.puppet.node_comps.get_mut::<Mesh>(node_id) {
+				let origin = mesh.origin;
+				for v in &mut mesh.vertices {
+					v.x = origin.x + (v.x - origin.x) * sx;
+					v.y = origin.y + (v.y - origin.y) * sy;
+				}
+			}
+		}
+	}
+	if count > 0 {
+		model.puppet.reset_contexts();
 	}
 	Ok(count)
 }
@@ -954,5 +1018,86 @@ mod tests {
 		assert_eq!(updated, 1);
 		assert_eq!(model.puppet.params.len(), orig_param_count);
 		assert_ne!(model.textures[0].data.len(), orig_tex_len);
+	}
+
+	#[test]
+	fn sync_psd_textures_disambiguates_duplicate_names_and_rescales_mesh() {
+		let layers = vec![
+			PsdExportLayer {
+				name: "highlight".to_owned(),
+				left: 4,
+				top: 4,
+				image: RgbaImage::from_pixel(10, 10, Rgba([255, 255, 255, 255])),
+				opacity: 255,
+				blend_mode: BlendMode::Normal,
+				clipping: false,
+				visible: true,
+			},
+			PsdExportLayer {
+				name: "highlight".to_owned(),
+				left: 30,
+				top: 4,
+				image: RgbaImage::from_pixel(10, 10, Rgba([200, 220, 255, 255])),
+				opacity: 255,
+				blend_mode: BlendMode::Normal,
+				clipping: false,
+				visible: true,
+			},
+		];
+		let psd1 = parse_psd_bytes(&write_layered_psd(64, 64, &layers).unwrap()).unwrap();
+		let mut model = import_psd_to_model_with_mode(&psd1, "DupTest", "grid", false, 2, 2);
+
+		let part_ids: Vec<InoxNodeUuid> = model
+			.puppet
+			.nodes
+			.pre_order_iter()
+			.filter(|n| model.puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some())
+			.map(|n| n.uuid)
+			.collect();
+		assert_eq!(part_ids.len(), 2);
+		let old_span_x = {
+			let m = model.puppet.node_comps.get::<Mesh>(part_ids[0]).unwrap();
+			let min_x = m.vertices.iter().map(|v| v.x).fold(f32::INFINITY, f32::min);
+			let max_x = m.vertices.iter().map(|v| v.x).fold(f32::NEG_INFINITY, f32::max);
+			max_x - min_x
+		};
+
+		let layers2 = vec![
+			PsdExportLayer {
+				name: "highlight".to_owned(),
+				left: 4,
+				top: 4,
+				image: RgbaImage::from_pixel(20, 10, Rgba([255, 0, 0, 255])),
+				opacity: 255,
+				blend_mode: BlendMode::Normal,
+				clipping: false,
+				visible: true,
+			},
+			PsdExportLayer {
+				name: "highlight".to_owned(),
+				left: 30,
+				top: 4,
+				image: RgbaImage::from_pixel(10, 10, Rgba([0, 255, 0, 255])),
+				opacity: 255,
+				blend_mode: BlendMode::Normal,
+				clipping: false,
+				visible: true,
+			},
+		];
+		let psd2 = parse_psd_bytes(&write_layered_psd(64, 64, &layers2).unwrap()).unwrap();
+		let updated = sync_psd_textures_into_model(&mut model, &psd2).unwrap();
+		assert_eq!(updated, 2);
+
+		let new_span_x = {
+			let m = model.puppet.node_comps.get::<Mesh>(part_ids[0]).unwrap();
+			let min_x = m.vertices.iter().map(|v| v.x).fold(f32::INFINITY, f32::min);
+			let max_x = m.vertices.iter().map(|v| v.x).fold(f32::NEG_INFINITY, f32::max);
+			max_x - min_x
+		};
+		assert!(
+			(new_span_x - old_span_x * (20.0 / 10.0)).abs() < 1e-2,
+			"expected mesh span rescaled proportionally: old={old_span_x}, new={new_span_x}"
+		);
+		assert_ne!(model.textures[0].data, model.textures[1].data);
 	}
 }

@@ -41,6 +41,8 @@ pub enum GpuError {
 	DeviceRequest(#[from] wgpu::RequestDeviceError),
 	#[error("GPU buffer map error: {0}")]
 	BufferMap(String),
+	#[error("Frame/output dimensions {width}x{height} exceed GPU max texture dimension {max}")]
+	DimensionsExceedLimit { width: u32, height: u32, max: u32 },
 	#[error("Transport/frame error: {0}")]
 	Transport(#[from] TransportError),
 }

@@ -320,7 +320,13 @@ impl<'a> InoxRenderer for SoftwareRenderer<'a> {
 		let mesh = components.mesh;
 		let vert_offset = render_ctx.vert_offset as usize;
 		let vert_len = render_ctx.vert_len;
-		let deforms = &puppet_render_ctx.vertex_buffers.deforms[vert_offset..vert_offset + vert_len];
+		let Some(deforms) = puppet_render_ctx
+			.vertex_buffers
+			.deforms
+			.get(vert_offset..vert_offset + vert_len)
+		else {
+			return;
+		};
 
 		let mvp = self.mvp_cam * *components.transform;
 		let wf = self.width as f32;
@@ -354,7 +360,13 @@ impl<'a> InoxRenderer for SoftwareRenderer<'a> {
 
 			for tri in mesh.indices.chunks_exact(3) {
 				let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-				if i0 >= screen_verts.len() || i1 >= screen_verts.len() || i2 >= screen_verts.len() {
+				if i0 >= screen_verts.len()
+					|| i1 >= screen_verts.len()
+					|| i2 >= screen_verts.len()
+					|| i0 >= mesh.uvs.len()
+					|| i1 >= mesh.uvs.len()
+					|| i2 >= mesh.uvs.len()
+				{
 					continue;
 				}
 				let p0 = screen_verts[i0];
@@ -441,7 +453,13 @@ impl<'a> InoxRenderer for SoftwareRenderer<'a> {
 		if self.wireframe && !as_mask {
 			for tri in mesh.indices.chunks_exact(3) {
 				let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-				if i0 >= screen_verts.len() || i1 >= screen_verts.len() || i2 >= screen_verts.len() {
+				if i0 >= screen_verts.len()
+					|| i1 >= screen_verts.len()
+					|| i2 >= screen_verts.len()
+					|| i0 >= mesh.uvs.len()
+					|| i1 >= mesh.uvs.len()
+					|| i2 >= mesh.uvs.len()
+				{
 					continue;
 				}
 				let wire_col = [0, 230, 190, 130];
@@ -547,6 +565,9 @@ pub fn render_frame_with_textures(
 	params: &HashMap<String, Vec2>,
 	opts: &RenderOptions,
 ) -> Result<RgbaImage, String> {
+	if opts.width == 0 || opts.height == 0 {
+		return Err("Render width and height must be non-zero".to_owned());
+	}
 	if model.puppet.render_ctx.is_none()
 		|| model
 			.puppet
@@ -573,9 +594,18 @@ pub fn render_frame_with_textures(
 	let viewport = vec2(opts.width as f32, opts.height as f32);
 	let mvp_cam = camera.matrix(viewport);
 
+	let force_straight = model
+		.puppet
+		.top_extras
+		.get("riglens_alpha")
+		.and_then(|v| v.as_str())
+		== Some("straight");
 	let tex_is_premul: Vec<bool> = decoded
 		.iter()
 		.map(|t| {
+			if force_straight {
+				return false;
+			}
 			let mut has_semi = false;
 			let mut exceeds = false;
 			for px in t.pixels().chunks_exact(4) {
@@ -655,6 +685,9 @@ pub fn render_grid(
 	wireframe: bool,
 	base_params: &HashMap<String, Vec2>,
 ) -> Result<RgbaImage, String> {
+	if tile_size == 0 {
+		return Err("Render tile_size must be non-zero".to_owned());
+	}
 	let param = model
 		.puppet
 		.params
@@ -675,7 +708,7 @@ pub fn render_grid(
 	let decoded = decode_model_textures(model.textures.iter());
 
 	for ry in 0..rows {
-		let ty = if rows == 1 { 0.0 } else { ry as f32 / 2.0 };
+		let ty = if rows == 1 { 0.0 } else { 1.0 - ry as f32 / 2.0 };
 		let py_val = min.y + (max.y - min.y) * ty;
 		for rx in 0..cols {
 			let tx = rx as f32 / 2.0;
@@ -717,6 +750,9 @@ pub fn render_anim_sheet(
 	tile_size: u32,
 	wireframe: bool,
 ) -> Result<RgbaImage, String> {
+	if tile_size == 0 {
+		return Err("Render tile_size must be non-zero".to_owned());
+	}
 	let frames = frames.clamp(1, 24);
 	let cols = frames.min(4);
 	let rows = frames.div_ceil(cols);
@@ -950,19 +986,31 @@ pub fn render_diagnostic(
 	height: u32,
 	scale: f32,
 ) -> Result<RgbaImage, String> {
+	render_diagnostic_with_camera(model, params, width, height, scale, RenderOptions::default().camera_pos)
+}
+
+/// Render an X-ray diagnostic PNG with an explicit `camera_pos`.
+pub fn render_diagnostic_with_camera(
+	model: &mut Model,
+	params: &HashMap<String, Vec2>,
+	width: u32,
+	height: u32,
+	scale: f32,
+	camera_pos: Vec2,
+) -> Result<RgbaImage, String> {
 	let opts = RenderOptions {
 		width,
 		height,
 		scale,
+		camera_pos,
 		wireframe: true,
 		dt: 0.0,
 		background: [20, 22, 30, 255],
-		..RenderOptions::default()
 	};
 	let mut img = render_frame(model, params, &opts)?;
 
 	let camera = Camera {
-		position: vec2(0.0, -35.0),
+		position: camera_pos,
 		rotation: 0.0,
 		scale: vec2(scale, scale),
 	};
@@ -988,7 +1036,7 @@ pub fn render_diagnostic(
 		let rc = model.puppet.render_ctx.as_ref()?;
 		let tm_rc = model.puppet.node_comps.get::<TexturedMeshRenderCtx>(fid)?;
 		let off = tm_rc.vert_offset as usize;
-		let deforms = &rc.vertex_buffers.deforms[off..off + tm_rc.vert_len];
+		let deforms = rc.vertex_buffers.deforms.get(off..off + tm_rc.vert_len)?;
 		let mut mn = vec2(f32::INFINITY, f32::INFINITY);
 		let mut mx = vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
 		for (i, &v) in mesh.vertices.iter().enumerate() {
@@ -1041,7 +1089,9 @@ pub fn render_diagnostic(
 			draw_crosshair(&mut img, pivot, 5.0, [255, 220, 80, 220]);
 
 			let off = tm_rc.vert_offset as usize;
-			let deforms = &rc.vertex_buffers.deforms[off..off + tm_rc.vert_len];
+			let Some(deforms) = rc.vertex_buffers.deforms.get(off..off + tm_rc.vert_len) else {
+				continue;
+			};
 			let rest_w: Vec<Vec2> = mesh
 				.vertices
 				.iter()
@@ -1061,6 +1111,15 @@ pub fn render_diagnostic(
 
 			for tri in mesh.indices.chunks_exact(3) {
 				let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+				if i0 >= rest_w.len()
+					|| i1 >= rest_w.len()
+					|| i2 >= rest_w.len()
+					|| i0 >= def_w.len()
+					|| i1 >= def_w.len()
+					|| i2 >= def_w.len()
+				{
+					continue;
+				}
 				let ra = (rest_w[i1].x - rest_w[i0].x) * (rest_w[i2].y - rest_w[i0].y)
 					- (rest_w[i1].y - rest_w[i0].y) * (rest_w[i2].x - rest_w[i0].x);
 				let da = (def_w[i1].x - def_w[i0].x) * (def_w[i2].y - def_w[i0].y)
@@ -1108,4 +1167,25 @@ pub fn render_diagnostic(
 	}
 
 	Ok(img)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::engine::Session;
+
+	#[test]
+	fn zero_dimension_renders_return_err_instead_of_panicking() {
+		let mut s = Session::new_sample();
+		let empty_params = HashMap::new();
+		let opts0 = RenderOptions {
+			width: 0,
+			height: 64,
+			..RenderOptions::default()
+		};
+		assert!(render_frame(&mut s.model, &empty_params, &opts0).is_err());
+		assert!(render_grid(&mut s.model, "Head:: Yaw-Pitch", 0, false, &empty_params).is_err());
+		assert!(render_anim_sheet(&mut s.model, None, 2, 0, false).is_err());
+		assert!(render_diagnostic(&mut s.model, &empty_params, 64, 0, 1.0).is_err());
+	}
 }

@@ -10,11 +10,17 @@ use riglens_mcp::audit::audit_rig;
 use riglens_mcp::engine::Session;
 use json::JsonValue;
 
-use crate::dialogs::{FileDialogMode, FileDialogResult, FileDialogState};
+use crate::dialogs::{pick_native_file_localized, FileDialogMode, FileDialogResult};
 use crate::startup::{
 	load_initial_session, pick_default_anim, pick_default_pad_params, pick_default_selected_node, write_inp_atomic,
 };
 use crate::Inox2dStudioApp;
+
+pub(crate) fn is_inp_path(path: &Path) -> bool {
+	path.extension()
+		.and_then(|s| s.to_str())
+		.is_some_and(|e| e.eq_ignore_ascii_case("inp"))
+}
 
 impl Inox2dStudioApp {
 	pub(crate) fn set_status(&mut self, ok: bool, msg: impl Into<String>) {
@@ -22,23 +28,57 @@ impl Inox2dStudioApp {
 		self.status_msg = msg.into();
 	}
 
+	pub(crate) fn active_param_value(&self, name: &str) -> GVec2 {
+		self.session
+			.param_overrides
+			.get(name)
+			.copied()
+			.unwrap_or_else(|| {
+				self.session
+					.model
+					.puppet
+					.params
+					.get(name)
+					.map(|p| p.defaults)
+					.unwrap_or(GVec2::ZERO)
+			})
+	}
+
+	pub(crate) fn apply_source_origin(&mut self, origin_path: Option<PathBuf>) {
+		if let Some(ref p) = origin_path {
+			if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+				self.last_browse_dir = Some(parent.to_path_buf());
+			}
+			self.suggested_inp_name = p
+				.file_stem()
+				.and_then(|s| s.to_str())
+				.map(|stem| format!("{stem}.inp"));
+		} else {
+			self.suggested_inp_name = None;
+		}
+		self.source_path = origin_path.filter(|p| is_inp_path(p));
+	}
+
 	pub(crate) fn begin_gesture_undo(&mut self) {
 		if self.gesture_snapshot.is_none() {
+			self.gesture_start_rev = self.session.revision;
 			self.gesture_snapshot = Some(self.session.snapshot());
 		}
 	}
 
 	pub(crate) fn finish_gesture_undo(&mut self) {
 		if let Some(snap) = self.gesture_snapshot.take() {
-			self.session.undo_stack.push(snap);
-			if self.session.undo_stack.len() > 40 {
-				self.session.undo_stack.remove(0);
+			if self.session.revision != self.gesture_start_rev {
+				self.session.undo_stack.push(snap);
+				if self.session.undo_stack.len() > 40 {
+					self.session.undo_stack.remove(0);
+				}
+				self.session.redo_stack.clear();
+				self.session.revision += 1;
+				self.sync_watch_out();
+				self.cached_rev = u64::MAX;
+				self.audit_rev = u64::MAX;
 			}
-			self.session.redo_stack.clear();
-			self.session.revision += 1;
-			self.sync_watch_out();
-			self.cached_rev = u64::MAX;
-			self.audit_rev = u64::MAX;
 		}
 	}
 
@@ -98,13 +138,12 @@ impl Inox2dStudioApp {
 		self.view_pan = Vec2::ZERO;
 	}
 
-	pub(crate) fn load_session_into_app(&mut self, mut session: Session, source_path: Option<PathBuf>, status_msg: String) {
-		// Preserve running booster lifecycle if user switches model files cleanly
-		std::mem::swap(&mut session.booster, &mut self.session.booster);
-		self.session = session;
-		self.source_path = source_path;
-		self.last_saved_rev = self.session.revision;
-		self.last_synced_rev = self.session.revision;
+	pub(crate) fn refresh_welcome_projects(&mut self) {
+		self.welcome_projects = crate::project::list_projects(&crate::project::default_projects_root());
+		self.welcome_projects_dirty = false;
+	}
+
+	pub(crate) fn resync_ui_after_model_replace(&mut self) {
 		self.selected_node = pick_default_selected_node(&self.session.model.puppet);
 		self.active_anim = pick_default_anim(&self.session.model.puppet);
 		self.selected_physics = self
@@ -118,6 +157,7 @@ impl Inox2dStudioApp {
 		self.pad_params = pick_default_pad_params(&self.session.model.puppet);
 		self.brush_param = self.pad_params[0].clone();
 		self.selected_curve_lane = Some((self.brush_param.clone(), 0));
+		self.selected_keyframe = None;
 		self.selected_vertices.clear();
 		self.collapsed_nodes.clear();
 		self.inspector_state.rename_node_id = None;
@@ -125,10 +165,23 @@ impl Inox2dStudioApp {
 		self.gl_geo = None;
 		self.needs_initial_fit = true;
 		self.model_gen = self.model_gen.wrapping_add(1);
-		self.sync_watch_out();
 		self.fit_puppet_scale();
 		self.cached_rev = u64::MAX;
 		self.audit_rev = u64::MAX;
+	}
+
+	pub(crate) fn load_session_into_app(&mut self, mut session: Session, source_path: Option<PathBuf>, status_msg: String) {
+		// Preserve running booster lifecycle if user switches model files cleanly
+		std::mem::swap(&mut session.booster, &mut self.session.booster);
+		self.watch_path = None;
+		self.last_watch_mtime = None;
+		self.session = session;
+		self.apply_source_origin(source_path);
+		self.last_saved_rev = self.session.revision;
+		self.autosave.reset_for_revision(self.session.revision);
+		self.resync_ui_after_model_replace();
+		self.sync_watch_out();
+		self.last_synced_rev = self.session.revision;
 		self.refresh_audit();
 		let warns = self.session.model.puppet.diagnostics.len();
 		if warns > 0 {
@@ -143,12 +196,16 @@ impl Inox2dStudioApp {
 		match self.session.exec(cmd, &params) {
 			Ok(_) => {
 				if self.session.revision != prev {
-					if matches!(
+					if matches!(cmd, "puppet.new_sample" | "puppet.import" | "puppet.import_psd") {
+						self.watch_path = None;
+						self.last_watch_mtime = None;
+						self.active_project = None;
+						self.apply_source_origin(None);
+						self.autosave.reset_for_revision(self.session.revision);
+						self.resync_ui_after_model_replace();
+					} else if matches!(
 						cmd,
-						"puppet.new_sample"
-							| "puppet.import_psd"
-							| "psd.sync_textures"
-							| "puppet.import"
+						"psd.sync_textures"
 							| "node.add_part"
 							| "node.synthesize_overlay"
 							| "edit.undo"
@@ -170,24 +227,49 @@ impl Inox2dStudioApp {
 	}
 
 	pub(crate) fn open_file_dialog(&mut self, mode: FileDialogMode) {
+		if self.screenshot_out.is_some() || cfg!(test) {
+			return;
+		}
 		let start_dir = self
 			.source_path
-			.as_ref()
+			.as_deref()
 			.and_then(|p| p.parent())
-			.map(|p| p.to_path_buf())
+			.filter(|d| !d.as_os_str().is_empty())
+			.or(self.last_browse_dir.as_deref())
+			.map(Path::to_path_buf)
 			.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-		let suggested = if mode == FileDialogMode::SaveInpAs {
-			self.source_path
-				.as_ref()
-				.and_then(|p| p.file_name())
-				.and_then(|s| s.to_str())
+		let suggested_owned = if mode.is_save() {
+			let ext = mode.extensions().first().copied().unwrap_or("inp");
+			if ext.eq_ignore_ascii_case("inp") && self.suggested_inp_name.is_some() {
+				self.suggested_inp_name.clone()
+			} else {
+				self.source_path
+					.as_ref()
+					.and_then(|p| p.file_stem())
+					.and_then(|s| s.to_str())
+					.map(|stem| format!("{stem}.{ext}"))
+					.or_else(|| {
+						self.suggested_inp_name
+							.as_deref()
+							.and_then(|n| Path::new(n).file_stem())
+							.and_then(|s| s.to_str())
+							.map(|stem| format!("{stem}.{ext}"))
+					})
+					.or_else(|| Some(format!("{}.{ext}", self.model_display_name())))
+			}
 		} else {
 			None
 		};
-		self.file_dialog = Some(FileDialogState::open(mode, start_dir, suggested));
+		let title = self.i18n.t(mode.title_key()).to_owned();
+		let filter_name = self.i18n.t(mode.filter_key()).to_owned();
+		let result = match pick_native_file_localized(mode, &title, &filter_name, &start_dir, suggested_owned.as_deref()) {
+			Some(path) => FileDialogResult::Confirmed(mode, path),
+			None => FileDialogResult::Cancelled,
+		};
+		self.handle_file_dialog_result(result);
 	}
 
-	pub(crate) fn open_model_from_path(&mut self, path: &Path) {
+	pub(crate) fn open_model_from_path(&mut self, path: &Path) -> bool {
 		let path_str = path.to_string_lossy().to_string();
 		match load_initial_session(&path_str) {
 			Ok(session) => {
@@ -196,20 +278,45 @@ impl Inox2dStudioApp {
 					Some(path.to_path_buf()),
 					format!("Opened '{}'", path.display()),
 				);
+				true
 			}
 			Err(err) => {
 				self.set_status(false, err);
+				false
 			}
 		}
 	}
 
+	pub(crate) fn save_or_prompt_save_as(&mut self) {
+		if let Some(p) = self
+			.watch_path
+			.clone()
+			.or_else(|| self.source_path.clone())
+			.filter(|p| is_inp_path(p))
+		{
+			self.save_model_to_path(&p);
+		} else {
+			self.open_file_dialog(FileDialogMode::SaveInpAs);
+		}
+	}
+
 	pub(crate) fn save_model_to_path(&mut self, path: &Path) {
+		if !is_inp_path(path) {
+			self.set_status(
+				false,
+				format!(
+					"Refusing direct save to non-.inp file '{}'; use Save .inp As",
+					path.display()
+				),
+			);
+			return;
+		}
 		let path_str = path.to_string_lossy().to_string();
 		let prev_rev = self.session.revision;
 		match self.session.exec("puppet.save", &json::object! { path: path_str.as_str() }) {
 			Ok(_) => {
 				self.session.revision = prev_rev;
-				self.source_path = Some(path.to_path_buf());
+				self.apply_source_origin(Some(path.to_path_buf()));
 				self.last_saved_rev = self.session.revision;
 				self.autosave.clear_recovery();
 				self.pending_recovery = None;
@@ -223,79 +330,67 @@ impl Inox2dStudioApp {
 
 	pub(crate) fn handle_file_dialog_result(&mut self, res: FileDialogResult) {
 		match res {
-			FileDialogResult::Pending => {}
-			FileDialogResult::Cancelled => {
-				self.file_dialog = None;
-				self.pending_psd_project_import = false;
-			}
-			FileDialogResult::Confirmed(mode, path) => {
-				self.file_dialog = None;
-				let is_proj_psd = self.pending_psd_project_import;
-				self.pending_psd_project_import = false;
-				match mode {
-					FileDialogMode::OpenModel => {
-						let is_psd = path
-							.extension()
-							.and_then(|e| e.to_str())
-							.map(|s| s.eq_ignore_ascii_case("psd"))
-							.unwrap_or(false);
-						if is_proj_psd && is_psd {
+			FileDialogResult::Cancelled => {}
+			FileDialogResult::Confirmed(mode, path) => match mode {
+				FileDialogMode::ImportPsdProject => {
+					let path_str = path.to_string_lossy().to_string();
+					match load_initial_session(&path_str) {
+						Ok(session) => {
 							match crate::project::create_project_from_psd(
 								&crate::project::default_projects_root(),
 								&path,
 							) {
 								Ok(ws) => {
-									let path_str = path.to_string_lossy().to_string();
-									match load_initial_session(&path_str) {
-										Ok(session) => {
-											let _ = write_inp_atomic(&session.model, &ws.working_inp);
-											let msg = format!(
-												"Project '{}' created (vault PSD backed up)",
-												ws.name
-											);
-											let working = ws.working_inp.clone();
-											self.active_project = Some(ws);
-											self.show_welcome = false;
-											self.load_session_into_app(session, Some(working), msg);
-										}
-										Err(err) => self.set_status(false, err),
+									if let Err(err) = write_inp_atomic(&session.model, &ws.working_inp) {
+										let _ = fs::remove_dir_all(&ws.root_dir);
+										self.set_status(false, err);
+									} else {
+										let msg = format!("Project '{}' created (vault PSD backed up)", ws.name);
+										let working = ws.working_inp.clone();
+										self.active_project = Some(ws);
+										self.show_welcome = false;
+										self.refresh_welcome_projects();
+										self.load_session_into_app(session, Some(working), msg);
 									}
 								}
 								Err(err) => self.set_status(false, err),
 							}
-						} else {
-							self.active_project = None;
-							self.show_welcome = false;
-							self.open_model_from_path(&path);
 						}
-					}
-					FileDialogMode::SyncPsdTextures => {
-						let p = path.to_string_lossy().to_string();
-						self.exec_cmd(
-							"psd.sync_textures",
-							json::object! { path: p.as_str() },
-							&format!("Synced updated textures from '{}'", path.display()),
-						);
-					}
-					FileDialogMode::SaveInpAs => self.save_model_to_path(&path),
-					FileDialogMode::ExportRigJson => {
-						let p = path.to_string_lossy().to_string();
-						self.exec_cmd(
-							"puppet.export",
-							json::object! { path: p.as_str(), format: "rig-json", pretty: true },
-							&format!("Exported '{}'", path.display()),
-						);
-					}
-					FileDialogMode::ExportPsd => {
-						let p = path.to_string_lossy().to_string();
-						self.exec_cmd(
-							"puppet.export_psd",
-							json::object! { path: p.as_str() },
-							&format!("Exported PSD '{}'", path.display()),
-						);
+						Err(err) => self.set_status(false, err),
 					}
 				}
-			}
+				FileDialogMode::OpenModel => {
+					if self.open_model_from_path(&path) {
+						self.active_project = None;
+						self.show_welcome = false;
+					}
+				}
+				FileDialogMode::SyncPsdTextures => {
+					let p = path.to_string_lossy().to_string();
+					self.exec_cmd(
+						"psd.sync_textures",
+						json::object! { path: p.as_str() },
+						&format!("Synced updated textures from '{}'", path.display()),
+					);
+				}
+				FileDialogMode::SaveInpAs => self.save_model_to_path(&path),
+				FileDialogMode::ExportRigJson => {
+					let p = path.to_string_lossy().to_string();
+					self.exec_cmd(
+						"puppet.export",
+						json::object! { path: p.as_str(), format: "rig-json", pretty: true },
+						&format!("Exported '{}'", path.display()),
+					);
+				}
+				FileDialogMode::ExportPsd => {
+					let p = path.to_string_lossy().to_string();
+					self.exec_cmd(
+						"puppet.export_psd",
+						json::object! { path: p.as_str() },
+						&format!("Exported PSD '{}'", path.display()),
+					);
+				}
+			},
 		}
 	}
 

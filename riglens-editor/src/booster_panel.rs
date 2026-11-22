@@ -29,6 +29,7 @@ pub fn draw_booster_tab(
 	ui: &mut egui::Ui,
 	booster: &mut BoosterController,
 	state: &mut BoosterUiState,
+	i18n: &crate::i18n::I18n,
 	status_msg: &mut String,
 ) {
 	if !state.initialized {
@@ -40,18 +41,18 @@ pub fn draw_booster_tab(
 
 	let status = booster.status();
 	let badge = if status.running {
-		("RUNNING", theme::AUDIT_OK_GREEN)
+		(i18n.t("booster.running"), theme::AUDIT_OK_GREEN)
 	} else {
-		("STOPPED", theme::TEXT_MUTED)
+		(i18n.t("booster.stopped"), theme::TEXT_MUTED)
 	};
-	theme::section_header(ui, "RIGLENS BOOSTER M4", Some(badge));
+	theme::section_header(ui, i18n.t("booster.header"), Some(badge));
 	ui.add_space(4.0);
 
 	ui.horizontal_wrapped(|ui| {
 		if !status.running {
 			if ui
 				.add(
-					egui::Button::new(RichText::new("Start Booster").strong().color(Color32::WHITE))
+					egui::Button::new(RichText::new(i18n.t("booster.start")).strong().color(Color32::WHITE))
 						.fill(theme::BTN_ACTIVE),
 				)
 				.clicked()
@@ -64,7 +65,7 @@ pub fn draw_booster_tab(
 			}
 		} else if ui
 			.add(
-				egui::Button::new(RichText::new("Stop Booster").strong().color(Color32::WHITE))
+				egui::Button::new(RichText::new(i18n.t("booster.stop")).strong().color(Color32::WHITE))
 					.fill(Color32::from_rgb(153, 27, 27)),
 			)
 			.clicked()
@@ -73,7 +74,7 @@ pub fn draw_booster_tab(
 			*status_msg = "RigLens Booster stopped".to_owned();
 		}
 
-		if ui.button("Apply Config").clicked() {
+		if ui.button(i18n.t("booster.apply")).clicked() {
 			sync_spout_in_from_buf(state);
 			match booster.configure(state.draft.clone()) {
 				Ok(st) => {
@@ -84,7 +85,7 @@ pub fn draw_booster_tab(
 			}
 		}
 
-		if ui.small_button("Refresh Spout").clicked() {
+		if ui.small_button(i18n.t("booster.refresh_spout")).clicked() {
 			state.senders_cache = list_spout_senders();
 			*status_msg = format!("Found {} active Spout2 sender(s)", state.senders_cache.len());
 		}
@@ -99,14 +100,18 @@ pub fn draw_booster_tab(
 		};
 		ui.label(RichText::new("VTS:").size(11.0).color(theme::TEXT_MUTED));
 		ui.label(
-			RichText::new(if status.vts_connected { "Connected" } else { "Offline" })
-				.size(11.0)
-				.strong()
-				.color(vts_col),
+			RichText::new(if status.vts_connected {
+				i18n.t("booster.connected")
+			} else {
+				i18n.t("booster.offline")
+			})
+			.size(11.0)
+			.strong()
+			.color(vts_col),
 		);
 		ui.separator();
 		let gpu_lbl = if status.gpu_adapter.is_empty() {
-			"Idle"
+			i18n.t("booster.idle")
 		} else {
 			&status.gpu_adapter
 		};
@@ -122,11 +127,11 @@ pub fn draw_booster_tab(
 	}
 
 	ui.add_space(6.0);
-	theme::section_header(ui, "VTS & SPOUT2 BRIDGE", None);
+	theme::section_header(ui, i18n.t("booster.bridge_header"), None);
 	ui.add_space(2.0);
-	ui.checkbox(&mut state.draft.enable_vts, "Enable VTS Port 8001 Physics Injection");
+	ui.checkbox(&mut state.draft.enable_vts, i18n.t("booster.enable_vts"));
 	ui.horizontal(|ui| {
-		ui.label(RichText::new("VTS URL").size(11.0).color(theme::TEXT_MUTED));
+		ui.label(RichText::new(i18n.t("booster.vts_url")).size(11.0).color(theme::TEXT_MUTED));
 		ui.add_sized(
 			[ui.available_width().max(80.0), 20.0],
 			egui::TextEdit::singleline(&mut state.draft.vts_url),
@@ -134,9 +139,9 @@ pub fn draw_booster_tab(
 	});
 
 	ui.horizontal(|ui| {
-		ui.label(RichText::new("Spout In").size(11.0).color(theme::TEXT_MUTED));
+		ui.label(RichText::new(i18n.t("booster.spout_in")).size(11.0).color(theme::TEXT_MUTED));
 		let combo_label = if state.spout_in_buf.trim().is_empty() {
-			"(None)".to_owned()
+			i18n.t("booster.none").to_owned()
 		} else {
 			state.spout_in_buf.clone()
 		};
@@ -145,7 +150,7 @@ pub fn draw_booster_tab(
 			.width(120.0)
 			.show_ui(ui, |ui| {
 				if ui
-					.selectable_label(state.spout_in_buf.trim().is_empty(), "(None - Physics Only)")
+					.selectable_label(state.spout_in_buf.trim().is_empty(), i18n.t("booster.none_phys_only"))
 					.clicked()
 				{
 					state.spout_in_buf.clear();
@@ -172,13 +177,13 @@ pub fn draw_booster_tab(
 			});
 		ui.add_sized(
 			[ui.available_width().max(60.0), 20.0],
-			egui::TextEdit::singleline(&mut state.spout_in_buf).hint_text("Disabled"),
+			egui::TextEdit::singleline(&mut state.spout_in_buf).hint_text(i18n.t("booster.disabled")),
 		);
 	});
 	sync_spout_in_from_buf(state);
 
 	ui.horizontal(|ui| {
-		ui.label(RichText::new("Spout Out").size(11.0).color(theme::TEXT_MUTED));
+		ui.label(RichText::new(i18n.t("booster.spout_out")).size(11.0).color(theme::TEXT_MUTED));
 		ui.add_sized(
 			[ui.available_width().max(80.0), 20.0],
 			egui::TextEdit::singleline(&mut state.draft.spout_out),
@@ -186,14 +191,14 @@ pub fn draw_booster_tab(
 	});
 
 	ui.add_space(6.0);
-	theme::section_header(ui, "GPU FX & 2D-NATIVE DLSS (M2/M3)", None);
+	theme::section_header(ui, i18n.t("booster.gpu_header"), None);
 	ui.add_space(2.0);
-	ui.checkbox(&mut state.draft.enable_gpu, "Enable wgpu Compute Pipeline");
-	ui.checkbox(&mut state.draft.enable_soft_body, "XPBD Soft-Body Secondary Warp");
-	ui.add(egui::Slider::new(&mut state.draft.rim_intensity, 0.0..=2.0).text("Rim Intensity"));
+	ui.checkbox(&mut state.draft.enable_gpu, i18n.t("booster.enable_gpu"));
+	ui.checkbox(&mut state.draft.enable_soft_body, i18n.t("booster.enable_soft_body"));
+	ui.add(egui::Slider::new(&mut state.draft.rim_intensity, 0.0..=2.0).text(i18n.t("booster.rim_intensity")));
 
 	ui.horizontal(|ui| {
-		ui.label(RichText::new("Rim Theme").size(11.0).color(theme::TEXT_MUTED));
+		ui.label(RichText::new(i18n.t("booster.rim_theme")).size(11.0).color(theme::TEXT_MUTED));
 		egui::ComboBox::from_id_source("booster_rim_theme")
 			.selected_text(&state.draft.rim_theme)
 			.width(120.0)
@@ -203,10 +208,10 @@ pub fn draw_booster_tab(
 				}
 			});
 	});
-	ui.add(egui::Slider::new(&mut state.draft.particle_count, 0..=2048).text("GPU Particles"));
+	ui.add(egui::Slider::new(&mut state.draft.particle_count, 0..=2048).text(i18n.t("booster.gpu_particles")));
 
 	ui.horizontal(|ui| {
-		ui.label(RichText::new("Upscale").size(11.0).color(theme::TEXT_MUTED));
+		ui.label(RichText::new(i18n.t("booster.upscale")).size(11.0).color(theme::TEXT_MUTED));
 		for (label, factor) in [("1.0x", 1.0f32), ("1.5x", 1.5), ("2.0x", 2.0)] {
 			let selected = (state.draft.upscale_factor - factor).abs() < 0.05;
 			if ui.selectable_label(selected, label).clicked() {
@@ -214,51 +219,51 @@ pub fn draw_booster_tab(
 			}
 		}
 	});
-	ui.add(egui::Slider::new(&mut state.draft.upscale_sharpness, 0.0..=1.0).text("DLSS Sharpness"));
+	ui.add(egui::Slider::new(&mut state.draft.upscale_sharpness, 0.0..=1.0).text(i18n.t("booster.dlss_sharpness")));
 	ui.horizontal(|ui| {
-		ui.label(RichText::new("Frame Gen").size(11.0).color(theme::TEXT_MUTED));
-		for (label, mult) in [("1x Off", 1u32), ("2x", 2), ("3x", 3)] {
+		ui.label(RichText::new(i18n.t("booster.frame_gen")).size(11.0).color(theme::TEXT_MUTED));
+		for (label, mult) in [(i18n.t("booster.frame_gen_off"), 1u32), ("2x", 2), ("3x", 3)] {
 			ui.selectable_value(&mut state.draft.frame_gen_multiplier, mult, label);
 		}
 	});
 
 	ui.add_space(6.0);
-	theme::section_header(ui, "120HZ PHYSICS", None);
+	theme::section_header(ui, i18n.t("booster.physics_header"), None);
 	ui.add_space(2.0);
-	ui.add(egui::Slider::new(&mut state.draft.tick_hz, 30.0..=240.0).text("Tick Hz"));
-	ui.add(egui::Slider::new(&mut state.draft.wind_turbulence, 0.0..=2.0).text("Wind Turbulence"));
+	ui.add(egui::Slider::new(&mut state.draft.tick_hz, 30.0..=240.0).text(i18n.t("booster.tick_hz")));
+	ui.add(egui::Slider::new(&mut state.draft.wind_turbulence, 0.0..=2.0).text(i18n.t("booster.wind_turbulence")));
 
 	ui.add_space(6.0);
-	theme::section_header(ui, "LIVE TELEMETRY", None);
+	theme::section_header(ui, i18n.t("booster.telemetry_header"), None);
 	ui.add_space(2.0);
 	egui::Grid::new("booster_telemetry_grid")
 		.num_columns(2)
 		.spacing([12.0, 3.0])
 		.show(ui, |ui| {
-			telemetry_row(ui, "Ticks", &format!("{}", status.ticks));
+			telemetry_row(ui, i18n.t("booster.tel.ticks"), &format!("{}", status.ticks));
 			telemetry_row(
 				ui,
-				"Frames Fwd / Gen",
+				i18n.t("booster.tel.frames"),
 				&format!("{} / {}", status.frames_forwarded, status.generated_frames),
 			);
 			telemetry_row(
 				ui,
-				"GPU Frames / ms",
+				i18n.t("booster.tel.gpu"),
 				&format!("{} ({:.2} ms)", status.gpu_frames_processed, status.avg_gpu_ms),
 			);
 			telemetry_row(
 				ui,
-				"VTS Inj / Err",
+				i18n.t("booster.tel.vts"),
 				&format!("{} / {}", status.vts_injects, status.vts_errors),
 			);
 			telemetry_row(
 				ui,
-				"Wind X / Y",
+				i18n.t("booster.tel.wind"),
 				&format!("{:+.2} / {:+.2}", status.wind[0], status.wind[1]),
 			);
 			telemetry_row(
 				ui,
-				"Hair / Acc",
+				i18n.t("booster.tel.hair_acc"),
 				&format!(
 					"({:+.2},{:+.2}) ({:+.2},{:+.2})",
 					status.hair[0], status.hair[1], status.accessory[0], status.accessory[1]
@@ -266,18 +271,18 @@ pub fn draw_booster_tab(
 			);
 			telemetry_row(
 				ui,
-				"Bounce / Squash / Voice",
+				i18n.t("booster.tel.bounce"),
 				&format!(
 					"{:+.2} / {:+.2} / {:.2}",
 					status.body_bounce_y, status.squash, status.voice_tremor
 				),
 			);
 			let senders_lbl = if status.spout_senders.is_empty() {
-				"none".to_owned()
+				i18n.t("booster.tel.none").to_owned()
 			} else {
 				status.spout_senders.join(", ")
 			};
-			telemetry_row(ui, "Spout Senders", &senders_lbl);
+			telemetry_row(ui, i18n.t("booster.tel.senders"), &senders_lbl);
 		});
 }
 

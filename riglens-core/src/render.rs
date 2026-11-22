@@ -204,7 +204,13 @@ impl RenderCtx {
 		for node in nodes.iter() {
 			let drawable_kind = DrawableKind::new(node.uuid, comps, true);
 			if let Some(drawable_kind) = drawable_kind {
-				root_drawables_count += 1;
+				if node.uuid != nodes.root_node_id
+					&& !matches!(
+						DrawableKind::new(nodes.get_parent(node.uuid).uuid, comps, false),
+						Some(DrawableKind::Composite(_))
+					) {
+					root_drawables_count += 1;
+				}
 
 				match drawable_kind {
 					DrawableKind::TexturedMesh(components) => {
@@ -238,9 +244,6 @@ impl RenderCtx {
 								}
 							})
 							.collect();
-
-						// composite children are excluded from root_drawables_zsorted
-						root_drawables_count -= children_list.len();
 
 						comps.set(
 							node.uuid,
@@ -278,6 +281,9 @@ impl RenderCtx {
 	pub(crate) fn update(&mut self, nodes: &InoxNodeTree, comps: &mut World) {
 		// Propagate MeshGroup, GridDeformer and PathDeformer deformations top-down before combining Part deforms.
 		for node in nodes.pre_order_iter().skip(1) {
+			if !nodes.is_effectively_enabled(node.uuid) {
+				continue;
+			}
 			if comps.get::<MeshGroup>(node.uuid).is_some() {
 				let Some(mg_mesh) = comps.get::<Mesh>(node.uuid).cloned() else {
 					continue;
@@ -650,40 +656,81 @@ pub trait InoxRendererExt {
 	fn draw(&self, puppet: &Puppet);
 }
 
-impl<T: InoxRenderer> InoxRendererExt for T {
-	fn draw_drawable(&self, as_mask: bool, comps: &World, id: InoxNodeUuid) {
-		let drawable_kind = DrawableKind::new(id, comps, false).expect("Node must be a Drawable.");
-		let masks = match drawable_kind {
-			DrawableKind::TexturedMesh(ref components) => &components.drawable.masks,
-			DrawableKind::Composite(ref components) => &components.drawable.masks,
-		};
+const MAX_MASK_DEPTH: usize = 8;
 
-		let mut has_masks = false;
-		if let Some(ref masks) = masks {
+fn draw_drawable_guarded<T: InoxRenderer + InoxRendererExt + ?Sized>(
+	renderer: &T,
+	as_mask: bool,
+	comps: &World,
+	id: InoxNodeUuid,
+	visited: &mut HashSet<InoxNodeUuid>,
+	depth: usize,
+) {
+	if depth > MAX_MASK_DEPTH || !visited.insert(id) {
+		tracing::warn!(
+			node_uuid = id.0,
+			depth,
+			"Mask recursion depth limit or cycle detected; skipping drawable."
+		);
+		return;
+	}
+
+	let Some(drawable_kind) = DrawableKind::new(id, comps, false) else {
+		tracing::warn!(node_uuid = id.0, "Drawable/mask target missing or invalid; skipping.");
+		visited.remove(&id);
+		return;
+	};
+	if as_mask && matches!(drawable_kind, DrawableKind::Composite(_)) {
+		tracing::warn!(node_uuid = id.0, "Composite node used as mask source is unsupported; skipping.");
+		visited.remove(&id);
+		return;
+	}
+
+	let masks = match drawable_kind {
+		DrawableKind::TexturedMesh(ref components) => &components.drawable.masks,
+		DrawableKind::Composite(ref components) => &components.drawable.masks,
+	};
+
+	let mut has_masks = false;
+	if let Some(ref masks) = masks {
+		if !masks.masks.is_empty() {
 			has_masks = true;
-			self.on_begin_masks(masks);
+			renderer.on_begin_masks(masks);
 			for mask in &masks.masks {
-				self.on_begin_mask(mask);
-
-				self.draw_drawable(true, comps, mask.source);
+				renderer.on_begin_mask(mask);
+				draw_drawable_guarded(renderer, true, comps, mask.source, visited, depth + 1);
 			}
-			self.on_begin_masked_content();
-		}
-
-		match drawable_kind {
-			DrawableKind::TexturedMesh(ref components) => {
-				self.draw_textured_mesh_content(as_mask, components, comps.get(id).unwrap(), id)
-			}
-			DrawableKind::Composite(ref components) => self.draw_composite(as_mask, comps, components, id),
-		}
-
-		if has_masks {
-			self.on_end_mask();
+			renderer.on_begin_masked_content();
 		}
 	}
 
+	match drawable_kind {
+		DrawableKind::TexturedMesh(ref components) => {
+			if let Some(tm_ctx) = comps.get::<TexturedMeshRenderCtx>(id) {
+				renderer.draw_textured_mesh_content(as_mask, components, tm_ctx, id);
+			}
+		}
+		DrawableKind::Composite(ref components) => renderer.draw_composite(as_mask, comps, components, id),
+	}
+
+	if has_masks {
+		renderer.on_end_mask();
+	}
+
+	visited.remove(&id);
+}
+
+impl<T: InoxRenderer> InoxRendererExt for T {
+	fn draw_drawable(&self, as_mask: bool, comps: &World, id: InoxNodeUuid) {
+		let mut visited = HashSet::new();
+		draw_drawable_guarded(self, as_mask, comps, id, &mut visited, 0);
+	}
+
 	fn draw_composite(&self, as_mask: bool, comps: &World, components: &CompositeComponents, id: InoxNodeUuid) {
-		let render_ctx = comps.get::<CompositeRenderCtx>(id).unwrap();
+		let Some(render_ctx) = comps.get::<CompositeRenderCtx>(id) else {
+			tracing::warn!(node_uuid = id.0, "CompositeRenderCtx missing; skipping.");
+			return;
+		};
 		if render_ctx.zsorted_children_list.is_empty() {
 			// Optimization: Nothing to be drawn, skip context switching
 			return;
@@ -692,13 +739,19 @@ impl<T: InoxRenderer> InoxRendererExt for T {
 		self.begin_composite_content(as_mask, components, render_ctx, id);
 
 		for uuid in &render_ctx.zsorted_children_list {
-			let drawable_kind = DrawableKind::new(*uuid, comps, false)
-				.expect("All children in zsorted_children_list should be a Drawable.");
+			let Some(drawable_kind) = DrawableKind::new(*uuid, comps, false) else {
+				continue;
+			};
 			match drawable_kind {
 				DrawableKind::TexturedMesh(components) => {
-					self.draw_textured_mesh_content(as_mask, &components, comps.get(*uuid).unwrap(), *uuid)
+					if let Some(tm_ctx) = comps.get::<TexturedMeshRenderCtx>(*uuid) {
+						self.draw_textured_mesh_content(as_mask, &components, tm_ctx, *uuid);
+					}
 				}
-				DrawableKind::Composite { .. } => panic!("Composite inside Composite not allowed."),
+				DrawableKind::Composite { .. } => {
+					tracing::warn!(node_uuid = uuid.0, "Composite inside Composite not allowed; skipping.");
+					continue;
+				}
 			}
 		}
 
@@ -716,13 +769,214 @@ impl<T: InoxRenderer> InoxRendererExt for T {
 	/// - The provided `InoxRender` implementation is wrong.
 	/// - `puppet` here does not belong to the `model` this `renderer` is initialized with. This will likely result in panics for non-existent node uuids.
 	fn draw(&self, puppet: &Puppet) {
-		for uuid in &puppet
-			.render_ctx
-			.as_ref()
-			.expect("RenderCtx of puppet must be initialized before calling draw().")
-			.root_drawables_zsorted
-		{
+		let Some(ref render_ctx) = puppet.render_ctx else {
+			tracing::warn!("RenderCtx of puppet is not initialized; skipping draw().");
+			return;
+		};
+		for uuid in &render_ctx.root_drawables_zsorted {
 			self.draw_drawable(false, &puppet.node_comps, *uuid);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::math::transform::TransformOffset;
+	use crate::node::components::{BlendMode, Blending, Composite, Drawable, MaskMode, TexturedMesh};
+	use crate::node::InoxNode;
+	use crate::texture::TextureId;
+	use glam::Vec3;
+	use std::cell::RefCell;
+
+	fn make_part_node(puppet: &mut Puppet, parent: InoxNodeUuid, uuid: u32, name: &str, masks: Option<Masks>) -> InoxNodeUuid {
+		let id = InoxNodeUuid(uuid);
+		puppet.nodes.add(
+			parent,
+			id,
+			InoxNode {
+				uuid: id,
+				name: name.to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		puppet.node_comps.add(
+			id,
+			Drawable {
+				blending: Blending {
+					mode: BlendMode::Normal,
+					tint: Vec3::ONE,
+					screen_tint: Vec3::ZERO,
+					opacity: 1.0,
+				},
+				masks,
+			},
+		);
+		puppet.node_comps.add(
+			id,
+			TexturedMesh {
+				tex_albedo: TextureId(0),
+				tex_emissive: TextureId(0),
+				tex_bumpmap: TextureId(0),
+			},
+		);
+		puppet.node_comps.add(
+			id,
+			Mesh {
+				vertices: vec![vec2(-10.0, -10.0), vec2(10.0, -10.0), vec2(0.0, 10.0)],
+				uvs: vec![vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.5, 1.0)],
+				indices: vec![0, 1, 2],
+				origin: Vec2::ZERO,
+			},
+		);
+		id
+	}
+
+	struct CountingRenderer {
+		drawn: RefCell<Vec<(InoxNodeUuid, bool)>>,
+	}
+
+	impl InoxRenderer for CountingRenderer {
+		fn on_begin_masks(&self, _: &Masks) {}
+		fn on_begin_mask(&self, _: &Mask) {}
+		fn on_begin_masked_content(&self) {}
+		fn on_end_mask(&self) {}
+		fn draw_textured_mesh_content(
+			&self,
+			as_mask: bool,
+			_: &TexturedMeshComponents,
+			_: &TexturedMeshRenderCtx,
+			id: InoxNodeUuid,
+		) {
+			self.drawn.borrow_mut().push((id, as_mask));
+		}
+		fn begin_composite_content(&self, _: bool, _: &CompositeComponents, _: &CompositeRenderCtx, _: InoxNodeUuid) {}
+		fn finish_composite_content(&self, _: bool, _: &CompositeComponents, _: &CompositeRenderCtx, _: InoxNodeUuid) {}
+	}
+
+	#[test]
+	fn composite_with_multiple_children_before_other_drawables_does_not_underflow() {
+		let mut puppet = Puppet::new_empty("CompositeOrderTest");
+		let root = puppet.nodes.root_node_id;
+		let comp = InoxNodeUuid(10);
+		puppet.nodes.add(
+			root,
+			comp,
+			InoxNode {
+				uuid: comp,
+				name: "Comp".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		puppet.node_comps.add(
+			comp,
+			Drawable {
+				blending: Blending {
+					mode: BlendMode::Normal,
+					tint: Vec3::ONE,
+					screen_tint: Vec3::ZERO,
+					opacity: 1.0,
+				},
+				masks: None,
+			},
+		);
+		puppet.node_comps.add(comp, Composite {});
+		make_part_node(&mut puppet, comp, 11, "Child1", None);
+		make_part_node(&mut puppet, comp, 12, "Child2", None);
+		make_part_node(&mut puppet, root, 13, "Sibling", None);
+
+		puppet.init_all();
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+
+		let rc = puppet.render_ctx.as_ref().unwrap();
+		assert_eq!(rc.root_drawables_zsorted.len(), 2);
+		assert!(rc.root_drawables_zsorted.contains(&comp));
+		assert!(rc.root_drawables_zsorted.contains(&InoxNodeUuid(13)));
+	}
+
+	#[test]
+	fn draw_handles_cyclic_missing_and_composite_masks_without_panicking() {
+		let mut puppet = Puppet::new_empty("MaskGuardTest");
+		let root = puppet.nodes.root_node_id;
+		let comp = InoxNodeUuid(20);
+		puppet.nodes.add(
+			root,
+			comp,
+			InoxNode {
+				uuid: comp,
+				name: "Comp".to_owned(),
+				enabled: true,
+				zsort: 0.0,
+				trans_offset: TransformOffset::default(),
+				lock_to_root: false,
+			},
+		);
+		puppet.node_comps.add(
+			comp,
+			Drawable {
+				blending: Blending {
+					mode: BlendMode::Normal,
+					tint: Vec3::ONE,
+					screen_tint: Vec3::ZERO,
+					opacity: 1.0,
+				},
+				masks: None,
+			},
+		);
+		puppet.node_comps.add(comp, Composite {});
+
+		make_part_node(
+			&mut puppet,
+			root,
+			21,
+			"PartA",
+			Some(Masks {
+				threshold: 0.5,
+				masks: vec![
+					Mask {
+						source: InoxNodeUuid(22),
+						mode: MaskMode::Mask,
+					},
+					Mask {
+						source: InoxNodeUuid(9999),
+						mode: MaskMode::Mask,
+					},
+					Mask {
+						source: comp,
+						mode: MaskMode::Mask,
+					},
+				],
+			}),
+		);
+		make_part_node(
+			&mut puppet,
+			root,
+			22,
+			"PartB",
+			Some(Masks {
+				threshold: 0.5,
+				masks: vec![Mask {
+					source: InoxNodeUuid(21),
+					mode: MaskMode::Mask,
+				}],
+			}),
+		);
+
+		puppet.init_all();
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+
+		let renderer = CountingRenderer {
+			drawn: RefCell::new(Vec::new()),
+		};
+		renderer.draw(&puppet);
+		assert!(!renderer.drawn.borrow().is_empty());
 	}
 }

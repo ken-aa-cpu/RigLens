@@ -180,8 +180,9 @@ pub fn analyze_anatomy(puppet: &mut Puppet) -> JsonValue {
 	eval_puppet_at(puppet, &HashMap::new());
 	let face_id = find_face_node(puppet);
 
-	let (face_mn, face_mx, face_name) = if let Some(fid) = face_id {
-		let (pts, _, _) = world_vertices_for_node(puppet, fid, false).unwrap();
+	let (face_mn, face_mx, face_name) = if let Some((fid, (pts, _, _))) =
+		face_id.and_then(|fid| world_vertices_for_node(puppet, fid, false).map(|w| (fid, w)))
+	{
 		let (mn, mx) = bbox_of(&pts);
 		let name = puppet
 			.nodes
@@ -275,7 +276,9 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 		.nodes
 		.pre_order_iter()
 		.filter_map(|n| {
-			if n.enabled && puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some() {
+			if puppet.nodes.is_effectively_enabled(n.uuid)
+				&& puppet.node_comps.get::<TexturedMesh>(n.uuid).is_some()
+			{
 				Some((n.uuid, n.name.trim_end_matches('\0').to_owned()))
 			} else {
 				None
@@ -295,7 +298,12 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 		if let Some((verts, indices, _)) = world_vertices_for_node(puppet, id, false) {
 			let mut tri_areas = Vec::with_capacity(indices.len() / 3);
 			for tri in indices.chunks_exact(3) {
-				let a = tri_signed_area(verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]);
+				let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+				let a = if i0 < verts.len() && i1 < verts.len() && i2 < verts.len() {
+					tri_signed_area(verts[i0], verts[i1], verts[i2])
+				} else {
+					0.0
+				};
 				tri_areas.push(a);
 			}
 			if let Some((nverts, _, _)) = world_vertices_for_node(puppet, id, true) {
@@ -306,6 +314,9 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 						continue;
 					}
 					let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+					if i0 >= nverts.len() || i1 >= nverts.len() || i2 >= nverts.len() {
+						continue;
+					}
 					let na = tri_signed_area(nverts[i0], nverts[i1], nverts[i2]);
 					if na * ra >= 0.0 && na.abs() < ra.abs() * 0.025 {
 						set.insert(ti);
@@ -431,6 +442,15 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 
 			for (ti, tri) in rest.indices.chunks_exact(3).enumerate() {
 				let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+				if i0 >= verts.len()
+					|| i1 >= verts.len()
+					|| i2 >= verts.len()
+					|| i0 >= rest.verts.len()
+					|| i1 >= rest.verts.len()
+					|| i2 >= rest.verts.len()
+				{
+					continue;
+				}
 				let ra = rest.tri_areas[ti];
 				if ra.abs() < 1e-4 {
 					continue;
@@ -558,7 +578,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 	// Check 7: Deformer structural integrity (GridDeformer / PathDeformer / MeshGroup)
 	let mut deformer_issues: Vec<JsonValue> = Vec::new();
 	for node in puppet.nodes.pre_order_iter() {
-		if !node.enabled {
+		if !puppet.nodes.is_effectively_enabled(node.uuid) {
 			continue;
 		}
 		if let Some(grid) = puppet.node_comps.get::<GridDeformer>(node.uuid) {
@@ -749,7 +769,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 
 	// Deformers with zero direct parameter bindings have no effect
 	for node in puppet.nodes.pre_order_iter() {
-		if !node.enabled {
+		if !puppet.nodes.is_effectively_enabled(node.uuid) {
 			continue;
 		}
 		let is_deformer = puppet.node_comps.get::<GridDeformer>(node.uuid).is_some()
@@ -800,7 +820,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 	}
 	let mut drawable_z: Vec<DrawableZInfo> = Vec::new();
 	for node in puppet.nodes.pre_order_iter() {
-		if !node.enabled || puppet.node_comps.get::<Drawable>(node.uuid).is_none() {
+		if !puppet.nodes.is_effectively_enabled(node.uuid) || puppet.node_comps.get::<Drawable>(node.uuid).is_none() {
 			continue;
 		}
 		if let Some((pts, _, _)) = world_vertices_for_node(puppet, node.uuid, false) {
@@ -1042,7 +1062,7 @@ pub fn audit_rig(model: &mut Model) -> JsonValue {
 fn has_deformable_descendant(puppet: &Puppet, root: InoxNodeUuid) -> bool {
 	puppet.nodes.pre_order_iter().any(|n| {
 		n.uuid != root
-			&& n.enabled
+			&& puppet.nodes.is_effectively_enabled(n.uuid)
 			&& puppet.nodes.is_descendant(n.uuid, root)
 			&& (puppet.node_comps.get::<Mesh>(n.uuid).is_some()
 				|| puppet.node_comps.get::<Drawable>(n.uuid).is_some()
@@ -1304,26 +1324,63 @@ pub fn auto_fix_puppet(puppet: &mut Puppet) -> JsonValue {
 	}
 
 	// Fix 3: Auto-attach clipping masks for unmasked iris/pupil/tongue parts
-	let mut eye_l_id = None;
-	let mut eye_r_id = None;
+	let mut eye_l: Option<(InoxNodeUuid, u8)> = None;
+	let mut eye_r: Option<(InoxNodeUuid, u8)> = None;
 	let mut mouth_id = None;
 	let mut candidates = Vec::new();
 	for node in puppet.nodes.iter() {
-		match FeatureRole::from_name(&node.name) {
-			FeatureRole::EyeLeft => eye_l_id = Some(node.uuid),
-			FeatureRole::EyeRight => eye_r_id = Some(node.uuid),
-			FeatureRole::Mouth => mouth_id = Some(node.uuid),
-			FeatureRole::PupilOrIris | FeatureRole::Tongue => {
-				candidates.push((node.uuid, node.name.trim_end_matches('\0').to_owned()))
+		let lower = node.name.trim_end_matches('\0').to_lowercase();
+		let role = FeatureRole::from_name(&node.name);
+		let is_drawable_part =
+			puppet.node_comps.get::<Drawable>(node.uuid).is_some() && puppet.node_comps.get::<Mesh>(node.uuid).is_some();
+
+		if is_drawable_part {
+			let is_sclera = lower.contains("white")
+				|| lower.contains("sclera")
+				|| lower.contains("eyeball")
+				|| lower.contains("白目")
+				|| lower.contains("白眼")
+				|| lower.contains("眼白");
+			let is_lash_or_lid = lower.contains("lash") || lower.contains("eyelid") || lower.contains("睫");
+			if is_sclera || matches!(role, FeatureRole::EyeLeft | FeatureRole::EyeRight) {
+				let prio = if is_sclera {
+					3
+				} else if !is_lash_or_lid {
+					2
+				} else {
+					1
+				};
+				match crate::rig::detect_side_with_ancestors(puppet, node.uuid, &lower) {
+					Some(false) => {
+						if eye_l.map_or(true, |(_, p)| prio > p) {
+							eye_l = Some((node.uuid, prio));
+						}
+					}
+					Some(true) => {
+						if eye_r.map_or(true, |(_, p)| prio > p) {
+							eye_r = Some((node.uuid, prio));
+						}
+					}
+					None => {}
+				}
 			}
-			_ => {}
+			if role == FeatureRole::Mouth {
+				mouth_id = Some(node.uuid);
+			}
+		}
+
+		if matches!(role, FeatureRole::PupilOrIris | FeatureRole::Tongue) {
+			candidates.push((node.uuid, node.name.trim_end_matches('\0').to_owned()));
 		}
 	}
+	let eye_l_id = eye_l.map(|(id, _)| id);
+	let eye_r_id = eye_r.map(|(id, _)| id);
 	for (cid, cname) in candidates {
 		let role = FeatureRole::from_name(&cname);
+		let side = crate::rig::detect_side_with_ancestors(puppet, cid, &cname.to_lowercase());
 		let target_mask = if role == FeatureRole::Tongue {
 			mouth_id
-		} else if cname.to_lowercase().contains("_r") || cname.contains("右") {
+		} else if side == Some(true) {
 			eye_r_id.or(eye_l_id)
 		} else {
 			eye_l_id.or(eye_r_id)

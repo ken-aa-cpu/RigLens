@@ -49,22 +49,22 @@ impl StudioTool {
 		]
 	}
 
-	pub fn tooltip(self) -> &'static str {
+	pub fn tooltip_key(self) -> &'static str {
 		match self {
-			StudioTool::Select => "Select / Move / Scale Part (V)",
-			StudioTool::VertexSubselect => "Vertex Subselection & Topology Edit (A)",
-			StudioTool::DeformBrush => "Gaussian Soft Deform Brush (D)",
-			StudioTool::Pose25D => "Pose 2.5D Head & Gaze on Stage (P)",
-			StudioTool::Delaunay => "Rebuild Delaunay Contour Mesh (M)",
-			StudioTool::MeshGroup => "Wrap Part in MeshGroup Cage (G)",
-			StudioTool::Physics => "Physics Pendulum Gizmo & Tuning (S)",
-			StudioTool::HandPan => "Pan Stage View (H)",
-			StudioTool::ZoomFit => "Reset & Fit Stage Zoom (Z)",
+			StudioTool::Select => "tool.select",
+			StudioTool::VertexSubselect => "tool.vertex",
+			StudioTool::DeformBrush => "tool.brush",
+			StudioTool::Pose25D => "tool.pose25d",
+			StudioTool::Delaunay => "tool.delaunay",
+			StudioTool::MeshGroup => "tool.meshgroup",
+			StudioTool::Physics => "tool.physics",
+			StudioTool::HandPan => "tool.pan",
+			StudioTool::ZoomFit => "tool.zoom_fit",
 		}
 	}
 }
 
-pub fn draw_tool_button(ui: &mut Ui, tool: StudioTool, active: bool) -> bool {
+pub fn draw_tool_button(ui: &mut Ui, tool: StudioTool, active: bool, tooltip: &str) -> bool {
 	let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 28.0), Sense::click());
 	let painter = ui.painter();
 
@@ -153,7 +153,7 @@ pub fn draw_tool_button(ui: &mut Ui, tool: StudioTool, active: bool) -> bool {
 		}
 	}
 
-	resp.on_hover_text(tool.tooltip()).clicked()
+	resp.on_hover_text(tooltip).clicked()
 }
 
 pub fn draw_transport_play(painter: &Painter, rect: Rect, playing: bool, fg: Color32) {

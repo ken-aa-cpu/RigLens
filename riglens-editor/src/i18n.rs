@@ -157,4 +157,20 @@ mod tests {
 
 		let _ = fs::remove_dir_all(&tmp);
 	}
+
+	#[test]
+	fn builtin_locales_have_100_percent_key_parity() {
+		use std::collections::BTreeSet;
+		let i18n = I18n::new("en");
+		let en_keys: BTreeSet<&str> = i18n.tables["en"].entries.keys().map(String::as_str).collect();
+		for lang in ["zh-TW", "ja"] {
+			let keys: BTreeSet<&str> = i18n.tables[lang].entries.keys().map(String::as_str).collect();
+			let missing: Vec<_> = en_keys.difference(&keys).copied().collect();
+			let extra: Vec<_> = keys.difference(&en_keys).copied().collect();
+			assert!(
+				missing.is_empty() && extra.is_empty(),
+				"Locale '{lang}' key mismatch: missing={missing:?}, extra={extra:?}"
+			);
+		}
+	}
 }

@@ -113,7 +113,10 @@ pub struct OpenglRenderer {
 	cache: RefCell<GlCache>,
 
 	vao: glow::VertexArray,
+	vert_buffer: glow::Buffer,
+	uv_buffer: glow::Buffer,
 	deform_buffer: glow::Buffer,
+	index_buffer: glow::Buffer,
 
 	composite_framebuffer: glow::Framebuffer,
 	cf_albedo: glow::Texture,
@@ -160,12 +163,12 @@ impl OpenglRenderer {
 			gl.bind_vertex_array(Some(vao));
 
 			let verts = inox_buffers.vertex_buffers.verts.as_slice();
-			upload_array_to_gl(&gl, verts, glow::ARRAY_BUFFER, glow::STATIC_DRAW)?;
+			let vert_buffer = upload_array_to_gl(&gl, verts, glow::ARRAY_BUFFER, glow::STATIC_DRAW)?;
 			gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 0, 0);
 			gl.enable_vertex_attrib_array(0);
 
 			let uvs = inox_buffers.vertex_buffers.uvs.as_slice();
-			upload_array_to_gl(&gl, uvs, glow::ARRAY_BUFFER, glow::STATIC_DRAW)?;
+			let uv_buffer = upload_array_to_gl(&gl, uvs, glow::ARRAY_BUFFER, glow::STATIC_DRAW)?;
 			gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 0, 0);
 			gl.enable_vertex_attrib_array(1);
 
@@ -175,7 +178,7 @@ impl OpenglRenderer {
 			gl.enable_vertex_attrib_array(2);
 
 			let indices = inox_buffers.vertex_buffers.indices.as_slice();
-			upload_array_to_gl(&gl, indices, glow::ELEMENT_ARRAY_BUFFER, glow::STATIC_DRAW)?;
+			let index_buffer = upload_array_to_gl(&gl, indices, glow::ELEMENT_ARRAY_BUFFER, glow::STATIC_DRAW)?;
 
 			gl.bind_vertex_array(None);
 
@@ -197,7 +200,10 @@ impl OpenglRenderer {
 				cache: RefCell::new(GlCache::default()),
 
 				vao,
+				vert_buffer,
+				uv_buffer,
 				deform_buffer,
+				index_buffer,
 
 				composite_framebuffer,
 				cf_albedo,
@@ -353,9 +359,15 @@ impl OpenglRenderer {
 		}
 
 		let gl = &self.gl;
-		self.textures[part.tex_albedo.raw()].bind_on(gl, 0);
-		self.textures[part.tex_bumpmap.raw()].bind_on(gl, 1);
-		self.textures[part.tex_emissive.raw()].bind_on(gl, 2);
+		if let Some(tex) = self.textures.get(part.tex_albedo.raw()) {
+			tex.bind_on(gl, 0);
+		}
+		if let Some(tex) = self.textures.get(part.tex_bumpmap.raw()) {
+			tex.bind_on(gl, 1);
+		}
+		if let Some(tex) = self.textures.get(part.tex_emissive.raw()) {
+			tex.bind_on(gl, 2);
+		}
 	}
 
 	/// Clear the texture cache
@@ -445,13 +457,24 @@ impl OpenglRenderer {
 		unsafe {
 			gl.bind_vertex_array(None);
 			gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+			gl.use_program(None);
 			gl.delete_vertex_array(self.vao);
+			gl.delete_buffer(self.vert_buffer);
+			gl.delete_buffer(self.uv_buffer);
 			gl.delete_buffer(self.deform_buffer);
+			gl.delete_buffer(self.index_buffer);
 			gl.delete_framebuffer(self.composite_framebuffer);
 			gl.delete_texture(self.cf_albedo);
 			gl.delete_texture(self.cf_emissive);
 			gl.delete_texture(self.cf_bump);
 			gl.delete_texture(self.cf_stencil);
+			gl.delete_program(*self.part_shader);
+			gl.delete_program(*self.part_mask_shader);
+			gl.delete_program(*self.composite_shader);
+			gl.delete_program(*self.composite_mask_shader);
+		}
+		for tex in self.textures {
+			tex.delete(gl);
 		}
 		self.gl
 	}
@@ -633,13 +656,9 @@ impl InoxRenderer for OpenglRenderer {
 
 		let blending = &components.drawable.blending;
 		if as_mask {
-			/*
-			cShaderMask.use();
-			cShaderMask.setUniform(mopacity, opacity);
-			cShaderMask.setUniform(mthreshold, threshold);
-			glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-			*/
-			todo!()
+			tracing::warn!("Composite used as mask is not supported in OpenglRenderer; skipping mask draw.");
+			self.pop_debug_group();
+			return;
 		} else {
 			unsafe {
 				gl.active_texture(glow::TEXTURE0);

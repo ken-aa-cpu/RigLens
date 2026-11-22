@@ -20,6 +20,7 @@ pub struct ProjectSummary {
 	pub name: String,
 	pub root_dir: PathBuf,
 	pub working_inp: Option<PathBuf>,
+	pub vault_psd: Option<PathBuf>,
 	pub has_vault_psd: bool,
 }
 
@@ -41,6 +42,36 @@ pub fn default_projects_root() -> PathBuf {
 	PathBuf::from("RigLensProjects")
 }
 
+fn is_windows_reserved_name(name: &str) -> bool {
+	let upper = name.to_ascii_uppercase();
+	let base = upper.split('.').next().unwrap_or("");
+	matches!(
+		base,
+		"CON"
+			| "PRN"
+			| "AUX"
+			| "NUL"
+			| "COM1"
+			| "COM2"
+			| "COM3"
+			| "COM4"
+			| "COM5"
+			| "COM6"
+			| "COM7"
+			| "COM8"
+			| "COM9"
+			| "LPT1"
+			| "LPT2"
+			| "LPT3"
+			| "LPT4"
+			| "LPT5"
+			| "LPT6"
+			| "LPT7"
+			| "LPT8"
+			| "LPT9"
+	)
+}
+
 fn sanitize_project_name(raw: &str) -> String {
 	let cleaned: String = raw
 		.chars()
@@ -52,9 +83,13 @@ fn sanitize_project_name(raw: &str) -> String {
 			}
 		})
 		.collect();
-	let trimmed = cleaned.trim();
+	let trimmed = cleaned
+		.trim()
+		.trim_end_matches(|c: char| c == '.' || c.is_whitespace());
 	if trimmed.is_empty() {
 		"Untitled_Project".to_owned()
+	} else if is_windows_reserved_name(trimmed) {
+		format!("_{trimmed}")
 	} else {
 		trimmed.to_owned()
 	}
@@ -124,27 +159,27 @@ pub fn list_projects(projects_root: &Path) -> Vec<ProjectSummary> {
 			.and_then(|s| s.to_str())
 			.unwrap_or("Project")
 			.to_owned();
-		let working_inp = fs::read_dir(&prod).ok().and_then(|rd| {
+		let preferred_inp = prod.join(format!("{name}.inp"));
+		let working_inp = if preferred_inp.is_file() {
+			Some(preferred_inp)
+		} else {
+			fs::read_dir(&prod).ok().and_then(|rd| {
+				rd.flatten()
+					.map(|e| e.path())
+					.find(|p| p.extension().and_then(|e| e.to_str()).map(|s| s.eq_ignore_ascii_case("inp")).unwrap_or(false))
+			})
+		};
+		let vault_psd = fs::read_dir(&vault).ok().and_then(|rd| {
 			rd.flatten()
 				.map(|e| e.path())
-				.find(|p| p.extension().and_then(|e| e.to_str()).map(|s| s.eq_ignore_ascii_case("inp")).unwrap_or(false))
+				.find(|p| p.extension().and_then(|ext| ext.to_str()).map(|s| s.eq_ignore_ascii_case("psd")).unwrap_or(false))
 		});
-		let has_vault_psd = fs::read_dir(&vault)
-			.ok()
-			.map(|rd| {
-				rd.flatten().any(|e| {
-					e.path()
-						.extension()
-						.and_then(|ext| ext.to_str())
-						.map(|s| s.eq_ignore_ascii_case("psd"))
-						.unwrap_or(false)
-				})
-			})
-			.unwrap_or(false);
+		let has_vault_psd = vault_psd.is_some();
 		out.push(ProjectSummary {
 			name,
 			root_dir: path,
 			working_inp,
+			vault_psd,
 			has_vault_psd,
 		});
 	}
@@ -195,7 +230,11 @@ mod tests {
 
 		let list = list_projects(&root);
 		assert_eq!(list.len(), 2);
-		assert!(list.iter().all(|p| p.has_vault_psd));
+		assert!(list.iter().all(|p| p.has_vault_psd && p.vault_psd.is_some()));
+
+		assert_eq!(sanitize_project_name("CON"), "_CON");
+		assert_eq!(sanitize_project_name("aux. "), "_aux");
+		assert_eq!(sanitize_project_name("hero. "), "hero");
 
 		let _ = fs::remove_dir_all(&tmp);
 	}

@@ -1354,3 +1354,70 @@ fn brush_modes_and_synthesize_corners_work_deterministically() {
 		.unwrap();
 	assert!(weld["welded_pairs"].as_usize().unwrap_or(0) > 0);
 }
+
+#[test]
+fn node_remove_cleans_dangling_masks_and_deformer_validates_before_mutating() {
+	let mut session = Session::new_sample();
+	let eye_id = session
+		.model
+		.puppet
+		.nodes
+		.iter()
+		.find(|n| n.name == "Eye_L")
+		.unwrap()
+		.uuid;
+	let mouth_id = session
+		.model
+		.puppet
+		.nodes
+		.iter()
+		.find(|n| n.name == "Mouth")
+		.unwrap()
+		.uuid;
+
+	session
+		.exec(
+			"node.set_mask",
+			&json::object! {
+				node_uuid: mouth_id.0,
+				sources: [{ uuid: eye_id.0, mode: "Mask" }]
+			},
+		)
+		.unwrap();
+	assert!(
+		session
+			.model
+			.puppet
+			.node_comps
+			.get::<riglens_core::node::components::Drawable>(mouth_id)
+			.unwrap()
+			.masks
+			.is_some()
+	);
+
+	// Removing Eye_L must clean Mouth's dangling mask reference
+	session
+		.exec("node.remove", &json::object! { node_uuid: eye_id.0 })
+		.unwrap();
+	assert!(
+		session
+			.model
+			.puppet
+			.node_comps
+			.get::<riglens_core::node::components::Drawable>(mouth_id)
+			.unwrap()
+			.masks
+			.is_none(),
+		"dangling Drawable.masks must be cleared when mask source is removed"
+	);
+
+	// Attempting to wrap Root inside a GridDeformer must fail BEFORE creating any deformer node
+	let before_count = session.model.puppet.nodes.iter().count();
+	let root_id = session.model.puppet.nodes.root_node_id;
+	let res = session.exec(
+		"node.add_grid_deformer",
+		&json::object! { name: "BadGrid", children: [root_id.0], cols: 2, rows: 2 },
+	);
+	assert!(res.is_err());
+	assert_eq!(session.model.puppet.nodes.iter().count(), before_count);
+}

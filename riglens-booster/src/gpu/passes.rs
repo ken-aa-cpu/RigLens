@@ -204,6 +204,14 @@ impl GpuFrameProcessor {
 		self.soft_body.step(motion, safe_dt);
 		let amb = self.ambient.sample();
 		let (out_w, out_h) = self.output_dimensions(w, h);
+		let max_dim = self.device.limits().max_texture_dimension_2d;
+		if w > max_dim || h > max_dim || out_w > max_dim || out_h > max_dim {
+			return Err(GpuError::DimensionsExceedLimit {
+				width: w.max(out_w),
+				height: h.max(out_h),
+				max: max_dim,
+			});
+		}
 		let use_upscale = out_w != w || out_h != h;
 		let mult = self.config.frame_gen_multiplier.clamp(1, 4);
 

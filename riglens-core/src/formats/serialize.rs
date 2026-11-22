@@ -369,6 +369,7 @@ fn serialize_node(puppet: &Puppet, id: InoxNodeUuid) -> JsonValue {
 				);
 				obj.insert("formation", JsonValue::String(g.formation.as_str().to_owned()));
 				obj.insert("dynamic", JsonValue::Boolean(g.dynamic));
+				obj.insert("translate_children", JsonValue::Boolean(g.translate_children));
 			}
 		}
 		"PathDeformer" => {
@@ -501,6 +502,9 @@ fn serialize_param(p: &Param) -> JsonValue {
 		]),
 	);
 	obj.insert("merge_mode", JsonValue::String("Additive".to_owned()));
+	if p.additive {
+		obj.insert("blend_shape_additive", JsonValue::Boolean(true));
+	}
 	obj.insert(
 		"bindings",
 		JsonValue::Array(p.bindings.iter().map(serialize_binding).collect()),
@@ -591,6 +595,24 @@ impl Puppet {
 		}
 		if obj.get("groups").is_none() {
 			obj.insert("groups", JsonValue::Array(Vec::new()));
+		}
+
+		if !self.pose_groups.is_empty() {
+			let pgs = self
+				.pose_groups
+				.iter()
+				.map(|pg| {
+					let mut pobj = Object::new();
+					pobj.insert("id", JsonValue::String(pg.id.clone()));
+					pobj.insert(
+						"parts",
+						JsonValue::Array(pg.parts.iter().map(|id| JsonValue::from(id.0)).collect()),
+					);
+					pobj.insert("fade_seconds", JsonValue::from(pg.fade_seconds));
+					JsonValue::Object(pobj)
+				})
+				.collect();
+			obj.insert("pose_groups", JsonValue::Array(pgs));
 		}
 
 		if !self.animations.is_empty() {

@@ -391,7 +391,8 @@ pub fn generate_delaunay_mesh_with_options(
 	let h64 = height as f64;
 	let sx = (w64 / iw as f64).max(0.01);
 	let sy = (h64 / ih as f64).max(0.01);
-	let spacing = (opts.step_px.clamp(4.0, 256.0) as f64) * ((sx + sy) * 0.5);
+	let step = if opts.step_px.is_finite() { opts.step_px } else { 24.0 };
+	let spacing = (step.clamp(4.0, 256.0) as f64) * ((sx + sy) * 0.5);
 
 	let grid_to_local = |vx: usize, vy: usize| -> DelaunayPt {
 		DelaunayPt {

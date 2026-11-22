@@ -11,8 +11,9 @@
 > See [NOTICE](NOTICE) for attribution. All third-party names are used only to describe file-format compatibility.
 
 > [!WARNING]
-> **Status: early / experimental.** Large parts of this code base were written with AI assistance and are not yet battle-tested.
-> Compatibility with files produced by other editors is verified only where stated below. Back up your work.
+> **Status: Experimental Preview / 實驗版.** Large parts of this code base were written with AI assistance and are still undergoing active testing and polish.
+> Compatibility with files produced by other editors is verified only where stated below. Back up your work (or use Protected Project Mode).
+> **遇到問題、Bug 或手感建議，請不要吝嗇你的反饋！** Experimental preview — please don't hesitate to share feedback or open an [Issue](https://github.com/ken-aa-cpu/RigLens/issues), and read the **[RigLens Wiki](https://github.com/ken-aa-cpu/RigLens/wiki)** for guides and troubleshooting.
 
 ---
 

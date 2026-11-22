@@ -10,7 +10,7 @@ use riglens_core::node::components::{GridDeformer, Mesh, PathDeformer, Transform
 use riglens_core::node::InoxNodeUuid;
 use riglens_core::render::TexturedMeshRenderCtx;
 use riglens_core::texture::decode_model_textures;
-use riglens_mcp::headless_render::{render_diagnostic, render_frame_with_textures, RenderOptions};
+use riglens_mcp::headless_render::{render_diagnostic_with_camera, render_frame_with_textures, RenderOptions};
 use riglens_booster::gpu::ambient::AmbientTheme;
 use riglens_booster::gpu::{GpuEffectsConfig, GpuFrameProcessor};
 use riglens_booster::physics::MotionHint;
@@ -126,12 +126,26 @@ impl Inox2dStudioApp {
 			return;
 		}
 		let decoded = decode_model_textures(self.session.model.textures.iter());
+		let straight_alpha = if self
+			.session
+			.model
+			.puppet
+			.top_extras
+			.get("riglens_alpha")
+			.and_then(|v| v.as_str())
+			== Some("straight")
+		{
+			Some(true)
+		} else {
+			None
+		};
 		let inputs: Vec<StageTextureInput> = decoded
 			.iter()
 			.map(|tex| StageTextureInput {
 				width: tex.width(),
 				height: tex.height(),
 				pixels: tex.pixels().to_vec(),
+				straight_alpha,
 			})
 			.collect();
 		self.gl_textures = Arc::new(inputs);
@@ -194,7 +208,14 @@ impl Inox2dStudioApp {
 		let render_cam_pos = -self.puppet_center + gvec2(self.view_pan.x / eff, self.view_pan.y / eff);
 
 		if self.xray_mode {
-			if let Ok(img) = render_diagnostic(&mut self.session.model, &pmap, render_w, render_h, eff * (render_w as f32 / vp_w)) {
+			if let Ok(img) = render_diagnostic_with_camera(
+				&mut self.session.model,
+				&pmap,
+				render_w,
+				render_h,
+				render_scale,
+				render_cam_pos,
+			) {
 				let (w, h) = img.dimensions();
 				let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
 				if let Some(tex) = self.stage_tex.as_mut() {
@@ -485,6 +506,9 @@ impl Inox2dStudioApp {
 		let ny = (p.y - canvas_rect.top()) / canvas_rect.height().max(1.0);
 		let ndc = Vec4::new(nx * 2.0 - 1.0, (0.5 - ny) * 2.0, 0.0, 1.0);
 		let inv = (self.mvp_cam() * tstore.absolute).inverse();
+		if !inv.is_finite() {
+			return None;
+		}
 		let local = inv * ndc;
 		Some(gvec2(local.x + origin.x, local.y + origin.y))
 	}

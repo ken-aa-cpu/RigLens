@@ -10,7 +10,16 @@ use crate::{Inox2dStudioApp, WorkspaceMode};
 
 impl Inox2dStudioApp {
 	pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-		if self.file_dialog.is_some() || ctx.wants_keyboard_input() {
+		if self.show_welcome {
+			return;
+		}
+		if self.cmd_palette_open {
+			if ctx.input(|i| i.key_pressed(Key::Escape)) {
+				self.cmd_palette_open = false;
+			}
+			return;
+		}
+		if ctx.wants_keyboard_input() {
 			return;
 		}
 		let ctrl_o = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::O));
@@ -20,11 +29,7 @@ impl Inox2dStudioApp {
 		}
 		let ctrl_s = ctx.input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(Key::S));
 		if ctrl_s {
-			if let Some(p) = self.watch_path.clone().or_else(|| self.source_path.clone()) {
-				self.save_model_to_path(&p);
-			} else {
-				self.open_file_dialog(FileDialogMode::SaveInpAs);
-			}
+			self.save_or_prompt_save_as();
 			return;
 		}
 		let cmd_k = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::K));
@@ -58,6 +63,7 @@ impl Inox2dStudioApp {
 		}
 
 		// Brush size [ / ]
+		let is_pro = self.workspace_mode == WorkspaceMode::Pro;
 		ctx.input(|i| {
 			if i.key_pressed(Key::OpenBracket) {
 				self.brush_radius_ratio = (self.brush_radius_ratio - 0.08).clamp(0.12, 1.5);
@@ -65,17 +71,17 @@ impl Inox2dStudioApp {
 				self.brush_radius_ratio = (self.brush_radius_ratio + 0.08).clamp(0.12, 1.5);
 			} else if i.key_pressed(Key::V) {
 				self.tool = StudioTool::Select;
-			} else if i.key_pressed(Key::A) {
+			} else if is_pro && i.key_pressed(Key::A) {
 				self.tool = StudioTool::VertexSubselect;
 			} else if i.key_pressed(Key::D) {
 				self.tool = StudioTool::DeformBrush;
 			} else if i.key_pressed(Key::P) {
 				self.tool = StudioTool::Pose25D;
-			} else if i.key_pressed(Key::M) {
+			} else if is_pro && i.key_pressed(Key::M) {
 				self.tool = StudioTool::Delaunay;
-			} else if i.key_pressed(Key::G) {
+			} else if is_pro && i.key_pressed(Key::G) {
 				self.tool = StudioTool::MeshGroup;
-			} else if i.key_pressed(Key::S) {
+			} else if is_pro && i.key_pressed(Key::S) {
 				self.tool = StudioTool::Physics;
 			} else if i.key_pressed(Key::H) {
 				self.tool = StudioTool::HandPan;
@@ -85,7 +91,6 @@ impl Inox2dStudioApp {
 			} else if i.key_pressed(Key::Space) {
 				self.playing = !self.playing;
 			} else if i.key_pressed(Key::Escape) {
-				self.cmd_palette_open = false;
 				self.selected_vertices.clear();
 			}
 		});
@@ -120,12 +125,7 @@ impl Inox2dStudioApp {
 					self.begin_gesture_undo();
 					match self.vertex_mode {
 						VertexEditMode::DeformKeypoint => {
-							let pval = self
-								.session
-								.param_overrides
-								.get(&self.brush_param)
-								.copied()
-								.unwrap_or(GVec2::ZERO);
+							let pval = self.active_param_value(&self.brush_param);
 							let _ = apply_vertex_deform_delta(
 								&mut self.session.model.puppet,
 								id,

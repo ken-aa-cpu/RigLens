@@ -22,20 +22,46 @@ pub(crate) fn compile(gl: &glow::Context, vertex: &str, fragment: &str) -> Resul
 			),
 		);
 
-		let shader = gl.create_shader(glow::VERTEX_SHADER).map_err(ShaderCompileError)?;
-		gl.shader_source(shader, vertex);
-		gl.compile_shader(shader);
-		verify_shader(gl, shader)?;
-		gl.attach_shader(program, shader);
+		let vs = gl.create_shader(glow::VERTEX_SHADER).map_err(|e| {
+			gl.delete_program(program);
+			ShaderCompileError(e)
+		})?;
+		gl.shader_source(vs, vertex);
+		gl.compile_shader(vs);
+		if let Err(e) = verify_shader(gl, vs) {
+			gl.delete_shader(vs);
+			gl.delete_program(program);
+			return Err(e);
+		}
+		gl.attach_shader(program, vs);
 
-		let shader = gl.create_shader(glow::FRAGMENT_SHADER).map_err(ShaderCompileError)?;
-		gl.shader_source(shader, fragment);
-		gl.compile_shader(shader);
-		verify_shader(gl, shader)?;
-		gl.attach_shader(program, shader);
+		let fs = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| {
+			gl.detach_shader(program, vs);
+			gl.delete_shader(vs);
+			gl.delete_program(program);
+			ShaderCompileError(e)
+		})?;
+		gl.shader_source(fs, fragment);
+		gl.compile_shader(fs);
+		if let Err(e) = verify_shader(gl, fs) {
+			gl.delete_shader(fs);
+			gl.detach_shader(program, vs);
+			gl.delete_shader(vs);
+			gl.delete_program(program);
+			return Err(e);
+		}
+		gl.attach_shader(program, fs);
 
 		gl.link_program(program);
-		verify_program(gl, program)?;
+		gl.detach_shader(program, vs);
+		gl.detach_shader(program, fs);
+		gl.delete_shader(vs);
+		gl.delete_shader(fs);
+
+		if let Err(e) = verify_program(gl, program) {
+			gl.delete_program(program);
+			return Err(e);
+		}
 
 		Ok(program)
 	}

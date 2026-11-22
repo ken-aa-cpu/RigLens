@@ -101,6 +101,9 @@ fn lzw_encode_indices(indices: &[u8]) -> Vec<u8> {
 			packer.push(prefix, code_bits);
 			if next_code < 4096 {
 				dict.insert((prefix, k), next_code);
+				// GIF89a LZW uses deferred ("late-change") bit-width increments:
+				// the decoder inserts one step behind the encoder, so `code_bits` bumps
+				// only when `next_code` reaches `2^code_bits` *before* advancing.
 				if next_code == (1u16 << code_bits) && code_bits < 12 {
 					code_bits += 1;
 				}
@@ -125,6 +128,12 @@ pub fn encode_animated_gif<W: Write>(frames: &[RgbaImage], delay_cs: u16, w: &mu
 		return Err(io::Error::new(io::ErrorKind::InvalidInput, "Cannot encode 0 frames"));
 	}
 	let (width, height) = frames[0].dimensions();
+	if width == 0 || height == 0 || width > u16::MAX as u32 || height > u16::MAX as u32 {
+		return Err(io::Error::new(
+			io::ErrorKind::InvalidInput,
+			format!("GIF frame dimensions {width}x{height} out of valid 1..=65535 range"),
+		));
+	}
 	let pal = build_palette();
 
 	// Header & Logical Screen Descriptor
@@ -183,4 +192,125 @@ pub fn encode_animated_gif<W: Write>(frames: &[RgbaImage], delay_cs: u16, w: &mu
 	// GIF Trailer
 	w.write_all(&[0x3B])?;
 	w.flush()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use image::Rgba;
+
+	fn lzw_decode_indices(sub_blocks: &[u8]) -> Vec<u8> {
+		const CLEAR: u16 = 256;
+		const EOI: u16 = 257;
+
+		// Collect packed LZW data bytes from sub-blocks up to 0x00 terminator.
+		let mut data = Vec::new();
+		let mut pos = 0;
+		while pos < sub_blocks.len() {
+			let len = sub_blocks[pos] as usize;
+			pos += 1;
+			if len == 0 {
+				break;
+			}
+			data.extend_from_slice(&sub_blocks[pos..pos + len]);
+			pos += len;
+		}
+
+		let mut bit_pos = 0usize;
+		let read_code = |bit_pos: &mut usize, bits: u8| -> Option<u16> {
+			let mut val = 0u32;
+			for i in 0..bits {
+				let b_idx = (*bit_pos + i as usize) / 8;
+				let b_off = (*bit_pos + i as usize) % 8;
+				if b_idx >= data.len() {
+					return None;
+				}
+				let bit = ((data[b_idx] >> b_off) & 1) as u32;
+				val |= bit << i;
+			}
+			*bit_pos += bits as usize;
+			Some(val as u16)
+		};
+
+		let mut dict: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
+		dict.push(Vec::new()); // 256 CLEAR
+		dict.push(Vec::new()); // 257 EOI
+		let mut code_bits = 9u8;
+		let mut prev: Option<Vec<u8>> = None;
+		let mut out = Vec::new();
+
+		while let Some(code) = read_code(&mut bit_pos, code_bits) {
+			if code == CLEAR {
+				dict.truncate(258);
+				code_bits = 9;
+				prev = None;
+				continue;
+			}
+			if code == EOI {
+				break;
+			}
+			let entry = if (code as usize) < dict.len() {
+				dict[code as usize].clone()
+			} else if code as usize == dict.len() {
+				let mut e = prev.clone().expect("valid LZW KwKwK code");
+				e.push(e[0]);
+				e
+			} else {
+				panic!("invalid LZW code {code} at dict len {} (bits={code_bits})", dict.len());
+			};
+			out.extend_from_slice(&entry);
+			if let Some(p) = &prev {
+				if dict.len() < 4096 {
+					let mut new_entry = p.clone();
+					new_entry.push(entry[0]);
+					dict.push(new_entry);
+					if dict.len() == (1usize << code_bits) && code_bits < 12 {
+						code_bits += 1;
+					}
+				}
+			}
+			prev = Some(entry);
+		}
+		out
+	}
+
+	#[test]
+	fn lzw_encode_handles_width_bumps_across_512_and_1024_cleanly() {
+		// Deterministic pseudo-random pattern over 216+ palette entries to force >1024 dict entries.
+		let w = 64u32;
+		let h = 64u32;
+		let mut img = RgbaImage::new(w, h);
+		let pal = build_palette();
+		let mut expected_indices = Vec::with_capacity((w * h) as usize);
+		for y in 0..h {
+			for x in 0..w {
+				let v = ((x.wrapping_mul(37) ^ y.wrapping_mul(91) ^ (x * y)) & 0xFF) as u8;
+				let px = Rgba([v, v.wrapping_mul(3), v.wrapping_mul(7), 255]);
+				img.put_pixel(x, y, px);
+				expected_indices.push(quantize_rgb(px.0[0], px.0[1], px.0[2], &pal));
+			}
+		}
+
+		let mut buf = Vec::new();
+		encode_animated_gif(&[img], 4, &mut buf).expect("GIF encoding succeeds");
+		assert_eq!(&buf[0..6], b"GIF89a");
+
+		// Locate the Image Descriptor (0x2C) after Header(13) + GCT(768) + Netscape(19) + GCE(8).
+		let img_desc_offset = 13 + 768 + 19 + 8;
+		assert_eq!(buf[img_desc_offset], 0x2C);
+		assert_eq!(buf[img_desc_offset + 10], 8); // min LZW code size = 8
+		let sub_blocks = &buf[img_desc_offset + 11..buf.len() - 1];
+		let decoded = lzw_decode_indices(sub_blocks);
+		assert_eq!(decoded, expected_indices);
+	}
+
+	#[test]
+	fn encode_animated_gif_rejects_invalid_dimensions() {
+		let zero = RgbaImage::new(0, 10);
+		let mut buf = Vec::new();
+		assert!(encode_animated_gif(&[zero], 4, &mut buf).is_err());
+
+		let oversized = RgbaImage::new(u16::MAX as u32 + 1, 1);
+		assert!(encode_animated_gif(&[oversized], 4, &mut buf).is_err());
+	}
 }

@@ -12,12 +12,14 @@ use crate::shaders::{is_gles, StagePrograms};
 /// Shared handle held by `Inox2dStudioApp` for lazy GL resource initialization and cleanup.
 pub type SharedGlStage = Arc<Mutex<Option<StageGlRenderer>>>;
 
-/// Straight-alpha RGBA8 texture payload passed for on-demand GL upload.
+/// Straight-alpha or premultiplied RGBA8 texture payload passed for on-demand GL upload.
 #[derive(Clone)]
 pub struct StageTextureInput {
 	pub width: u32,
 	pub height: u32,
 	pub pixels: Vec<u8>,
+	/// Explicit alpha convention (`Some(true)` = straight alpha, `Some(false)` = premultiplied, `None` = auto-detect).
+	pub straight_alpha: Option<bool>,
 }
 
 struct OffscreenTarget {
@@ -241,17 +243,28 @@ impl StageGlRenderer {
 		}
 		for inp in inputs {
 			if let Ok(tex) = gl.create_texture() {
+				let expected_bytes = (inp.width as usize)
+					.saturating_mul(inp.height as usize)
+					.saturating_mul(4);
+				let valid_dims = inp.width > 0 && inp.height > 0 && inp.pixels.len() >= expected_bytes;
+				let fallback_px = [0u8, 0, 0, 0];
+				let (upload_w, upload_h, raw_pixels): (i32, i32, &[u8]) = if valid_dims {
+					(inp.width as i32, inp.height as i32, &inp.pixels[..expected_bytes])
+				} else {
+					(1, 1, &fallback_px)
+				};
+
 				// Inochi2D .inp/.inx textures are typically premultiplied RGBA8 (rgb <= a everywhere),
-				// whereas synthetic/PSD straight-alpha inputs can have rgb > a on soft edges.
-				// Only premultiply straight-alpha inputs so already-premultiplied .inx soft shadows aren't darkened.
-				let is_straight = inp
-					.pixels
-					.chunks_exact(4)
-					.any(|px| px[3] > 0 && (px[0] > px[3] || px[1] > px[3] || px[2] > px[3]));
+				// whereas synthetic/PSD straight-alpha inputs carry `straight_alpha = Some(true)` or rgb > a.
+				let is_straight = valid_dims
+					&& inp.straight_alpha.unwrap_or_else(|| {
+						raw_pixels
+							.chunks_exact(4)
+							.any(|px| px[3] > 0 && (px[0] > px[3] || px[1] > px[3] || px[2] > px[3]))
+					});
 				let upload_storage: Vec<u8>;
 				let upload_pixels: &[u8] = if is_straight {
-					upload_storage = inp
-						.pixels
+					upload_storage = raw_pixels
 						.chunks_exact(4)
 						.flat_map(|px| {
 							let a = px[3] as u16;
@@ -265,7 +278,7 @@ impl StageGlRenderer {
 						.collect();
 					&upload_storage
 				} else {
-					&inp.pixels
+					raw_pixels
 				};
 				gl.bind_texture(glow::TEXTURE_2D, Some(tex));
 				gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
@@ -286,8 +299,8 @@ impl StageGlRenderer {
 					glow::TEXTURE_2D,
 					0,
 					glow::RGBA8 as i32,
-					inp.width.max(1) as i32,
-					inp.height.max(1) as i32,
+					upload_w,
+					upload_h,
 					0,
 					glow::RGBA,
 					glow::UNSIGNED_BYTE,
@@ -305,6 +318,7 @@ impl StageGlRenderer {
 		if self.geo_key == geo_key {
 			return;
 		}
+		gl.bind_vertex_array(Some(self.mesh_vao));
 		gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo_verts));
 		let vbytes = std::slice::from_raw_parts(
 			geo.verts.as_ptr() as *const u8,

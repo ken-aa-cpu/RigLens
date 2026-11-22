@@ -90,14 +90,15 @@ fn decode_texture(mtex: ModelTexture) -> Result<ShallowTexture, DecodeTextureErr
 pub fn decode_model_textures<'a>(
 	model_textures: impl ExactSizeIterator<Item = &'a ModelTexture>,
 ) -> Vec<ShallowTexture> {
-	(model_textures.cloned())
-		.map(decode_texture)
-		.inspect(|res| {
-			if let Err(e) = res {
+	model_textures
+		.cloned()
+		.map(|texture| match decode_texture(texture) {
+			Ok(decoded) => decoded,
+			Err(e) => {
 				tracing::error!("{}", e);
+				ShallowTexture::from_rgba(1, 1, vec![0, 0, 0, 0])
 			}
 		})
-		.filter_map(Result::ok)
 		.collect::<Vec<_>>()
 }
 
@@ -109,7 +110,9 @@ pub fn decode_model_textures<'a>(
 	use std::sync::mpsc;
 
 	// get number of optimal threads from computer
-	let mut num_threads = std::thread::available_parallelism().unwrap().get();
+	let mut num_threads = std::thread::available_parallelism()
+		.map(|n| n.get())
+		.unwrap_or(2);
 
 	// remove at least one thread to not torture the computer
 	if num_threads > 1 {
@@ -135,10 +138,14 @@ pub fn decode_model_textures<'a>(
 			.spawn(move || {
 				// get textures from the thread-local channel, decode them, and send them to the global channel
 				while let Ok((i, texture)) = rx.recv() {
-					match decode_texture(texture) {
-						Ok(decoded) => tx_all.send((i, decoded)).unwrap(),
-						Err(e) => tracing::error!("{}", e),
-					}
+					let decoded = match decode_texture(texture) {
+						Ok(decoded) => decoded,
+						Err(e) => {
+							tracing::error!("{}", e);
+							ShallowTexture::from_rgba(1, 1, vec![0, 0, 0, 0])
+						}
+					};
+					let _ = tx_all.send((i, decoded));
 				}
 			})
 			.unwrap();
@@ -158,4 +165,39 @@ pub fn decode_model_textures<'a>(
 	decoded.sort_by_key(|&(i, _)| i);
 
 	decoded.into_iter().map(|(_, tex)| tex).collect()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn decode_model_textures_preserves_indices_on_corrupt_texture() {
+		let mut valid_png = Vec::new();
+		let img = image::RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+		img.write_to(&mut io::Cursor::new(&mut valid_png), ImageFormat::Png)
+			.unwrap();
+
+		let textures = vec![
+			ModelTexture {
+				format: ImageFormat::Png,
+				data: valid_png.clone().into(),
+			},
+			ModelTexture {
+				format: ImageFormat::Png,
+				data: vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0x00].into(),
+			},
+			ModelTexture {
+				format: ImageFormat::Png,
+				data: valid_png.into(),
+			},
+		];
+
+		let decoded = decode_model_textures(textures.iter());
+		assert_eq!(decoded.len(), 3);
+		assert_eq!((decoded[0].width(), decoded[0].height()), (2, 2));
+		assert_eq!((decoded[1].width(), decoded[1].height()), (1, 1));
+		assert_eq!(decoded[1].pixels(), &[0, 0, 0, 0]);
+		assert_eq!((decoded[2].width(), decoded[2].height()), (2, 2));
+	}
 }

@@ -314,3 +314,24 @@ fn wgpu_m3_frame_gen_tier2_optical_flow_interpolates_moving_disc() {
 	assert!(old_center[3] < 20, "expected old position (46,64) cleared, got {old_center:?}");
 	assert!(new_center[3] < 20, "expected new position (66,64) cleared, got {new_center:?}");
 }
+
+#[test]
+fn wgpu_rejects_dimensions_above_device_texture_limit() {
+	let cfg = GpuEffectsConfig {
+		enable_soft_body: false,
+		soft_body_zones: Vec::new(),
+		enable_rim_light: false,
+		particle_count: 0,
+		upscale_factor: 2.0,
+		frame_gen_multiplier: 1,
+		..Default::default()
+	};
+	let mut gpu = GpuFrameProcessor::new_blocking(cfg).expect("init wgpu GPU processor");
+	let max_dim = gpu.device.limits().max_texture_dimension_2d;
+	// 1x1 input would pass input check, or construct a tiny valid frame whose 2x upscale exceeds max_dim?
+	// Better: construct FrameBuffer with width = max_dim + 1, height = 1 (without allocating giant buffer via FrameBuffer::new? No, 8K-16K * 4 bytes is only ~64KB!).
+	let over_w = max_dim + 1;
+	let fb = FrameBuffer::new(over_w, 1, PixelFormat::Rgba8, vec![0u8; (over_w * 4) as usize]).unwrap();
+	let err = gpu.process_frame(&fb, &MotionHint::default(), 1.0 / 60.0).unwrap_err();
+	assert!(matches!(err, super::GpuError::DimensionsExceedLimit { .. }));
+}
